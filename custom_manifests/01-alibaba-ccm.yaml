@@ -1,0 +1,177 @@
+---
+# Alibaba Cloud Controller Manager
+# Source: https://github.com/kubernetes/cloud-provider-alibaba-cloud
+# Deployed post-install via: oc apply -f custom_manifests/
+#
+# Authentication: RAM Role bound to ECS instances (Instance Principal).
+# No AccessKey/SecretKey needed. Assign the RAM Role to all nodes via ROS template.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloud-controller-manager
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: system:cloud-controller-manager
+rules:
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch, update]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch, delete, patch, update]
+  - apiGroups: [""]
+    resources: [nodes/status]
+    verbs: [patch]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list, watch, patch, update]
+  - apiGroups: [""]
+    resources: [services/status]
+    verbs: [patch, update]
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [create, get]
+  - apiGroups: [""]
+    resources: [persistentvolumes]
+    verbs: [get, list, watch, update]
+  - apiGroups: [""]
+    resources: [endpoints]
+    verbs: [create, get, list, watch, update]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: system:cloud-controller-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:cloud-controller-manager
+subjects:
+  - kind: ServiceAccount
+    name: cloud-controller-manager
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alibaba-cloud-controller-manager
+  namespace: kube-system
+  labels:
+    k8s-app: alibaba-cloud-controller-manager
+    infrastructure.openshift.io/cloud-controller-manager: AlibabaCloud
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      k8s-app: alibaba-cloud-controller-manager
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        k8s-app: alibaba-cloud-controller-manager
+        infrastructure.openshift.io/cloud-controller-manager: AlibabaCloud
+    spec:
+      priorityClassName: system-cluster-critical
+      serviceAccountName: cloud-controller-manager
+      hostNetwork: true
+      nodeSelector:
+        node-role.kubernetes.io/master: ""
+      tolerations:
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/master
+          operator: Exists
+        - effect: NoExecute
+          key: node.kubernetes.io/unreachable
+          operator: Exists
+          tolerationSeconds: 120
+        - effect: NoExecute
+          key: node.kubernetes.io/not-ready
+          operator: Exists
+          tolerationSeconds: 120
+        - effect: NoSchedule
+          key: node.cloudprovider.kubernetes.io/uninitialized
+          operator: Exists
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  k8s-app: alibaba-cloud-controller-manager
+      containers:
+        - name: cloud-controller-manager
+          # Update this image tag to match your OpenShift version.
+          # See: https://github.com/kubernetes/cloud-provider-alibaba-cloud/releases
+          image: registry.k8s.io/provider-alibaba-cloud/alibaba-cloud-controller-manager:v2.7.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              #!/bin/bash
+              set -o allexport
+              if [[ -f /etc/kubernetes/apiserver-url.env ]]; then
+                source /etc/kubernetes/apiserver-url.env
+              fi
+              exec /bin/alibaba-cloud-controller-manager \
+                --cloud-config=/etc/kubernetes/cloud-config/cloud.conf \
+                --cloud-provider=alibabacloud \
+                --use-service-account-credentials=true \
+                --leader-elect=true \
+                --leader-elect-lease-duration=137s \
+                --leader-elect-renew-deadline=107s \
+                --leader-elect-retry-period=26s \
+                --leader-elect-resource-namespace=kube-system \
+                --secure-port=0 \
+                -v=2
+          resources:
+            requests:
+              cpu: 200m
+              memory: 50Mi
+          terminationMessagePolicy: FallbackToLogsOnError
+          volumeMounts:
+            - mountPath: /etc/kubernetes
+              name: host-etc-kube
+              readOnly: true
+            - mountPath: /etc/kubernetes/cloud-config
+              name: cloud-config
+              readOnly: true
+      volumes:
+        - name: host-etc-kube
+          hostPath:
+            path: /etc/kubernetes
+            type: Directory
+        - name: cloud-config
+          configMap:
+            name: alibaba-cloud-config
+---
+# cloud-config ConfigMap — values injected by ROS template output
+# region, vpcId, vSwitchId are populated from Terraform/ROS outputs
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alibaba-cloud-config
+  namespace: kube-system
+data:
+  cloud.conf: |
+    [Global]
+    region=ALIBABA_REGION
+    vpcid=ALIBABA_VPC_ID
+    zoneid=ALIBABA_ZONE_ID
+    vswitchid=ALIBABA_VSWITCH_ID
+
+    [LoadBalancer]
+    address-type=internet
