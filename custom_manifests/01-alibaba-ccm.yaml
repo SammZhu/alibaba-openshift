@@ -1,7 +1,10 @@
 ---
-# Alibaba Cloud Controller Manager
+# Alibaba Cloud Controller Manager — static resources
 # Source: https://github.com/kubernetes/cloud-provider-alibaba-cloud
-# Deployed post-install via: oc apply -f custom_manifests/
+#
+# Upload this file to Assisted Installer Custom Manifests at install-time (Part 3).
+# The cloud.conf ConfigMap is generated separately by the ROS stack DynamicCustomManifest
+# output — upload that as a second manifest file alongside this one.
 #
 # Authentication: RAM Role bound to ECS instances (Instance Principal).
 # No AccessKey/SecretKey needed. Assign the RAM Role to all nodes via ROS template.
@@ -157,21 +160,3 @@ spec:
         - name: cloud-config
           configMap:
             name: alibaba-cloud-config
----
-# cloud-config ConfigMap — values injected by ROS template output
-# region, vpcId, vSwitchId are populated from Terraform/ROS outputs
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: alibaba-cloud-config
-  namespace: kube-system
-data:
-  cloud.conf: |
-    [Global]
-    region=ALIBABA_REGION
-    vpcid=ALIBABA_VPC_ID
-    zoneid=ALIBABA_ZONE_ID
-    vswitchid=ALIBABA_VSWITCH_ID
-
-    [LoadBalancer]
-    address-type=internet
