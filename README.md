@@ -20,14 +20,13 @@ Part 2: Alibaba Cloud ROS (Resource Orchestration Service)
 
 Part 3: Red Hat Hybrid Cloud Console (Assisted Installer)
   ├── Assign node roles
-  ├── Upload custom_manifests/ content
+  ├── Upload custom_manifests/03-machineconfig-providerid.yaml  # kubelet ProviderID (install-time)
   └── Start installation
 
 Post-install:
   oc apply -f custom_manifests/01-alibaba-ccm.yaml        # Cloud Controller Manager
   oc apply -f custom_manifests/02-capa-crds.yaml          # CAPI CRDs
   oc apply -f custom_manifests/02-capa-controller.yaml    # CAPI Controller (node auto-scaling)
-  oc apply -f custom_manifests/03-machineconfig-providerid.yaml  # kubelet ProviderID
 ```
 
 ## Differences from OCI approach
@@ -74,8 +73,10 @@ Post-install:
 
 1. In Red Hat Hybrid Cloud Console, the discovery agents will appear as nodes are booted
 2. Assign roles: 3 masters + N workers
-3. In **Custom manifests**, upload all files from `custom_manifests/` after replacing
-   placeholder values in `01-alibaba-ccm.yaml` with the ROS output values
+3. In **Custom manifests**, upload the following files:
+   - `custom_manifests/03-machineconfig-providerid.yaml` — **must be uploaded here, not post-install**,
+     so that kubelet ProviderID is set during first boot before the kubelet starts
+   > Note: `01-alibaba-ccm.yaml` requires ROS output values; apply it post-install instead.
 4. Start the installation
 
 ### Post-Installation
@@ -84,12 +85,12 @@ Post-install:
 # Replace placeholder values in CCM config with ROS output values first
 sed -i 's/ALIBABA_REGION/cn-hangzhou/g' custom_manifests/01-alibaba-ccm.yaml
 sed -i 's/ALIBABA_VPC_ID/vpc-xxxxx/g' custom_manifests/01-alibaba-ccm.yaml
-# ... etc
+sed -i 's/ALIBABA_ZONE_ID/cn-hangzhou-h/g' custom_manifests/01-alibaba-ccm.yaml
+sed -i 's/ALIBABA_VSWITCH_ID/vsw-xxxxx/g' custom_manifests/01-alibaba-ccm.yaml
 
 oc apply -f custom_manifests/01-alibaba-ccm.yaml
 oc apply -f custom_manifests/02-capa-crds.yaml
 oc apply -f custom_manifests/02-capa-controller.yaml
-oc apply -f custom_manifests/03-machineconfig-providerid.yaml
 ```
 
 ## Node Auto-Scaling (CAPA)
