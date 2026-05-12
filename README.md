@@ -2,13 +2,17 @@
 
 Installing OpenShift Container Platform on Alibaba Cloud using the **External Platform** approach, modeled after [oracle-quickstart/oci-openshift](https://github.com/oracle-quickstart/oci-openshift).
 
+Supports two installation methods via the same ROS template — choose `InstallationMethod` when creating the stack:
+
 ## Architecture
+
+### Assisted Installer
 
 ```
 Part 1: Red Hat Hybrid Cloud Console
-  └── Generate Discovery ISO
+  └── Generate Discovery ISO → upload to OSS
 
-Part 2: Alibaba Cloud ROS (Resource Orchestration Service)
+Part 2: Alibaba Cloud ROS (InstallationMethod=Assisted)
   └── run ros-templates/create-cluster.yaml
       ├── VPC / VSwitch / NAT / EIP
       ├── Security Groups
@@ -16,19 +20,49 @@ Part 2: Alibaba Cloud ROS (Resource Orchestration Service)
       ├── API Server SLB (internal)
       ├── PrivateZone DNS (api.* / api-int.*)
       ├── ECS Instances (bootstrap + masters + workers)
-      └── Outputs: install-config.yaml + cloud config values
+      └── Outputs: InstallConfig / DynamicCustomManifest
 
-Part 3: Red Hat Hybrid Cloud Console (Assisted Installer)
+Part 3: Red Hat Hybrid Cloud Console
   ├── Assign node roles
-  ├── Upload Custom Manifests (3 files, all install-time):
-  │     ├── alibaba-ccm-config.yaml          # CCM cloud.conf — from ROS DynamicCustomManifest output
-  │     ├── custom_manifests/01-alibaba-ccm.yaml       # CCM static resources (SA, RBAC, Deployment)
-  │     └── custom_manifests/03-machineconfig-providerid.yaml  # kubelet ProviderID
+  ├── Upload Custom Manifests (3 files):
+  │     ├── alibaba-ccm-config.yaml          # from ROS DynamicCustomManifest output
+  │     ├── custom_manifests/01-alibaba-ccm.yaml
+  │     └── custom_manifests/03-machineconfig-providerid.yaml
   └── Start installation
 
-Post-install (CAPA only — not available at install-time):
-  oc apply -f custom_manifests/02-capa-crds.yaml          # CAPI CRDs
-  oc apply -f custom_manifests/02-capa-controller.yaml    # CAPI Controller (node auto-scaling)
+Post-install (CAPA only):
+  oc apply -f custom_manifests/02-capa-crds.yaml
+  oc apply -f custom_manifests/02-capa-controller.yaml
+```
+
+### Agent-based Installer
+
+```
+Part 1: Alibaba Cloud ROS (InstallationMethod=Agent-based)
+  └── run ros-templates/create-cluster.yaml (DiscoveryIsoUrl=placeholder)
+      ├── Same infrastructure as Assisted
+      ├── RendezvousInstance (master-1) gets fixed private IP
+      └── Outputs: InstallConfig / AgentConfig / DynamicCustomManifest
+
+Part 2: Local workstation
+  ├── mkdir install-dir/openshift
+  ├── Save ROS InstallConfig  → install-dir/install-config.yaml
+  ├── Save ROS AgentConfig    → install-dir/agent-config.yaml
+  ├── Save ROS DynamicCustomManifest → install-dir/openshift/alibaba-ccm-config.yaml
+  ├── Copy custom_manifests/01-alibaba-ccm.yaml → install-dir/openshift/
+  ├── Copy custom_manifests/03-machineconfig-providerid.yaml → install-dir/openshift/
+  └── openshift-install agent create image --dir install-dir/
+      → generates install-dir/agent.x86_64.iso
+
+Part 3: Upload & boot
+  ├── Upload agent.x86_64.iso to OSS → get pre-authenticated URL
+  ├── Update ROS stack: set DiscoveryIsoUrl to agent ISO URL → re-apply
+  │   (or redeploy ECS instances with new ImageId)
+  └── openshift-install agent wait-for install-complete --dir install-dir/
+
+Post-install (CAPA only):
+  oc apply -f custom_manifests/02-capa-crds.yaml
+  oc apply -f custom_manifests/02-capa-controller.yaml
 ```
 
 ## Differences from OCI approach
@@ -36,6 +70,7 @@ Post-install (CAPA only — not available at install-time):
 | Feature | OCI | Alibaba Cloud |
 |---------|-----|---------------|
 | IaC tool | Terraform via OCI Resource Manager | ROS (native, no license issue) |
+| Installation method | Assisted or Agent-based (same stack) | Assisted or Agent-based (same stack) |
 | Node auto-scaling | Manual Terraform `add-nodes` | **CAPA MachineSet** (automatic) |
 | CCM auth | Instance Principal | RAM Role bound to ECS (equivalent) |
 | CCM lifecycle | Direct manifest | Direct manifest |
@@ -44,10 +79,10 @@ Post-install (CAPA only — not available at install-time):
 
 - Alibaba Cloud account with RAM admin permissions
 - Red Hat account with OpenShift subscription
-- Alibaba Cloud CLI (`aliyun`) or console access
 - `oc` CLI
+- Agent-based only: `openshift-install` binary (download from [mirror.openshift.com](https://mirror.openshift.com/pub/openshift-v4/clients/ocp/))
 
-## Installation Steps
+## Installation Steps — Assisted Installer
 
 ### Part 1 — Generate Discovery ISO
 
@@ -64,6 +99,7 @@ Post-install (CAPA only — not available at install-time):
 3. Fill in parameters:
    - `ClusterName`: same as Red Hat console
    - `BaseDomain`: your base domain
+   - `InstallationMethod`: `Assisted`
    - `DiscoveryIsoUrl`: OSS pre-authenticated URL from Part 1
    - Region, zones, instance types as needed
 4. Create the stack and wait for completion (~10 minutes)
@@ -73,17 +109,69 @@ Post-install (CAPA only — not available at install-time):
 
 ### Part 3 — Complete Installation
 
-1. In Red Hat Hybrid Cloud Console, the discovery agents will appear as nodes are booted
+1. In Red Hat Hybrid Cloud Console, discovery agents will appear as nodes boot
 2. Assign roles: 3 masters + N workers
 3. In **Custom manifests**, upload these three files:
-   - `alibaba-ccm-config.yaml` — saved from ROS `DynamicCustomManifest` output (CCM cloud.conf with real VPC/region values)
+   - `alibaba-ccm-config.yaml` — from ROS `DynamicCustomManifest` output (CCM cloud.conf with real values)
    - `custom_manifests/01-alibaba-ccm.yaml` — CCM ServiceAccount, RBAC, Deployment
-   - `custom_manifests/03-machineconfig-providerid.yaml` — kubelet ProviderID (must be install-time so nodes set ProviderID before kubelet starts)
+   - `custom_manifests/03-machineconfig-providerid.yaml` — kubelet ProviderID (must be install-time)
 4. Start the installation
 
 ### Post-Installation
 
-Only CAPA components are applied post-install (they depend on the cluster API being available):
+```bash
+oc apply -f custom_manifests/02-capa-crds.yaml
+oc apply -f custom_manifests/02-capa-controller.yaml
+```
+
+---
+
+## Installation Steps — Agent-based Installer
+
+### Part 1 — Provision Infrastructure (first pass, placeholder ISO)
+
+1. Open **Alibaba Cloud ROS Console** → Create Stack
+2. Upload `ros-templates/create-cluster.yaml`
+3. Fill in parameters:
+   - `ClusterName`, `BaseDomain`, Region, zones as needed
+   - `InstallationMethod`: `Agent-based`
+   - `RendezvousIp`: fixed IP for the first master (default `10.0.16.5`, must be in `PrivateSubnetCidr`)
+   - `DiscoveryIsoUrl`: any placeholder value (ECS instances will be restarted after ISO is ready)
+4. Create the stack — infrastructure provisions but nodes won't install yet
+5. From the **Outputs** tab, save:
+   - `InstallConfig` → `install-dir/install-config.yaml` (fill in `pullSecret` and `sshKey`)
+   - `AgentConfig` → `install-dir/agent-config.yaml`
+   - `DynamicCustomManifest` → `install-dir/openshift/alibaba-ccm-config.yaml`
+
+### Part 2 — Generate Agent ISO
+
+```bash
+# Prepare install directory
+mkdir -p install-dir/openshift
+
+# Copy static manifests into openshift/ (baked into the ISO)
+cp custom_manifests/01-alibaba-ccm.yaml install-dir/openshift/
+cp custom_manifests/03-machineconfig-providerid.yaml install-dir/openshift/
+# alibaba-ccm-config.yaml already saved from ROS output above
+
+# Generate the agent ISO
+openshift-install agent create image --dir install-dir/
+# Produces: install-dir/agent.x86_64.iso
+```
+
+### Part 3 — Boot & Complete Installation
+
+```bash
+# Upload ISO to OSS and get a pre-authenticated URL
+# Update the ROS stack's DiscoveryIsoUrl parameter to the agent ISO URL,
+# then restart ECS instances so they boot from the agent ISO.
+
+# Monitor installation progress
+openshift-install agent wait-for bootstrap-complete --dir install-dir/
+openshift-install agent wait-for install-complete --dir install-dir/
+```
+
+### Post-Installation
 
 ```bash
 oc apply -f custom_manifests/02-capa-crds.yaml

@@ -74,15 +74,36 @@ Parameters:
     Type: Number
     Default: 120
 
-  # Discovery ISO uploaded to OSS — get the URL from Red Hat Hybrid Cloud Console
+  InstallationMethod:
+    Type: String
+    Default: Assisted
+    AllowedValues: [Assisted, Agent-based]
+    Description: |
+      Assisted: Use Red Hat Hybrid Cloud Console — no local tooling required.
+      Agent-based: Generate ISO locally with openshift-install CLI, suitable for
+      air-gapped or disconnected environments.
+
+  # Assisted: get Discovery ISO URL from Red Hat Hybrid Cloud Console.
+  # Agent-based: generate the agent ISO locally then upload to OSS.
   DiscoveryIsoUrl:
     Type: String
-    Description: Pre-authenticated URL to the OpenShift discovery ISO in OSS
+    Description: Pre-authenticated OSS URL to the OpenShift ISO (Discovery ISO for Assisted; agent.x86_64.iso for Agent-based)
+
+  RendezvousIp:
+    Type: String
+    Default: 10.0.16.5
+    Description: |
+      Agent-based only. Fixed private IP for the rendezvous (bootstrap) control plane node.
+      Must be within PrivateSubnetCidr (default 10.0.16.0/20). Ignored for Assisted installs.
 
   RamRoleName:
     Type: String
     Default: openshift-node-role
     Description: RAM Role name to bind to all ECS nodes (Instance Principal for CCM/CAPA)
+
+Conditions:
+  IsAgentBased: !Equals [!Ref InstallationMethod, Agent-based]
+  IsAssisted:   !Equals [!Ref InstallationMethod, Assisted]
 
 Resources:
   # ── Networking ───────────────────────────────────────────────────────────────
@@ -332,13 +353,15 @@ Resources:
 
   # ── ECS Instances ────────────────────────────────────────────────────────────
 
+  # Assisted only: separate bootstrap node. Agent-based uses the rendezvous master instead.
   BootstrapInstance:
     Type: ALIYUN::ECS::Instance
+    Condition: IsAssisted
     DependsOn: NatSNATEntry
     Properties:
       InstanceName: !Sub '${ClusterName}-bootstrap'
       InstanceType: !Ref BootstrapInstanceType
-      ImageId: !Ref DiscoveryIsoUrl   # placeholder — replaced by agent-based installer flow
+      ImageId: !Ref DiscoveryIsoUrl
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
       VSwitchId: !Ref PrivateVSwitch
       SystemDiskCategory: !Ref SystemDiskCategory
@@ -350,19 +373,41 @@ Resources:
         - Key: openshift-node-role
           Value: bootstrap
 
-  ControlPlaneInstanceGroup:
-    Type: ALIYUN::ECS::InstanceGroup
+  # First control plane node. In Agent-based mode gets a fixed private IP so the
+  # rendezvousIP in agent-config.yaml matches before the ISO is generated.
+  RendezvousInstance:
+    Type: ALIYUN::ECS::Instance
     DependsOn: NatSNATEntry
     Properties:
-      InstanceName: !Sub '${ClusterName}-master-[1,3]'
+      InstanceName: !Sub '${ClusterName}-master-1'
       InstanceType: !Ref ControlPlaneInstanceType
       ImageId: !Ref DiscoveryIsoUrl
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
       VSwitchId: !Ref PrivateVSwitch
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
-      MaxAmount: !Ref ControlPlaneCount
-      MinAmount: !Ref ControlPlaneCount
+      PrivateIpAddress: !If [IsAgentBased, !Ref RendezvousIp, !Ref 'ALIYUN::NoValue']
+      RamRoleName: !Ref NodeRamRole
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+        - Key: openshift-node-role
+          Value: master
+
+  # Remaining 2 control plane nodes (RendezvousInstance is master-1, total = 3).
+  ControlPlaneInstanceGroup:
+    Type: ALIYUN::ECS::InstanceGroup
+    DependsOn: NatSNATEntry
+    Properties:
+      InstanceName: !Sub '${ClusterName}-master-[2,3]'
+      InstanceType: !Ref ControlPlaneInstanceType
+      ImageId: !Ref DiscoveryIsoUrl
+      SecurityGroupId: !Ref ControlPlaneSecurityGroup
+      VSwitchId: !Ref PrivateVSwitch
+      SystemDiskCategory: !Ref SystemDiskCategory
+      SystemDiskSize: !Ref SystemDiskSize
+      MaxAmount: 2
+      MinAmount: 2
       RamRoleName: !Ref NodeRamRole
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
@@ -408,7 +453,10 @@ Outputs:
     Description: Private DNS zone name
 
   InstallConfig:
-    Description: Generated install-config.yaml — paste into Red Hat Assisted Installer
+    Description: |
+      Assisted: paste into Red Hat Hybrid Cloud Console.
+      Agent-based: save as install-config.yaml in your installation directory,
+      fill in pullSecret and sshKey, then run: openshift-install agent create image
     Value: !Sub |
       apiVersion: v1
       metadata:
@@ -440,12 +488,27 @@ Outputs:
       pullSecret: '<replace-with-pull-secret>'
       sshKey: '<replace-with-ssh-public-key>'
 
+  AgentConfig:
+    Description: |
+      Agent-based only. Save as agent-config.yaml alongside install-config.yaml,
+      then run: openshift-install agent create image --dir <install-dir>
+      Upload the generated agent.x86_64.iso to OSS and use its pre-authenticated
+      URL as DiscoveryIsoUrl when re-running this stack to boot the ECS instances.
+    Value: !Sub |
+      apiVersion: v1alpha1
+      kind: AgentConfig
+      metadata:
+        name: ${ClusterName}
+      rendezvousIP: ${RendezvousIp}
+      hosts: []
+
   DynamicCustomManifest:
     Description: |
-      Save this output as a file (e.g. alibaba-ccm-config.yaml) and upload it to
-      Assisted Installer Custom Manifests alongside 01-alibaba-ccm.yaml and
-      03-machineconfig-providerid.yaml during Part 3 of the installation.
-      All three files must be present before starting the installation.
+      Assisted: save as alibaba-ccm-config.yaml and upload to Assisted Installer
+      Custom Manifests (Part 3) alongside 01-alibaba-ccm.yaml and
+      03-machineconfig-providerid.yaml before starting the installation.
+      Agent-based: save as openshift/alibaba-ccm-config.yaml inside your
+      installation directory before running openshift-install agent create image.
     Value: !Sub |
       # alibaba-ccm-config.yaml — generated by ROS stack ${ClusterName}
       # Contains cluster-specific values. Upload to Assisted Installer Custom Manifests.
