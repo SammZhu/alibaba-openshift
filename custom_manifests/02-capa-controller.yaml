@@ -71,8 +71,7 @@ spec:
       terminationGracePeriodSeconds: 10
       containers:
         - name: manager
-          # Update this image to the built CAPA controller image
-          image: quay.io/sammzhu/cluster-api-provider-alibaba:latest
+          image: quay.io/samzhu/cluster-api-provider-alibaba:latest
           imagePullPolicy: IfNotPresent
           command: [/manager]
           args:
