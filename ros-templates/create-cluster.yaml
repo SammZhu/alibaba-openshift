@@ -4,6 +4,16 @@ Description: |
   Equivalent to oracle-quickstart/oci-openshift create-cluster Terraform stack.
   Runs in Alibaba Cloud ROS (Resource Orchestration Service) — no local tooling required.
 
+  ## Prerequisites — prepare the boot image before creating this stack
+  The ECS instances boot from a custom ECS image imported from the OpenShift ISO.
+  Steps:
+    1. Assisted:   Download Discovery ISO from cloud.redhat.com → upload to OSS.
+       Agent-based: Run `openshift-install agent create image` → upload agent.x86_64.iso to OSS.
+    2. In the ECS console (or via API): Images → Import Image → provide the OSS URL.
+       Select architecture: x86_64, OS type: Linux, Image format: ISO.
+    3. Wait for import to complete, copy the resulting Image ID (e.g. m-bp1xxxxxxxxxx).
+    4. Provide that Image ID as the `ImageId` parameter when creating this stack.
+
 Parameters:
   ClusterName:
     Type: String
@@ -83,18 +93,20 @@ Parameters:
       Agent-based: Generate ISO locally with openshift-install CLI, suitable for
       air-gapped or disconnected environments.
 
-  # Assisted: get Discovery ISO URL from Red Hat Hybrid Cloud Console.
-  # Agent-based: generate the agent ISO locally then upload to OSS.
-  DiscoveryIsoUrl:
+  ImageId:
     Type: String
-    Description: Pre-authenticated OSS URL to the OpenShift ISO (Discovery ISO for Assisted; agent.x86_64.iso for Agent-based)
+    Description: |
+      Custom ECS image ID created by importing the OpenShift ISO into Alibaba Cloud.
+      See the template Description above for import steps.
+      Example: m-bp1xxxxxxxxxxxxxxxxx
 
   RendezvousIp:
     Type: String
     Default: 10.0.16.5
     Description: |
-      Agent-based only. Fixed private IP for the rendezvous (bootstrap) control plane node.
+      Agent-based only. Fixed private IP for the rendezvous (first control plane) node.
       Must be within PrivateSubnetCidr (default 10.0.16.0/20). Ignored for Assisted installs.
+      This IP must be set in agent-config.yaml BEFORE generating the agent ISO.
 
   RamRoleName:
     Type: String
@@ -193,8 +205,8 @@ Resources:
       SecurityGroupIngress:
         - IpProtocol: tcp
           PortRange: 6443/6443
-          SourceCidrIp: 0.0.0.0/0
-          Description: Kubernetes API
+          SourceCidrIp: !Ref VpcCidr
+          Description: Kubernetes API (VPC-internal only; exposed via SLB)
         - IpProtocol: tcp
           PortRange: 22623/22623
           SourceCidrIp: !Ref VpcCidr
@@ -206,7 +218,7 @@ Resources:
         - IpProtocol: all
           PortRange: -1/-1
           SourceGroupId: !Ref ControlPlaneSecurityGroup
-          Description: Intra-cluster
+          Description: Intra-master
         - IpProtocol: all
           PortRange: -1/-1
           SourceGroupId: !Ref WorkerSecurityGroup
@@ -222,6 +234,10 @@ Resources:
           PortRange: -1/-1
           SourceGroupId: !Ref ControlPlaneSecurityGroup
           Description: From masters
+        - IpProtocol: all
+          PortRange: -1/-1
+          SourceGroupId: !Ref WorkerSecurityGroup
+          Description: Intra-worker (pod-to-pod, OVN traffic)
 
   # ── RAM Role (Instance Principal) ───────────────────────────────────────────
 
@@ -257,6 +273,8 @@ Resources:
               - ecs:StopInstance
               - ecs:DeleteInstance
               - ecs:StartInstance
+              - ecs:TagResources
+              - ecs:ListTagResources
             Resource: '*'
           - Effect: Allow
             Action:
@@ -268,12 +286,19 @@ Resources:
               - slb:CreateLoadBalancerTCPListener
               - slb:StartLoadBalancerListener
               - slb:StopLoadBalancerListener
+              - slb:DescribeLoadBalancerAttribute
+              - slb:SetLoadBalancerDeleteProtection
             Resource: '*'
           - Effect: Allow
             Action:
               - vpc:DescribeVpcs
               - vpc:DescribeVSwitches
               - vpc:DescribeRouteTableList
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - pvtz:DescribeZones
+              - pvtz:DescribeZoneRecords
             Resource: '*'
 
   RolePolicyAttachment:
@@ -317,6 +342,12 @@ Resources:
       BackendServerPort: 22623
       Protocol: tcp
       Bandwidth: -1
+      HealthCheck:
+        HealthCheckType: tcp
+        HealthCheckConnectPort: 22623
+        HealthyThreshold: 3
+        UnhealthyThreshold: 3
+        HealthCheckInterval: 5
 
   # ── Private DNS ──────────────────────────────────────────────────────────────
 
@@ -352,16 +383,20 @@ Resources:
       Ttl: 60
 
   # ── ECS Instances ────────────────────────────────────────────────────────────
+  # All instances DependsOn RolePolicyAttachment to ensure RAM role policy is
+  # attached before the nodes try to call Alibaba Cloud APIs via instance principal.
 
-  # Assisted only: separate bootstrap node. Agent-based uses the rendezvous master instead.
+  # Assisted only: separate bootstrap node. Agent-based uses rendezvous master instead.
   BootstrapInstance:
     Type: ALIYUN::ECS::Instance
     Condition: IsAssisted
-    DependsOn: NatSNATEntry
+    DependsOn:
+      - NatSNATEntry
+      - RolePolicyAttachment
     Properties:
       InstanceName: !Sub '${ClusterName}-bootstrap'
       InstanceType: !Ref BootstrapInstanceType
-      ImageId: !Ref DiscoveryIsoUrl
+      ImageId: !Ref ImageId
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
       VSwitchId: !Ref PrivateVSwitch
       SystemDiskCategory: !Ref SystemDiskCategory
@@ -373,15 +408,17 @@ Resources:
         - Key: openshift-node-role
           Value: bootstrap
 
-  # First control plane node. In Agent-based mode gets a fixed private IP so the
-  # rendezvousIP in agent-config.yaml matches before the ISO is generated.
+  # First control plane node. In Agent-based mode gets a fixed private IP so
+  # rendezvousIP in agent-config.yaml is known before ISO generation.
   RendezvousInstance:
     Type: ALIYUN::ECS::Instance
-    DependsOn: NatSNATEntry
+    DependsOn:
+      - NatSNATEntry
+      - RolePolicyAttachment
     Properties:
       InstanceName: !Sub '${ClusterName}-master-1'
       InstanceType: !Ref ControlPlaneInstanceType
-      ImageId: !Ref DiscoveryIsoUrl
+      ImageId: !Ref ImageId
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
       VSwitchId: !Ref PrivateVSwitch
       SystemDiskCategory: !Ref SystemDiskCategory
@@ -394,20 +431,21 @@ Resources:
         - Key: openshift-node-role
           Value: master
 
-  # Remaining 2 control plane nodes (RendezvousInstance is master-1, total = 3).
-  ControlPlaneInstanceGroup:
-    Type: ALIYUN::ECS::InstanceGroup
-    DependsOn: NatSNATEntry
+  # Second control plane node (split from InstanceGroup so all 3 can be
+  # individually registered as SLB backend servers).
+  ControlPlaneInstance2:
+    Type: ALIYUN::ECS::Instance
+    DependsOn:
+      - NatSNATEntry
+      - RolePolicyAttachment
     Properties:
-      InstanceName: !Sub '${ClusterName}-master-[2,3]'
+      InstanceName: !Sub '${ClusterName}-master-2'
       InstanceType: !Ref ControlPlaneInstanceType
-      ImageId: !Ref DiscoveryIsoUrl
+      ImageId: !Ref ImageId
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
       VSwitchId: !Ref PrivateVSwitch
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
-      MaxAmount: 2
-      MinAmount: 2
       RamRoleName: !Ref NodeRamRole
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
@@ -415,13 +453,58 @@ Resources:
         - Key: openshift-node-role
           Value: master
 
+  # Third control plane node.
+  ControlPlaneInstance3:
+    Type: ALIYUN::ECS::Instance
+    DependsOn:
+      - NatSNATEntry
+      - RolePolicyAttachment
+    Properties:
+      InstanceName: !Sub '${ClusterName}-master-3'
+      InstanceType: !Ref ControlPlaneInstanceType
+      ImageId: !Ref ImageId
+      SecurityGroupId: !Ref ControlPlaneSecurityGroup
+      VSwitchId: !Ref PrivateVSwitch2
+      SystemDiskCategory: !Ref SystemDiskCategory
+      SystemDiskSize: !Ref SystemDiskSize
+      RamRoleName: !Ref NodeRamRole
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+        - Key: openshift-node-role
+          Value: master
+
+  # Register all 3 control plane nodes as SLB backend servers.
+  # This must exist before installation completes so that api-int.<cluster>.<domain>
+  # (which resolves to the SLB) can reach the API server and MCS.
+  ControlPlaneSLBAttachment:
+    Type: ALIYUN::SLB::BackendServerAttachment
+    DependsOn:
+      - ApiSLBListener
+      - McsListener
+    Properties:
+      LoadBalancerId: !Ref ApiSLB
+      BackendServers:
+        - ServerId: !Ref RendezvousInstance
+          Weight: 100
+          Type: ecs
+        - ServerId: !Ref ControlPlaneInstance2
+          Weight: 100
+          Type: ecs
+        - ServerId: !Ref ControlPlaneInstance3
+          Weight: 100
+          Type: ecs
+
   WorkerInstanceGroup:
     Type: ALIYUN::ECS::InstanceGroup
-    DependsOn: NatSNATEntry
+    DependsOn:
+      - NatSNATEntry
+      - NatSNATEntry2
+      - RolePolicyAttachment
     Properties:
-      InstanceName: !Sub '${ClusterName}-worker-[1,3]'
+      InstanceName: !Sub '${ClusterName}-worker'
       InstanceType: !Ref ComputeInstanceType
-      ImageId: !Ref DiscoveryIsoUrl
+      ImageId: !Ref ImageId
       SecurityGroupId: !Ref WorkerSecurityGroup
       VSwitchId: !Ref PrivateVSwitch
       SystemDiskCategory: !Ref SystemDiskCategory
@@ -438,7 +521,7 @@ Resources:
 Outputs:
   VpcId:
     Value: !Ref Vpc
-    Description: VPC ID — needed for CCM cloud.conf
+    Description: VPC ID — needed for CCM cloud.conf and CAPA AlibabaCloudCluster
 
   VSwitchId:
     Value: !Ref PrivateVSwitch
@@ -446,17 +529,22 @@ Outputs:
 
   ApiSLBIp:
     Value: !GetAtt ApiSLB.IpAddress
-    Description: API Server SLB internal IP — use for install-config.yaml platform.external
+    Description: API Server SLB internal IP — use as controlPlaneEndpoint in install-config.yaml
 
   PrivateZoneName:
     Value: !Sub '${ClusterName}.${BaseDomain}'
     Description: Private DNS zone name
 
+  RendezvousInstanceId:
+    Value: !Ref RendezvousInstance
+    Description: ECS instance ID of master-1 (rendezvous node)
+
   InstallConfig:
     Description: |
       Assisted: paste into Red Hat Hybrid Cloud Console.
       Agent-based: save as install-config.yaml in your installation directory,
-      fill in pullSecret and sshKey, then run: openshift-install agent create image
+      fill in pullSecret and sshKey, then run:
+        openshift-install agent create image --dir <install-dir>
     Value: !Sub |
       apiVersion: v1
       metadata:
@@ -490,10 +578,11 @@ Outputs:
 
   AgentConfig:
     Description: |
-      Agent-based only. Save as agent-config.yaml alongside install-config.yaml,
-      then run: openshift-install agent create image --dir <install-dir>
-      Upload the generated agent.x86_64.iso to OSS and use its pre-authenticated
-      URL as DiscoveryIsoUrl when re-running this stack to boot the ECS instances.
+      Agent-based only. Save as agent-config.yaml alongside install-config.yaml.
+      The rendezvousIP MUST match the RendezvousIp parameter used when creating this stack.
+      Run: openshift-install agent create image --dir <install-dir>
+      Then import the generated agent.x86_64.iso as a custom ECS image and create
+      a new stack (or update this one) with the resulting ImageId.
     Value: !Sub |
       apiVersion: v1alpha1
       kind: AgentConfig
@@ -505,13 +594,12 @@ Outputs:
   DynamicCustomManifest:
     Description: |
       Assisted: save as alibaba-ccm-config.yaml and upload to Assisted Installer
-      Custom Manifests (Part 3) alongside 01-alibaba-ccm.yaml and
-      03-machineconfig-providerid.yaml before starting the installation.
-      Agent-based: save as openshift/alibaba-ccm-config.yaml inside your
-      installation directory before running openshift-install agent create image.
+      Custom Manifests alongside 01-alibaba-ccm.yaml and 03-machineconfig-providerid.yaml.
+      Agent-based: save as openshift/alibaba-ccm-config.yaml inside your installation
+      directory before running openshift-install agent create image.
     Value: !Sub |
-      # alibaba-ccm-config.yaml — generated by ROS stack ${ClusterName}
-      # Contains cluster-specific values. Upload to Assisted Installer Custom Manifests.
+      # alibaba-ccm-config.yaml — generated by ROS stack (${ClusterName})
+      # Upload to Assisted Installer Custom Manifests at install time.
       apiVersion: v1
       kind: ConfigMap
       metadata:
@@ -520,10 +608,11 @@ Outputs:
       data:
         cloud.conf: |
           [Global]
+          cluster-id=${ClusterName}
           region=${Region}
           vpcid=${Vpc}
           zoneid=${ZoneId}
           vswitchid=${PrivateVSwitch}
 
           [LoadBalancer]
-          address-type=internet
+          address-type=intranet
