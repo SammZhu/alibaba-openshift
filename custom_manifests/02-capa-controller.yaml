@@ -71,7 +71,7 @@ spec:
       terminationGracePeriodSeconds: 10
       containers:
         - name: manager
-          image: quay.io/samzhu/cluster-api-provider-alibaba:latest
+          image: quay.io/samzhu/openshift-capi-alicloud:latest
           imagePullPolicy: IfNotPresent
           command: [/manager]
           args:
