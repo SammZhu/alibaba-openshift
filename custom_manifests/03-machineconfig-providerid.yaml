@@ -1,6 +1,6 @@
 ---
 # MachineConfig: inject kubelet ProviderID from Alibaba Cloud ECS metadata
-# Format: alibabacloud://<region>/<instance-id>
+# Format: alicloud://<region>.<instance-id>  (matches cloud-provider-alibaba-cloud CCM NodeFromProviderID)
 # Applied to both master and worker nodes at first boot.
 apiVersion: machineconfiguration.openshift.io/v1
 kind: MachineConfig
@@ -48,7 +48,7 @@ spec:
                 exit 1
               fi
 
-              PROVIDER_ID="alibabacloud:///${REGION}/${INSTANCE_ID}"
+              PROVIDER_ID="alicloud://${REGION}.${INSTANCE_ID}"
               echo "Setting ProviderID: ${PROVIDER_ID}"
 
               mkdir -p /etc/kubernetes
@@ -106,7 +106,7 @@ spec:
                 exit 1
               fi
 
-              PROVIDER_ID="alibabacloud:///${REGION}/${INSTANCE_ID}"
+              PROVIDER_ID="alicloud://${REGION}.${INSTANCE_ID}"
               echo "Setting ProviderID: ${PROVIDER_ID}"
 
               mkdir -p /etc/kubernetes

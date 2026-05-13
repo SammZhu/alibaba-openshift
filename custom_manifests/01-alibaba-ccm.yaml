@@ -118,7 +118,7 @@ spec:
         - name: cloud-controller-manager
           # Update this image tag to match your OpenShift version.
           # See: https://github.com/kubernetes/cloud-provider-alibaba-cloud/releases
-          image: registry.k8s.io/provider-alibaba-cloud/alibaba-cloud-controller-manager:v2.7.0
+          image: registry.k8s.io/provider-alibaba-cloud/alibaba-cloud-controller-manager:v2.14.0
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
