@@ -238,6 +238,14 @@ Resources:
           PortRange: -1/-1
           SourceGroupId: !Ref WorkerSecurityGroup
           Description: Intra-worker (pod-to-pod, OVN traffic)
+        - IpProtocol: tcp
+          PortRange: 80/80
+          SourceCidrIp: 0.0.0.0/0
+          Description: Ingress HTTP
+        - IpProtocol: tcp
+          PortRange: 443/443
+          SourceCidrIp: 0.0.0.0/0
+          Description: Ingress HTTPS
 
   # ── RAM Role (Instance Principal) ───────────────────────────────────────────
 
