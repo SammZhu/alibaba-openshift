@@ -1,0 +1,52 @@
+---
+# OVN-Kubernetes MTU configuration for Alibaba Cloud ECS
+#
+# WHEN TO APPLY
+# =============
+# This file must be placed in the openshift-install manifests directory
+# BEFORE running `openshift-install create cluster`, not applied post-install.
+#
+#   openshift-install create manifests --dir=installdir
+#   cp 00-ovn-mtu.yaml installdir/manifests/
+#   openshift-install create cluster --dir=installdir
+#
+# Applying this to a running cluster triggers a cluster-wide network
+# reconfiguration (rolling node drain + reboot). Use the migration procedure
+# documented in https://docs.openshift.com/container-platform/latest/networking/changing-cluster-network-mtu.html
+# if you need to change MTU post-install.
+#
+# WHY THIS IS NEEDED
+# ==================
+# ECS instances have a physical NIC MTU of 1500.
+# OVN-Kubernetes uses Geneve encapsulation which adds ~58 bytes of overhead:
+#
+#   Outer Ethernet (14) + Outer IP (20) + UDP (8) + Geneve header (16) = 58 bytes
+#
+# Without explicit configuration, OVN-K auto-detects the physical MTU and
+# subtracts the overhead. In practice the auto-detection can fail on ECS
+# enhanced-networking (virtio/vf) interfaces, leading to packet fragmentation
+# that causes:
+#   - TCP connections that stall on large payloads (e.g. image pulls, API responses)
+#   - Intermittent pod connectivity failures
+#   - TLS handshake timeouts
+#
+# MTU CALCULATION
+# ===============
+#   Physical NIC MTU : 1500  (standard ECS eth0)
+#   Geneve overhead  :   58
+#   Safety margin    :   42  (headroom for any additional encapsulation)
+#   Overlay MTU      : 1400  ← what pods and the OVN tunnel interface see
+#
+# This value matches the default used by AWS EBS/EKS and Azure AKS for their
+# OVN-Kubernetes deployments on 1500-MTU physical networks.
+apiVersion: operator.openshift.io/v1
+kind: Network
+metadata:
+  name: cluster
+spec:
+  defaultNetwork:
+    type: OVNKubernetes
+    ovnKubernetesConfig:
+      # Tenant (pod-facing) MTU — the OVN tunnel interface uses mtu + geneve overhead.
+      # 1400 is conservative and safe for all ECS instance families.
+      mtu: 1400

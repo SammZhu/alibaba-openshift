@@ -66,8 +66,8 @@
 | 4.1 | kubeconfig 可用 | `oc cluster-info` | 返回 API server 地址 |
 | 4.2 | 所有节点 Ready | `oc get nodes` | 所有节点 `Ready`，无 `NotReady` |
 | 4.3 | 节点 ProviderID 格式正确 | `oc get node <name> -o jsonpath='{.spec.providerID}'` | 格式 `alicloud://<region>.<instanceID>` |
-| 4.4 | CCM 正在运行 | `oc get pods -n kube-system -l k8s-app=alibaba-cloud-controller-manager` | 2 个 Pod，状态 Running |
-| 4.5 | CCM 日志无错误 | `oc logs -n kube-system -l k8s-app=alibaba-cloud-controller-manager` | 无 `Error` 或 `Failed`；可见 node 初始化日志 |
+| 4.4 | CCM 正在运行 | `oc get pods -n alibaba-cloud-controller-manager -l k8s-app=alibaba-cloud-controller-manager` | 2 个 Pod，状态 Running |
+| 4.5 | CCM 日志无错误 | `oc logs -n alibaba-cloud-controller-manager -l k8s-app=alibaba-cloud-controller-manager` | 无 `Error` 或 `Failed`；可见 node 初始化日志 |
 | 4.6 | 节点 cloud-taint 已清除 | `oc describe node <name> \| grep Taints` | 无 `node.cloudprovider.kubernetes.io/uninitialized` taint |
 | 4.7 | 所有 ClusterOperator Ready | `oc get clusteroperators` | 所有 CO `Available=True`，`Degraded=False` |
 
@@ -105,6 +105,6 @@
 |------|---------|---------|
 | 节点不出现在 Red Hat 控制台 | NAT/SNAT 未生效，节点无法访问公网 | 节点上 `curl https://api.openshift.com`；查看 SNAT 规则 |
 | 安装卡在 bootstrap 阶段 | SLB 无后端 / api-int DNS 解析失败 | `dig api-int.<cluster>.<domain>` from node；查看 SLB 后端健康状态 |
-| 节点一直 NotReady（云污点未清除） | CCM 未启动 / ProviderID 格式错误 | `oc logs -n kube-system <ccm-pod>`；检查 ProviderID 格式 |
+| 节点一直 NotReady（云污点未清除） | CCM 未启动 / ProviderID 格式错误 | `oc logs -n alibaba-cloud-controller-manager <ccm-pod>`；检查 ProviderID 格式 |
 | CCM 启动报认证错误 | RAM Role 未绑定到 ECS / Policy 权限不足 | ECS 控制台确认 RAM Role；RAM 控制台确认 Policy Action |
 | CAPA 创建 ECS 失败 | RAM Policy 缺少 `ecs:RunInstances` 或子网/安全组 ID 填写有误 | `oc logs -n openshift-cluster-api <capa-pod>`；检查 AlibabaCloudMachine spec |

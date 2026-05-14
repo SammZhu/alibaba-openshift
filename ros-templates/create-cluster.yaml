@@ -233,11 +233,11 @@ Resources:
         - IpProtocol: all
           PortRange: -1/-1
           SourceGroupId: !Ref ControlPlaneSecurityGroup
-          Description: From masters
+          Description: From masters (covers Geneve UDP 6081 OVN overlay + kubelet)
         - IpProtocol: all
           PortRange: -1/-1
           SourceGroupId: !Ref WorkerSecurityGroup
-          Description: Intra-worker (pod-to-pod, OVN traffic)
+          Description: Intra-worker (pod-to-pod, OVN Geneve overlay)
         - IpProtocol: tcp
           PortRange: 80/80
           SourceCidrIp: 0.0.0.0/0
@@ -246,6 +246,13 @@ Resources:
           PortRange: 443/443
           SourceCidrIp: 0.0.0.0/0
           Description: Ingress HTTPS
+        # NodePort range — required for SLB backend health checks and LoadBalancer
+        # services. SLB nodes have VPC IPs outside the node SGs, so the source
+        # must be the VPC CIDR rather than a specific SG.
+        - IpProtocol: tcp
+          PortRange: 30000/32767
+          SourceCidrIp: !Ref VpcCidr
+          Description: NodePort services (SLB health-check and VPC-internal access)
 
   # ── RAM Role (Instance Principal) ───────────────────────────────────────────
 
@@ -331,6 +338,27 @@ Resources:
               - ecs:ApplyAutoSnapshotPolicy
               - ecs:DeleteAutoSnapshotPolicy
               - ecs:DescribeAutoSnapshotPolicyEx
+            Resource: '*'
+          # ── NAS (Alibaba Cloud CSI Driver — Phase 2) ─────────────────────────
+          # Required for dynamic NAS PV provisioning (file-system and mount-target
+          # lifecycle) used by ReadWriteMany volumes and VM live migration support.
+          - Effect: Allow
+            Action:
+              - nas:DescribeFileSystems
+              - nas:CreateFileSystem
+              - nas:DeleteFileSystem
+              - nas:ModifyFileSystem
+              - nas:DescribeMountTargets
+              - nas:CreateMountTarget
+              - nas:DeleteMountTarget
+              - nas:ModifyMountTarget
+              - nas:DescribeAccessGroups
+              - nas:CreateAccessGroup
+              - nas:DeleteAccessGroup
+              - nas:DescribeAccessRules
+              - nas:CreateAccessRule
+              - nas:DeleteAccessRule
+              - nas:DescribeZones
             Resource: '*'
 
   RolePolicyAttachment:
@@ -636,7 +664,9 @@ Outputs:
       kind: ConfigMap
       metadata:
         name: alibaba-cloud-config
-        namespace: kube-system
+        # Per the Platform External onboarding guide, the CCM runs in its own
+        # dedicated namespace (not kube-system). See 01-alibaba-ccm.yaml.
+        namespace: alibaba-cloud-controller-manager
       data:
         cloud.conf: |
           [Global]
