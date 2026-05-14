@@ -1,7 +1,7 @@
 # Alibaba Cloud CSI Driver 集成设计
 
 **状态**：实现中
-**版本**：v0.3（新增 OpenShift Virtualization 适配 + OSS 备份存储）
+**版本**：v0.4（参考 AWS ROSA EBS CSI Operator + CDI StorageProfile 机制深度对齐）
 **日期**：2026-05-14
 **阶段**：Phase 1 扩展（存储支持）
 
@@ -14,6 +14,7 @@
 | v0.1 | 2026-05-14 | 初稿，Helm 方案 |
 | v0.2 | 2026-05-14 | 改用 OLM Operator 方案 |
 | v0.3 | 2026-05-14 | OpenShift Virtualization 存储适配分析；NAS 升为 P1；OSS 定位为备份存储；新增 VolumeSnapshotClass、StorageProfile、OADP 集成 |
+| v0.4 | 2026-05-14 | 参考 AWS ROSA EBS CSI Operator 和 CDI StorageProfile 机制：新增 seLinuxMount、StorageProfile 主动 patch 策略、条件化 VolumeSnapshotClass、CDI 上游贡献计划、clone strategy 设计 |
 
 ---
 
@@ -520,7 +521,193 @@ custom_manifests/
 
 ---
 
-## 13. 上游项目与参考
+## 13. 参考实现深度对齐（AWS ROSA + CDI）
+
+本章记录对 AWS EBS CSI Driver Operator 和 CDI StorageProfile 机制的研究结论，
+以及对本项目的具体影响和设计决策。
+
+### 13.1 AWS EBS CSI Operator 关键发现
+
+**来源**：`github.com/openshift/aws-ebs-csi-driver-operator`
+
+#### CSIDriver 对象 — `seLinuxMount: true` 是必须项
+
+AWS operator 的 `csidriver.yaml`：
+
+```yaml
+spec:
+  attachRequired: true
+  podInfoOnMount: false
+  fsGroupPolicy: File
+  seLinuxMount: true          # ← RHCOS 节点 SELinux 强制要求
+  volumeLifecycleModes:
+    - Persistent
+```
+
+**影响**：我们当前的 `ensureCSIDriver()` 缺少 `seLinuxMount: true`。
+RHCOS 默认开启 SELinux Enforcing 模式，没有此字段会导致 CSI mount 操作被 SELinux 拒绝。
+**必须修复**，在 `ensureCSIDriver()` 中加入此字段。
+
+#### VolumeSnapshotClass — 条件创建
+
+AWS operator 使用 `WithConditionalStaticResourcesController`，
+只有当 `volumesnapshotclasses.snapshot.storage.k8s.io` CRD 存在时才创建 VolumeSnapshotClass。
+创建后不再删除（`removeCondition` 返回 `false`）。
+
+```yaml
+metadata:
+  annotations:
+    snapshot.storage.kubernetes.io/is-default-class: "true"  # ← 标记为默认快照类
+driver: ebs.csi.aws.com
+deletionPolicy: Delete
+```
+
+**影响**：我们的 operator 创建 VolumeSnapshotClass 前需先用 Discovery Client 检查 CRD 是否存在，
+避免在旧版 OCP（未安装 VolumeSnapshot CRD）上报错。
+
+#### Node DaemonSet SCC — 通过 ClusterRoleBinding 绑定 privileged
+
+AWS 不创建自定义 SCC，而是直接绑定：
+
+```yaml
+# ebs-node-privileged-binding
+roleRef:
+  kind: ClusterRole
+  name: system:openshift:scc:privileged   # ← OCP 内置，无需自定义 SCC
+subjects:
+  - kind: ServiceAccount
+    name: aws-ebs-csi-driver-node-sa
+```
+
+**影响**：我们已按此模式实现，确认方向正确。
+
+#### StorageClass — `WaitForFirstConsumer` + 磁盘加密
+
+```yaml
+volumeBindingMode: WaitForFirstConsumer   # 区可用性感知，避免跨 AZ 挂载失败
+parameters:
+  type: gp3
+  encrypted: "true"                        # 默认开启磁盘加密
+```
+
+**影响**：阿里云 ESSD 支持加密，应在 StorageClass parameters 中加入 `encrypted: "true"` 参数，
+由用户通过 CR spec 控制是否开启。`WaitForFirstConsumer` 已实现。
+
+---
+
+### 13.2 CDI StorageProfile 机制 — 关键发现
+
+**来源**：`github.com/kubevirt/containerized-data-importer`
+
+#### 阿里云驱动不在 CDI 内置能力表
+
+CDI 在 `pkg/storagecapabilities/storagecapabilities.go` 维护硬编码的驱动能力表。
+**阿里云的两个驱动均不在此表中**：
+
+```go
+// CDI 内置表（摘录）
+"ebs.csi.aws.com":   {{rwo, block}},
+"pd.csi.storage.gke.io": {{rwo, block}, {rwx, block}},
+// "diskplugin.csi.alibabacloud.com" → 不存在 ← 问题所在
+// "nasplugin.csi.alibabacloud.com"  → 不存在
+```
+
+**后果**：OKV 无法自动识别阿里云 StorageClass 的正确 accessMode + volumeMode 组合，
+`StorageProfile.status.conditions[Recognized]` 为 `False`，
+CDI 会为 VM DataVolume 选择错误的 accessMode，导致 VM 启动失败。
+
+#### 解决策略（双轨）
+
+**轨道 A（短期）：operator 主动 patch StorageProfile**
+
+CDI 的优先级规则：`spec.claimPropertySets`（用户/operator 写入）> CDI 自动检测。
+我们的 operator 在创建 StorageClass 后，watch 对应 StorageProfile 并 patch spec：
+
+```go
+// operator 在 reconcile 中主动 patch
+storageProfile.Spec.ClaimPropertySets = []cdiv1.ClaimPropertySet{
+    {AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}, VolumeMode: &block},
+    {AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}, VolumeMode: &filesystem},
+}
+storageProfile.Spec.CloneStrategy = &csiClone  // 支持 CSI clone
+```
+
+**轨道 B（长期）：向 CDI 上游提 PR**
+
+向 `storagecapabilities.go` 提交 PR，注册阿里云驱动：
+
+```go
+// 待提交到 kubevirt/containerized-data-importer
+"diskplugin.csi.alibabacloud.com": {
+    {rwo, block},        // ESSD Block 模式（VM OS 盘最优）
+    {rwo, file},         // ESSD Filesystem 模式（通用容器）
+},
+"nasplugin.csi.alibabacloud.com": {
+    {rwx, file},         // NAS（热迁移）
+    {rwo, file},         // NAS 单挂载
+},
+```
+
+PR 合并后，新版 CDI 自动识别，无需 operator 手动 patch。两轨并行，上游接受后 patch 逻辑可移除。
+
+#### Clone Strategy 决策
+
+CDI clone strategy 优先级：
+1. `StorageProfile.spec.cloneStrategy`（显式覆盖）
+2. StorageClass 注解 `cdi.kubevirt.io/clone-strategy`
+3. CDI 自动：有 VolumeSnapshotClass → `snapshot`；无 → `host-assisted`（慢，占带宽）
+
+**建议**：patch StorageProfile 时设置 `cloneStrategy: csi-clone`。
+阿里云云盘支持 CSI clone（`ecs:CreateDisk` + source disk），
+比 `snapshot` 更快（无需创建快照再从快照恢复），比 `host-assisted` 更高效。
+
+#### StorageProfile Reconcile 流程（operator 视角）
+
+```
+ensureDiskDriver()
+  └── ensureStorageClass(sc)          // 创建 StorageClass
+  └── ensureVolumeSnapshotClass()     // 条件创建（CRD 存在时）
+  └── ensureStorageProfile(sc)        // patch CDI StorageProfile
+        ├── Get StorageProfile（名称 == StorageClass 名称）
+        ├── 如果 CDI 未创建（稍后会创建）→ 等待下次 reconcile
+        └── Patch spec.claimPropertySets + spec.cloneStrategy
+```
+
+**Watch 触发**：operator 应 Watch `StorageProfile` 对象，CDI 创建 StorageProfile 后自动触发 reconcile。
+
+---
+
+### 13.3 OKV StorageClass 注解设计
+
+参考 CDI 文档，OKV 使用两个独立注解：
+
+| 注解 | 作用 | 谁写 |
+|------|------|------|
+| `storageclass.kubernetes.io/is-default-class: "true"` | 通用 PVC 默认 StorageClass | operator（由 `spec.disk.defaultStorageClass` 控制）|
+| `storageclass.kubevirt.io/is-default-virt-class: "true"` | OKV VM 默认 StorageClass | operator（由 `spec.disk.storageClasses[].virtDefault` 控制）|
+
+两者可以相同也可以不同，建议：
+- 通用默认：`alicloud-disk-efficiency`（Filesystem，兼容性最广）
+- OKV 默认：`alicloud-disk-essd-block`（Block，VM 性能最优）
+
+---
+
+### 13.4 对当前实现的影响（必须修复清单）
+
+| 问题 | 严重性 | 修复内容 |
+|------|--------|---------|
+| CSIDriver 缺 `seLinuxMount: true` | 🔴 严重 | `ensureCSIDriver()` 加此字段，否则 RHCOS 上 SELinux 拒绝 mount |
+| 无 VolumeSnapshotClass | 🔴 严重 | 条件创建（先检查 CRD），加 `is-default-class: "true"` |
+| 无 StorageProfile patch | 🔴 严重 | CDI 无法识别阿里云驱动，OKV VM 启动失败 |
+| StorageClass 无 Block 变体 | 🟠 重要 | 新增 `alicloud-disk-essd-block` StorageClass + `virtDefault` 注解 |
+| StorageClass 无加密参数 | 🟡 建议 | 参数中加 `encrypted: "true"`（可选，由 CR spec 控制）|
+| NAS StorageClass 未实现 | 🔴 严重 | 热迁移依赖，P1 |
+| clone strategy 未设置 | 🟠 重要 | patch StorageProfile 时设 `csi-clone` |
+| CDI 上游无阿里云能力条目 | 🟡 长期 | 向 kubevirt/containerized-data-importer 提 PR |
+
+---
+
+## 14. 上游项目与参考
 
 - [alibaba-cloud-csi-driver](https://github.com/kubernetes-sigs/alibaba-cloud-csi-driver) — v1.35.3
 - [operator-sdk 文档](https://sdk.operatorframework.io/docs/building-operators/golang/quickstart/)
