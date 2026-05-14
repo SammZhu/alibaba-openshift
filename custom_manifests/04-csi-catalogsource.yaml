@@ -9,7 +9,9 @@ metadata:
   namespace: openshift-marketplace
 spec:
   sourceType: grpc
-  image: quay.io/samzhu/alibaba-cloud-csi-operator-catalog:latest
+  # Pin to an explicit version for reproducibility. Bump alongside the
+  # operator image in 04-csi-subscription.yaml when releasing a new version.
+  image: quay.io/samzhu/alibaba-cloud-csi-operator-catalog:v1.35.3
   displayName: Alibaba Cloud CSI Operator
   publisher: SammZhu
   updateStrategy:
