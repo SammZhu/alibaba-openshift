@@ -1,0 +1,64 @@
+---
+# DataProtectionApplication — OADP/Velero backup to Alibaba Cloud OSS
+#
+# Architecture:
+#   Velero server (in openshift-adp) uses the OSS S3-compatible API to store
+#   backup tarballs and metadata.  PV data is backed up via the restic/kopia
+#   file-system uploader (no VolumeSnapshotLocation needed for initial setup).
+#
+# OSS endpoint selection:
+#   - Use the INTERNAL endpoint (oss-<region>-internal.aliyuncs.com) when the
+#     cluster nodes and the OSS bucket are in the SAME region — avoids egress
+#     charges and is faster.
+#   - Use the PUBLIC endpoint only for cross-region DR scenarios.
+#
+# Backup strategy:
+#   - Namespace-scoped Backup CRs (created separately) select which workloads
+#     to back up.  A Schedule CR can automate periodic backups.
+#   - OSS is NOT suitable for VM runtime storage (FUSE + poor random I/O).
+#     Use OADP + OSS only for backup/restore, not as a PV backend.
+#
+# Pre-requisites:
+#   1. OSS bucket created in the same region as the cluster.
+#   2. 05-oadp-oss-credentials.yaml applied (cloud-credentials Secret).
+#   3. OADP operator running (05-oadp-subscription.yaml).
+apiVersion: oadp.openshift.io/v1alpha1
+kind: DataProtectionApplication
+metadata:
+  name: alibaba-oss-backup
+  namespace: openshift-adp
+spec:
+  configuration:
+    velero:
+      defaultPlugins:
+        - openshift   # handles OpenShift-specific resources (SCCs, routes, etc.)
+        - aws         # Velero AWS plugin provides S3-compatible storage support
+      featureFlags:
+        - EnableCSI   # enable CSI snapshot integration (optional, requires snapshot CRDs)
+    nodeAgent:
+      enable: true
+      uploaderType: kopia  # kopia is preferred over restic for performance
+
+  backupLocations:
+    - name: default
+      velero:
+        provider: aws
+        default: true
+        objectStorage:
+          bucket: <YOUR-OSS-BUCKET-NAME>
+          # Optional: use a prefix to organise backups within the bucket.
+          # prefix: openshift-backups
+        config:
+          # Use the OSS internal endpoint when cluster and bucket are in the same region.
+          # Replace <region> with your region, e.g. cn-hangzhou, cn-beijing, cn-shanghai.
+          s3Url: https://oss-<region>-internal.aliyuncs.com
+          region: <region>                       # e.g. cn-hangzhou
+          s3ForcePathStyle: "true"               # required for OSS path-style access
+          insecureSkipTLSVerify: "false"
+        credential:
+          name: cloud-credentials               # Secret created by 05-oadp-oss-credentials.yaml
+          key: cloud
+
+  # No snapshotLocations defined — using file-system backup (kopia) for PV data.
+  # To enable CSI volume snapshots instead, add a snapshotLocations entry pointing
+  # to the VolumeSnapshotClass created by the disk CSI operator.

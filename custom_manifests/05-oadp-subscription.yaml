@@ -1,0 +1,44 @@
+---
+# OADP (OpenShift API for Data Protection) Operator — OLM Subscription
+#
+# OADP wraps Velero and provides the DataProtectionApplication CRD.
+# We use it here for backup/restore of Kubernetes resources and PV data
+# to Alibaba Cloud OSS (S3-compatible API).
+#
+# Prerequisites:
+#   - openshift-adp namespace (created by OperatorGroup below)
+#   - OSS bucket and AK/SK secret (see 05-oadp-oss-credentials.yaml)
+#
+# After this subscription is installed, apply:
+#   05-oadp-oss-credentials.yaml   — OSS access credentials
+#   05-oadp-dpa.yaml               — DataProtectionApplication CR
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-adp
+  annotations:
+    openshift.io/description: "OpenShift API for Data Protection"
+  labels:
+    openshift.io/cluster-monitoring: "true"
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: openshift-adp-operatorgroup
+  namespace: openshift-adp
+spec:
+  targetNamespaces:
+    - openshift-adp
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: redhat-oadp-operator
+  namespace: openshift-adp
+spec:
+  channel: stable-1.4
+  name: redhat-oadp-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
