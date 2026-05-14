@@ -1,0 +1,14 @@
+---
+# Subscription — instructs OLM to install and keep the operator updated.
+# Referencing the CatalogSource above; OLM will create an InstallPlan automatically.
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: alibaba-cloud-csi-operator
+  namespace: kube-system
+spec:
+  channel: stable
+  name: alibaba-cloud-csi-operator
+  source: alibaba-cloud-csi-catalog
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic

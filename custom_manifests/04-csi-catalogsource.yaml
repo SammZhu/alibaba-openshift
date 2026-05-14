@@ -1,0 +1,17 @@
+---
+# CatalogSource — tells OLM where to find the alibaba-cloud-csi-operator bundle.
+# This manifest is injected at install-time via the install-config extraManifests mechanism.
+# OLM will pull the catalog image and discover the operator bundle automatically.
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: alibaba-cloud-csi-catalog
+  namespace: openshift-marketplace
+spec:
+  sourceType: grpc
+  image: quay.io/samzhu/alibaba-cloud-csi-operator-catalog:latest
+  displayName: Alibaba Cloud CSI Operator
+  publisher: SammZhu
+  updateStrategy:
+    registryPoll:
+      interval: 24h

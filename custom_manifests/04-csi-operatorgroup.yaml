@@ -1,0 +1,12 @@
+---
+# OperatorGroup — scopes the operator to the kube-system namespace.
+# The alibaba-cloud-csi-operator deploys CSI components in kube-system,
+# so the OperatorGroup must target that namespace.
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: alibaba-cloud-csi-og
+  namespace: kube-system
+spec:
+  targetNamespaces:
+    - kube-system

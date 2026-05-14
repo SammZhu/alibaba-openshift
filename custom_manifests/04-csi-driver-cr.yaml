@@ -1,0 +1,46 @@
+---
+# AlibabaCloudCSIDriver CR — the singleton instance that tells the operator
+# which CSI drivers to deploy and how to configure them.
+# This CR is injected after the Subscription so the operator is already running.
+# NOTE: The operator itself watches for this CR in kube-system.
+apiVersion: csi.alibabacloud.com/v1alpha1
+kind: AlibabaCloudCSIDriver
+metadata:
+  name: cluster
+  namespace: kube-system
+spec:
+  # Phase 1: Disk (EBS / cloud disk) driver only
+  disk:
+    enabled: true
+    defaultStorageClass: true
+    storageClasses:
+      - name: alicloud-disk-efficiency
+        type: cloud_efficiency
+        reclaimPolicy: Delete
+        allowVolumeExpansion: true
+      - name: alicloud-disk-essd
+        type: cloud_essd
+        reclaimPolicy: Delete
+        allowVolumeExpansion: true
+
+  # Phase 2/3: disabled
+  nas:
+    enabled: false
+  oss:
+    enabled: false
+
+  # Upstream csi-driver image tag (kubernetes-sigs/alibaba-cloud-csi-driver)
+  imageTag: v1.35.3
+
+  # Auth via ECS RAM Role instance principal — no AK/SK required
+  auth:
+    ramToken: v2
+
+  # Controller Deployment pinned to control-plane nodes
+  controller:
+    replicas: 2
+    nodeSelector:
+      node-role.kubernetes.io/master: ""
+    tolerations:
+      - key: node-role.kubernetes.io/master
+        effect: NoSchedule
