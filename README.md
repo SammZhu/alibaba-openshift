@@ -15,6 +15,7 @@ Step 0 — Prepare boot image (one-time prerequisite)
   ├── Download Discovery ISO from cloud.redhat.com
   ├── Upload ISO to Alibaba Cloud OSS
   └── Import ISO as custom ECS image → note the Image ID (m-bp1xxx...)
+  📖 Detailed walkthrough: docs/boot-image-import.md
 
 Step 1 — Red Hat Hybrid Cloud Console
   └── Create cluster, set name + base domain, paste InstallConfig (from Step 2 output)
@@ -66,6 +67,7 @@ Step 1 — Generate Agent ISO locally
 Step 2 — Prepare boot image
   ├── Upload agent.x86_64.iso to Alibaba Cloud OSS
   └── Import ISO as custom ECS image → note the Image ID (m-bp1xxx...)
+  📖 Detailed walkthrough: docs/boot-image-import.md
 
 Step 3 — Alibaba Cloud ROS  (InstallationMethod=Agent-based, ImageId=<from Step 2>)
   └── ros-templates/create-cluster.yaml
