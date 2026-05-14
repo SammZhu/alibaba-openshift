@@ -1,0 +1,347 @@
+# OpenShift on Alibaba Cloud — 端到端 QUICKSTART
+
+从零开始安装一套 OpenShift 集群到阿里云，包含 CCM、CSI、CAPI、备份四层，
+**约 90–120 分钟**。
+
+> 详细架构和设计原理见 [README.md](README.md)。本指南只给路径，不解释为什么。
+
+---
+
+## 概览
+
+```
+Phase 0  准备 OpenShift 引导镜像（一次性）         ~30 min
+Phase 1  ROS 创建云基础设施                         ~10 min
+Phase 2  安装 OpenShift（Agent-based 或 Assisted） ~45 min
+Phase 3  应用 post-install 组件（一键脚本）         ~10 min
+Phase 4  验证安装                                   ~5 min
+Phase 5  Day-2 操作示例                             按需
+```
+
+---
+
+## 准备工作
+
+### 阿里云账号
+
+- 已开通：**OSS**、**ECS**、**VPC**、**SLB**、**PrivateZone**、**ROS**、**NAS**（可选）、**RAM**
+- RAM 用户权限：`AdministratorAccess` 最简单（生产环境再精细化）
+- 决定 **Region**（如 `cn-hangzhou`）— 整个流程都在同一个 Region
+
+### 本地工具
+
+| 工具 | 用途 |
+|---|---|
+| `aliyun` CLI | 可选，所有阿里云操作都能用控制台代替 |
+| `openshift-install` | Agent-based 必需，Assisted 可选 |
+| `oc`（`kubectl`）| 集群安装完成后访问 |
+| `kustomize` | 跑 `deploy-post-install.sh` 需要 |
+| `podman`（或 `docker`）| 仅当你要自己构建镜像 |
+
+### Red Hat 账号
+
+- [console.redhat.com/openshift](https://console.redhat.com/openshift) 账号
+- Pull Secret（在控制台 → Downloads → Pull secret 下载）
+- SSH 公钥（用来调试节点）
+
+### 仓库
+
+把这三个 git 仓库 **clone 到同一个父目录**——`deploy-post-install.sh` 假设它们是同级目录：
+
+```sh
+mkdir openshift-alibaba && cd openshift-alibaba
+git clone <url-to>/alibaba-openshift.git
+git clone <url-to>/alibaba-cloud-csi-operator.git
+git clone <url-to>/openshift-capi-alicloud.git
+```
+
+---
+
+## Phase 0 — 准备 OpenShift 引导镜像
+
+详细操作见 [`docs/boot-image-import.md`](docs/boot-image-import.md)。
+
+简要：
+
+1. **Assisted**：从 Red Hat Console 下载 Discovery ISO
+   **Agent-based**：本地 `openshift-install agent create image` 生成 `agent.x86_64.iso`
+2. 上传到阿里云 OSS Bucket（与目标 Region 相同）
+3. ECS → Images → Import Image（参数：Linux / Others_Linux / x86_64 / ISO）
+4. 等 15–30 分钟，记下生成的 `m-bp1xxx...` Image ID
+
+---
+
+## Phase 1 — 创建云基础设施
+
+打开 [ROS 控制台](https://ros.console.aliyun.com/) → **Create Stack** → **Use the file**，
+上传 `ros-templates/create-cluster.yaml`，填以下参数：
+
+| 参数 | 示例 | 说明 |
+|---|---|---|
+| `ClusterName` | `cluster1` | OpenShift 集群名 |
+| `BaseDomain` | `example.com` | 基础域名 |
+| `Region` | `cn-hangzhou` | 目标 Region |
+| `ImageId` | Phase 0 得到的 `m-bp1...` | 自定义镜像 ID |
+| `InstallationMethod` | `Assisted` 或 `Agent-based` | 选一个 |
+| `ControlPlaneCount` | `3` | 控制平面节点数 |
+| `ComputeCount` | `2` | 初始 Worker 数（之后可由 CAPI 扩容）|
+
+剩下保留默认。点 **Create**，等 10 分钟。
+
+### Stack Outputs 里要保存的值
+
+栈创建完成后到 **Outputs** 标签页，把这两个输出**完整复制下来**：
+
+- `InstallConfig` —— `install-config.yaml` 内容（Assisted 粘贴到 Red Hat Console；Agent-based 写到本地）
+- `DynamicCustomManifest` —— 保存为 `alibaba-ccm-config.yaml`，作为 install-time custom manifest 上传
+
+还有这些值后续要用：`ApiSLBIp`、`VpcId`、`PrivateVSwitch`、`WorkerSecurityGroup`、`NodeRamRoleName`。
+
+---
+
+## Phase 2 — 安装 OpenShift
+
+### 路径 A：Assisted Installer
+
+1. [console.redhat.com/openshift](https://console.redhat.com/openshift) → **Create cluster** → **Datacenter** → **Bare Metal**
+2. 把 `InstallConfig` 输出粘贴到 **Use saved install config**
+3. 进入 **Host discovery** 等节点上线（5–10 分钟，节点会自动跑发现 agent 上报）
+4. 给节点指派角色：3 master + N worker
+5. 上传 **Custom Manifests**（4 个文件）：
+
+   | 文件 | 来源 |
+   |---|---|
+   | `alibaba-ccm-config.yaml` | ROS Stack `DynamicCustomManifest` 输出 |
+   | `00-ovn-mtu.yaml` | 仓库 `custom_manifests/00-ovn-mtu.yaml` |
+   | `01-alibaba-ccm.yaml` | 仓库 `custom_manifests/01-alibaba-ccm.yaml` |
+   | `03-machineconfig-providerid.yaml` | 仓库 `custom_manifests/03-machineconfig-providerid.yaml` |
+
+6. 点 **Start installation**，等约 45 分钟
+
+### 路径 B：Agent-based Installer
+
+```sh
+# 把 ROS 的 InstallConfig 输出写到本地
+mkdir -p install-dir/openshift
+cat > install-dir/install-config.yaml <<EOF
+<粘贴 InstallConfig 输出>
+EOF
+# 填入 pullSecret 和 sshKey
+
+# agent-config.yaml（rendezvousIP 必须匹配 ROS RendezvousIp 参数）
+cat > install-dir/agent-config.yaml <<EOF
+<粘贴 AgentConfig 输出>
+EOF
+
+# 把所有 install-time manifest 拷进 openshift/
+cp custom_manifests/00-ovn-mtu.yaml install-dir/openshift/
+cp custom_manifests/01-alibaba-ccm.yaml install-dir/openshift/
+cp custom_manifests/03-machineconfig-providerid.yaml install-dir/openshift/
+
+# 把 ROS 输出的 DynamicCustomManifest 写为 alibaba-ccm-config.yaml
+cat > install-dir/openshift/alibaba-ccm-config.yaml <<EOF
+<粘贴 DynamicCustomManifest 输出>
+EOF
+
+# 生成 agent ISO，导入阿里云作为新的 ImageId（如果还没有）
+openshift-install agent create image --dir install-dir/
+
+# 监控安装进度
+openshift-install agent wait-for bootstrap-complete --dir install-dir/
+openshift-install agent wait-for install-complete --dir install-dir/
+```
+
+完成后 kubeconfig 在 `install-dir/auth/kubeconfig`。
+
+---
+
+## Phase 3 — 应用 post-install 组件
+
+```sh
+# 设置 kubeconfig
+export KUBECONFIG=install-dir/auth/kubeconfig
+# 或 Assisted：从 Red Hat Console 下载 kubeconfig
+
+# 验证集群可达
+oc get nodes
+
+# 一键部署 CAPI + CSI Operator + CSI Driver CR
+./scripts/deploy-post-install.sh
+
+# 如果要装 OADP 备份：
+./scripts/deploy-post-install.sh --with-oadp
+# 然后编辑 OSS 凭证并 apply：
+vi custom_manifests/05-oadp-oss-credentials.yaml
+oc apply -f custom_manifests/05-oadp-oss-credentials.yaml
+oc apply -f custom_manifests/05-oadp-dpa.yaml
+```
+
+**仅测试，不上 OperatorHub**：脚本默认走 OLM 旁路（`kustomize build | oc apply`）。
+
+**走 OLM 正式路径**：把脚本里的 CSI 阶段换成：
+```sh
+oc apply -f custom_manifests/04-csi-catalogsource.yaml
+oc apply -f custom_manifests/04-csi-operatorgroup.yaml
+oc apply -f custom_manifests/04-csi-subscription.yaml
+# 等 Subscription Healthy 后
+oc apply -f custom_manifests/04-csi-driver-cr.yaml
+```
+
+---
+
+## Phase 4 — 验证
+
+```sh
+# 1. 节点 Ready + ProviderID 注入
+oc get nodes -o wide
+oc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.providerID}{"\n"}{end}'
+# 应见 alicloud://<region>.<instance-id>
+
+# 2. CCM 健康
+oc get pods -n alibaba-cloud-controller-manager
+oc logs -n alibaba-cloud-controller-manager -l k8s-app=alibaba-cloud-controller-manager --tail=20
+
+# 3. CSI Operator + Driver
+oc get pods -n alibaba-cloud-csi-operator-system
+oc get alibabacloudcsidriver cluster -o yaml
+oc get storageclass
+
+# 4. CAPI Provider
+oc get pods -n capa-system
+oc get crd | grep cluster.x-k8s.io
+
+# 5. ClusterOperators 全部 Available
+oc get clusteroperators
+
+# 6. 实际挂盘测试
+cat <<'EOF' | oc apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-disk
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: alicloud-disk-essd
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-disk-pod
+spec:
+  containers:
+    - name: app
+      image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+      command: [sh, -c, "echo hello > /data/x && sleep 3600"]
+      volumeMounts:
+        - mountPath: /data
+          name: vol
+  volumes:
+    - name: vol
+      persistentVolumeClaim:
+        claimName: test-disk
+EOF
+
+oc wait pod/test-disk-pod --for=condition=Ready --timeout=120s
+oc exec test-disk-pod -- cat /data/x  # 输出 hello
+oc delete pod/test-disk-pod pvc/test-disk
+```
+
+详细检查清单见 [`docs/validation-checklist.md`](docs/validation-checklist.md)。
+
+---
+
+## Phase 5 — Day-2 操作
+
+### 扩缩容 Worker
+
+```sh
+# 准备 MachineDeployment（一次性，按 examples 改占位符）
+cp ../openshift-capi-alicloud/examples/capi-machinedeployment.yaml my-workers.yaml
+# 编辑 CLUSTER_NAME、NAMESPACE、REGION_ID、VPC_ID、VSWITCH_ID、WORKER_SG_ID、RAM_ROLE_NAME、IMAGE_ID
+oc apply -f my-workers.yaml
+
+# 扩容
+oc scale machinedeployment <name> --replicas=5 -n openshift-cluster-api
+```
+
+### 创建 VolumeSnapshot
+
+```sh
+# 启用 snapshot（默认关闭）：
+oc patch alibabacloudcsidriver cluster --type merge -p \
+  '{"spec":{"disk":{"snapshot":{"enabled":true}}}}'
+
+# 等 VolumeSnapshotClass 创建
+oc get volumesnapshotclass
+
+# 拍快照
+cat <<'EOF' | oc apply -f -
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: my-snap
+spec:
+  source:
+    persistentVolumeClaimName: test-disk
+  volumeSnapshotClassName: alibaba-cloud-disk-snapclass
+EOF
+```
+
+### 跑一次集群备份
+
+```sh
+oc create -n openshift-adp -f - <<'EOF'
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: full-cluster-backup-1
+spec:
+  storageLocation: alibaba-oss
+  includedNamespaces: ['*']
+EOF
+
+oc get backup -n openshift-adp -w
+```
+
+---
+
+## 销毁集群
+
+```sh
+# 1. 删除 OpenShift 内的工作负载（让 CCM/CSI 清理 SLB + 磁盘 + 快照）
+oc delete pvc --all -A
+oc delete svc --all -A --field-selector spec.type=LoadBalancer
+
+# 2. 等阿里云资源真正释放（SLB 删除是异步的，~3 分钟）
+sleep 180
+
+# 3. ROS 删除栈
+aliyun ros DeleteStack --StackId <stack-id>
+```
+
+> **重要**：直接 ROS 删栈而不先清理工作负载会留下"孤儿" SLB 和磁盘，
+> 需要手动清理才能避免持续计费。
+
+---
+
+## 故障排查
+
+| 现象 | 检查 |
+|---|---|
+| 节点 NotReady | `oc describe node` → 看 cloud-taint；CCM 日志 |
+| Pod CrashLoopBackOff | OVN MTU 没设？参看 `custom_manifests/00-ovn-mtu.yaml` |
+| PVC Pending | CSI 控制器日志：`oc logs -n alibaba-cloud-csi-operator-system -l app=csi-provisioner-disk` |
+| SLB 没自动创建 | CCM 健康？Service 是否 `type: LoadBalancer`？|
+| CAPI Machine 卡 Provisioning | `oc logs -n capa-system deploy/capa-controller-manager`；RAM Role 权限？ |
+
+---
+
+## 下一步
+
+- 跑 OPCT 合规性测试（Red Hat 认证关键）：`opct run --watch`
+- 启用 OpenShift Virtualization（VM 工作负载，需要 NAS CSI）
+- 加 OpenShift Logging + 监控持久化（PVC backed）
+- 申请 Red Hat Connect partner certification
