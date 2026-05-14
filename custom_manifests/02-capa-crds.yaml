@@ -1,196 +1,917 @@
 ---
-# Cluster API Provider Alibaba Cloud (CAPA) — CRD definitions
-# Source: https://github.com/SammZhu/cluster-api-provider-alibaba
-# Provides MachineSet-based auto-scaling (differentiator vs OCI approach)
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
   name: alibabacloudclusters.infrastructure.cluster.x-k8s.io
 spec:
   group: infrastructure.cluster.x-k8s.io
   names:
+    categories:
+    - cluster-api
     kind: AlibabaCloudCluster
     listKind: AlibabaCloudClusterList
     plural: alibabacloudclusters
     singular: alibabacloudcluster
   scope: Namespaced
   versions:
-    - name: v1beta1
-      served: true
-      storage: true
-      subresources:
-        status: {}
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            spec:
-              type: object
-              required: [region]
-              properties:
-                region:
-                  type: string
-                vpcID:
-                  type: string
-                resourceGroupID:
-                  type: string
-                controlPlaneEndpoint:
-                  type: object
+  - additionalPrinterColumns:
+    - jsonPath: .metadata.labels['cluster\.x-k8s\.io/cluster-name']
+      name: Cluster
+      type: string
+    - jsonPath: .status.ready
+      name: Ready
+      type: string
+    - jsonPath: .spec.region
+      name: Region
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: AlibabaCloudCluster is the Schema for the alibabacloudclusters
+          API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: AlibabaCloudClusterSpec defines the desired state of AlibabaCloudCluster.
+            properties:
+              additionalTags:
+                description: |-
+                  AdditionalTags are additional tags to apply to all cloud resources created
+                  for this cluster.
+                items:
+                  description: Tag is a key-value pair applied to an Alibaba Cloud
+                    resource.
                   properties:
-                    host:
+                    key:
+                      description: Key is the tag key.
+                      minLength: 1
                       type: string
-                    port:
+                    value:
+                      description: Value is the tag value.
+                      type: string
+                  required:
+                  - key
+                  - value
+                  type: object
+                type: array
+              controlPlaneEndpoint:
+                description: |-
+                  ControlPlaneEndpoint represents the endpoint used to communicate with the
+                  control plane. Populated by the controller once a SLB is provisioned.
+                minProperties: 1
+                properties:
+                  host:
+                    description: host is the hostname on which the API server is serving.
+                    maxLength: 512
+                    minLength: 1
+                    type: string
+                  port:
+                    description: port is the port on which the API server is serving.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                type: object
+              failureDomains:
+                description: |-
+                  FailureDomains lists the availability zones available for worker node
+                  placement. Each entry pairs a zone ID with the VSwitch to use in that zone.
+                  When set, CAPI automatically distributes Machines across zones using
+                  round-robin assignment via Machine.Spec.FailureDomain.
+                  Leave ZoneID/VSwitchID in AlibabaCloudMachineTemplate empty to allow
+                  this automatic placement; explicit values in the template take precedence.
+                items:
+                  description: |-
+                    FailureDomain maps an Alibaba Cloud availability zone to the VSwitch that
+                    should be used for ECS instances placed in that zone.
+                    When AlibabaCloudCluster.Spec.FailureDomains is populated, CAPI will
+                    automatically distribute Machines across the listed zones.
+                  properties:
+                    vSwitchID:
+                      description: VSwitchID is the ID of the VSwitch to use for instances
+                        in this zone.
+                      type: string
+                    zoneID:
+                      description: ZoneID is the Alibaba Cloud availability zone identifier
+                        (e.g. cn-hangzhou-h).
+                      type: string
+                  required:
+                  - vSwitchID
+                  - zoneID
+                  type: object
+                type: array
+              region:
+                description: Region is the Alibaba Cloud region where the cluster
+                  is deployed.
+                type: string
+              resourceGroupID:
+                description: ResourceGroupID is the ID of the resource group for all
+                  cluster resources.
+                type: string
+              vpcID:
+                description: |-
+                  VpcID is the ID of an existing VPC to use for the cluster. If empty, a VPC
+                  will be created.
+                type: string
+            required:
+            - region
+            type: object
+          status:
+            description: AlibabaCloudClusterStatus defines the observed state of AlibabaCloudCluster.
+            properties:
+              conditions:
+                description: Conditions defines current service state of the AlibabaCloudCluster.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
                       type: integer
-                      format: int32
-                additionalTags:
-                  type: array
-                  items:
-                    type: object
-                    properties:
-                      key:
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              failureDomains:
+                description: |-
+                  FailureDomains is the list of failure domains published to CAPI so it can
+                  automatically spread Machines across availability zones.
+                  Populated by the controller from Spec.FailureDomains.
+                items:
+                  description: |-
+                    FailureDomain is the Schema for Cluster API failure domains.
+                    It allows controllers to understand how many failure domains a cluster can optionally span across.
+                  properties:
+                    attributes:
+                      additionalProperties:
                         type: string
-                      value:
-                        type: string
-            status:
-              type: object
-              properties:
-                ready:
-                  type: boolean
-                vpcID:
-                  type: string
-                slbInstanceID:
-                  type: string
-                conditions:
-                  type: array
-                  items:
-                    type: object
+                      description: attributes is a free form map of attributes an
+                        infrastructure provider might use or require.
+                      type: object
+                    controlPlane:
+                      description: controlPlane determines if this failure domain
+                        is suitable for use by control plane machines.
+                      type: boolean
+                    name:
+                      description: name is the name of the failure domain.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              ready:
+                default: false
+                description: Ready indicates that the cluster infrastructure is ready.
+                type: boolean
+              slbInstanceID:
+                description: |-
+                  SLBInstanceID is the ID of the Server Load Balancer created for the
+                  control plane endpoint.
+                type: string
+              vpcID:
+                description: VpcID is the ID of the VPC created or adopted for the
+                  cluster.
+                type: string
+            required:
+            - ready
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
   name: alibabacloudclustertemplates.infrastructure.cluster.x-k8s.io
 spec:
   group: infrastructure.cluster.x-k8s.io
   names:
+    categories:
+    - cluster-api
     kind: AlibabaCloudClusterTemplate
     listKind: AlibabaCloudClusterTemplateList
     plural: alibabacloudclustertemplates
     singular: alibabacloudclustertemplate
   scope: Namespaced
   versions:
-    - name: v1beta1
-      served: true
-      storage: true
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            spec:
-              type: object
-              properties:
-                template:
-                  type: object
+  - additionalPrinterColumns:
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: AlibabaCloudClusterTemplate is the Schema for the alibabacloudclustertemplates
+          API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: AlibabaCloudClusterTemplateSpec defines the desired state
+              of AlibabaCloudClusterTemplate.
+            properties:
+              template:
+                description: AlibabaCloudClusterTemplateResource describes the data
+                  needed to create an AlibabaCloudCluster from a template.
+                properties:
+                  spec:
+                    description: AlibabaCloudClusterSpec defines the desired state
+                      of AlibabaCloudCluster.
+                    properties:
+                      additionalTags:
+                        description: |-
+                          AdditionalTags are additional tags to apply to all cloud resources created
+                          for this cluster.
+                        items:
+                          description: Tag is a key-value pair applied to an Alibaba
+                            Cloud resource.
+                          properties:
+                            key:
+                              description: Key is the tag key.
+                              minLength: 1
+                              type: string
+                            value:
+                              description: Value is the tag value.
+                              type: string
+                          required:
+                          - key
+                          - value
+                          type: object
+                        type: array
+                      controlPlaneEndpoint:
+                        description: |-
+                          ControlPlaneEndpoint represents the endpoint used to communicate with the
+                          control plane. Populated by the controller once a SLB is provisioned.
+                        minProperties: 1
+                        properties:
+                          host:
+                            description: host is the hostname on which the API server
+                              is serving.
+                            maxLength: 512
+                            minLength: 1
+                            type: string
+                          port:
+                            description: port is the port on which the API server
+                              is serving.
+                            format: int32
+                            maximum: 65535
+                            minimum: 1
+                            type: integer
+                        type: object
+                      failureDomains:
+                        description: |-
+                          FailureDomains lists the availability zones available for worker node
+                          placement. Each entry pairs a zone ID with the VSwitch to use in that zone.
+                          When set, CAPI automatically distributes Machines across zones using
+                          round-robin assignment via Machine.Spec.FailureDomain.
+                          Leave ZoneID/VSwitchID in AlibabaCloudMachineTemplate empty to allow
+                          this automatic placement; explicit values in the template take precedence.
+                        items:
+                          description: |-
+                            FailureDomain maps an Alibaba Cloud availability zone to the VSwitch that
+                            should be used for ECS instances placed in that zone.
+                            When AlibabaCloudCluster.Spec.FailureDomains is populated, CAPI will
+                            automatically distribute Machines across the listed zones.
+                          properties:
+                            vSwitchID:
+                              description: VSwitchID is the ID of the VSwitch to use
+                                for instances in this zone.
+                              type: string
+                            zoneID:
+                              description: ZoneID is the Alibaba Cloud availability
+                                zone identifier (e.g. cn-hangzhou-h).
+                              type: string
+                          required:
+                          - vSwitchID
+                          - zoneID
+                          type: object
+                        type: array
+                      region:
+                        description: Region is the Alibaba Cloud region where the
+                          cluster is deployed.
+                        type: string
+                      resourceGroupID:
+                        description: ResourceGroupID is the ID of the resource group
+                          for all cluster resources.
+                        type: string
+                      vpcID:
+                        description: |-
+                          VpcID is the ID of an existing VPC to use for the cluster. If empty, a VPC
+                          will be created.
+                        type: string
+                    required:
+                    - region
+                    type: object
+                required:
+                - spec
+                type: object
+            required:
+            - template
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources: {}
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
   name: alibabacloudmachines.infrastructure.cluster.x-k8s.io
 spec:
   group: infrastructure.cluster.x-k8s.io
   names:
+    categories:
+    - cluster-api
     kind: AlibabaCloudMachine
     listKind: AlibabaCloudMachineList
     plural: alibabacloudmachines
     singular: alibabacloudmachine
   scope: Namespaced
   versions:
-    - name: v1beta1
-      served: true
-      storage: true
-      subresources:
-        status: {}
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            spec:
-              type: object
-              required: [instanceType, imageID]
-              properties:
-                providerID:
-                  type: string
-                instanceType:
-                  type: string
-                imageID:
-                  type: string
-                regionID:
-                  type: string
-                zoneID:
-                  type: string
-                securityGroupIDs:
-                  type: array
-                  items:
+  - additionalPrinterColumns:
+    - jsonPath: .metadata.labels['cluster\.x-k8s\.io/cluster-name']
+      name: Cluster
+      type: string
+    - jsonPath: .status.instanceState
+      name: State
+      type: string
+    - jsonPath: .status.ready
+      name: Ready
+      type: string
+    - jsonPath: .status.instanceID
+      name: InstanceID
+      type: string
+    - jsonPath: .metadata.ownerReferences[?(@.kind=="Machine")].name
+      name: Machine
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: AlibabaCloudMachine is the Schema for the alibabacloudmachines
+          API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: AlibabaCloudMachineSpec defines the desired state of AlibabaCloudMachine.
+            properties:
+              credentialsSecret:
+                description: |-
+                  CredentialsSecret refers to a Secret containing Alibaba Cloud credentials.
+                  If not specified, the controller uses the ambient credentials from the
+                  cluster credential infrastructure.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
                     type: string
-                vSwitchID:
-                  type: string
-                systemDisk:
-                  type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              dataDisks:
+                description: DataDisks describes additional data disks.
+                items:
+                  description: DataDisk describes an additional data disk for an ECS
+                    instance.
                   properties:
                     category:
+                      description: Category is the disk category.
+                      enum:
+                      - cloud_efficiency
+                      - cloud_ssd
+                      - cloud_essd
+                      - cloud_auto
+                      type: string
+                    name:
+                      description: Name is an optional identifier for the data disk.
                       type: string
                     size:
+                      description: Size is the disk size in GiB.
+                      minimum: 20
                       type: integer
-                ramRoleName:
+                  required:
+                  - category
+                  - size
+                  type: object
+                type: array
+              imageID:
+                description: ImageID is the ID of the ECS image to use for the instance.
+                type: string
+              instanceType:
+                description: InstanceType is the ECS instance type (e.g. ecs.c6.large).
+                type: string
+              providerID:
+                description: |-
+                  ProviderID is the unique identifier as specified by the cloud provider.
+                  Populated by the controller after ECS instance creation.
+                type: string
+              ramRoleName:
+                description: RAMRoleName is the RAM role name to attach to the ECS
+                  instance.
+                type: string
+              regionID:
+                description: RegionID is the Alibaba Cloud region. Defaults to the
+                  cluster region.
+                type: string
+              securityGroupIDs:
+                description: SecurityGroupIDs is the list of security group IDs to
+                  associate with the instance.
+                items:
                   type: string
-                tags:
-                  type: array
-                  items:
-                    type: object
-                    properties:
-                      key:
-                        type: string
-                      value:
-                        type: string
-            status:
-              type: object
-              properties:
-                ready:
-                  type: boolean
-                instanceID:
-                  type: string
-                instanceState:
-                  type: string
-                addresses:
-                  type: array
-                  items:
-                    type: object
-                conditions:
-                  type: array
-                  items:
-                    type: object
+                type: array
+              systemDisk:
+                description: SystemDisk describes the system disk configuration.
+                properties:
+                  category:
+                    description: Category is the disk category (e.g. cloud_efficiency,
+                      cloud_ssd, cloud_essd).
+                    enum:
+                    - cloud_efficiency
+                    - cloud_ssd
+                    - cloud_essd
+                    - cloud_auto
+                    type: string
+                  size:
+                    description: Size is the disk size in GiB.
+                    minimum: 20
+                    type: integer
+                required:
+                - category
+                - size
+                type: object
+              tags:
+                description: Tags are additional tags to apply to the ECS instance.
+                items:
+                  description: Tag is a key-value pair applied to an Alibaba Cloud
+                    resource.
+                  properties:
+                    key:
+                      description: Key is the tag key.
+                      minLength: 1
+                      type: string
+                    value:
+                      description: Value is the tag value.
+                      type: string
+                  required:
+                  - key
+                  - value
+                  type: object
+                type: array
+              userDataSecret:
+                description: |-
+                  UserDataSecret refers to a Secret containing the base64-encoded user data
+                  script to execute on instance startup.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              vSwitchID:
+                description: VSwitchID is the ID of the vSwitch to use for the primary
+                  network interface.
+                type: string
+              zoneID:
+                description: ZoneID is the availability zone within the region.
+                type: string
+            required:
+            - imageID
+            - instanceType
+            type: object
+          status:
+            description: AlibabaCloudMachineStatus defines the observed state of AlibabaCloudMachine.
+            properties:
+              addresses:
+                description: Addresses contains the associated addresses for the machine.
+                items:
+                  description: MachineAddress contains information for the node's
+                    address.
+                  properties:
+                    address:
+                      description: address is the machine address.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    type:
+                      description: type is the machine address type, one of Hostname,
+                        ExternalIP, InternalIP, ExternalDNS or InternalDNS.
+                      enum:
+                      - Hostname
+                      - ExternalIP
+                      - InternalIP
+                      - ExternalDNS
+                      - InternalDNS
+                      type: string
+                  required:
+                  - address
+                  - type
+                  type: object
+                type: array
+              conditions:
+                description: Conditions defines current service state of the AlibabaCloudMachine.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              failureMessage:
+                description: |-
+                  FailureMessage will be set in the event that there is a terminal problem
+                  reconciling the Machine and will contain a more verbose string suitable
+                  for logging and human consumption.
+                type: string
+              failureReason:
+                description: |-
+                  FailureReason will be set in the event that there is a terminal problem
+                  reconciling the Machine and will contain a succinct value suitable for
+                  machine interpretation.
+                type: string
+              instanceID:
+                description: InstanceID is the ECS instance ID of the provisioned
+                  machine.
+                type: string
+              instanceState:
+                description: InstanceState reflects the current state of the ECS instance.
+                type: string
+              ready:
+                default: false
+                description: Ready indicates that the machine is ready to receive
+                  workloads.
+                type: boolean
+            required:
+            - ready
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
   name: alibabacloudmachinetemplates.infrastructure.cluster.x-k8s.io
 spec:
   group: infrastructure.cluster.x-k8s.io
   names:
+    categories:
+    - cluster-api
     kind: AlibabaCloudMachineTemplate
     listKind: AlibabaCloudMachineTemplateList
     plural: alibabacloudmachinetemplates
     singular: alibabacloudmachinetemplate
   scope: Namespaced
   versions:
-    - name: v1beta1
-      served: true
-      storage: true
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            spec:
-              type: object
-              properties:
-                template:
-                  type: object
+  - additionalPrinterColumns:
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: AlibabaCloudMachineTemplate is the Schema for the alibabacloudmachinetemplates
+          API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: AlibabaCloudMachineTemplateSpec defines the desired state
+              of AlibabaCloudMachineTemplate.
+            properties:
+              template:
+                description: AlibabaCloudMachineTemplateResource describes the data
+                  needed to create an AlibabaCloudMachine from a template.
+                properties:
+                  spec:
+                    description: AlibabaCloudMachineSpec defines the desired state
+                      of AlibabaCloudMachine.
+                    properties:
+                      credentialsSecret:
+                        description: |-
+                          CredentialsSecret refers to a Secret containing Alibaba Cloud credentials.
+                          If not specified, the controller uses the ambient credentials from the
+                          cluster credential infrastructure.
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      dataDisks:
+                        description: DataDisks describes additional data disks.
+                        items:
+                          description: DataDisk describes an additional data disk
+                            for an ECS instance.
+                          properties:
+                            category:
+                              description: Category is the disk category.
+                              enum:
+                              - cloud_efficiency
+                              - cloud_ssd
+                              - cloud_essd
+                              - cloud_auto
+                              type: string
+                            name:
+                              description: Name is an optional identifier for the
+                                data disk.
+                              type: string
+                            size:
+                              description: Size is the disk size in GiB.
+                              minimum: 20
+                              type: integer
+                          required:
+                          - category
+                          - size
+                          type: object
+                        type: array
+                      imageID:
+                        description: ImageID is the ID of the ECS image to use for
+                          the instance.
+                        type: string
+                      instanceType:
+                        description: InstanceType is the ECS instance type (e.g. ecs.c6.large).
+                        type: string
+                      providerID:
+                        description: |-
+                          ProviderID is the unique identifier as specified by the cloud provider.
+                          Populated by the controller after ECS instance creation.
+                        type: string
+                      ramRoleName:
+                        description: RAMRoleName is the RAM role name to attach to
+                          the ECS instance.
+                        type: string
+                      regionID:
+                        description: RegionID is the Alibaba Cloud region. Defaults
+                          to the cluster region.
+                        type: string
+                      securityGroupIDs:
+                        description: SecurityGroupIDs is the list of security group
+                          IDs to associate with the instance.
+                        items:
+                          type: string
+                        type: array
+                      systemDisk:
+                        description: SystemDisk describes the system disk configuration.
+                        properties:
+                          category:
+                            description: Category is the disk category (e.g. cloud_efficiency,
+                              cloud_ssd, cloud_essd).
+                            enum:
+                            - cloud_efficiency
+                            - cloud_ssd
+                            - cloud_essd
+                            - cloud_auto
+                            type: string
+                          size:
+                            description: Size is the disk size in GiB.
+                            minimum: 20
+                            type: integer
+                        required:
+                        - category
+                        - size
+                        type: object
+                      tags:
+                        description: Tags are additional tags to apply to the ECS
+                          instance.
+                        items:
+                          description: Tag is a key-value pair applied to an Alibaba
+                            Cloud resource.
+                          properties:
+                            key:
+                              description: Key is the tag key.
+                              minLength: 1
+                              type: string
+                            value:
+                              description: Value is the tag value.
+                              type: string
+                          required:
+                          - key
+                          - value
+                          type: object
+                        type: array
+                      userDataSecret:
+                        description: |-
+                          UserDataSecret refers to a Secret containing the base64-encoded user data
+                          script to execute on instance startup.
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      vSwitchID:
+                        description: VSwitchID is the ID of the vSwitch to use for
+                          the primary network interface.
+                        type: string
+                      zoneID:
+                        description: ZoneID is the availability zone within the region.
+                        type: string
+                    required:
+                    - imageID
+                    - instanceType
+                    type: object
+                required:
+                - spec
+                type: object
+            required:
+            - template
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources: {}

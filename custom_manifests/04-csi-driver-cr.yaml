@@ -9,23 +9,50 @@ metadata:
   name: cluster
   namespace: kube-system
 spec:
-  # Phase 1: Disk (EBS / cloud disk) driver only
+  # Phase 1: Disk (EBS / cloud disk) driver
   disk:
     enabled: true
     defaultStorageClass: true
     storageClasses:
-      - name: alicloud-disk-efficiency
-        type: cloud_efficiency
-        reclaimPolicy: Delete
-        allowVolumeExpansion: true
       - name: alicloud-disk-essd
         type: cloud_essd
         reclaimPolicy: Delete
         allowVolumeExpansion: true
+        virtDefault: true    # default StorageClass for OpenShift Virtualization VM OS disks
+      - name: alicloud-disk-efficiency
+        type: cloud_efficiency
+        reclaimPolicy: Delete
+        allowVolumeExpansion: true
+    # snapshot.storage.k8s.io CRDs must be installed before enabling.
+    # The operator will skip VolumeSnapshotClass creation gracefully if CRDs are absent.
+    snapshot:
+      enabled: false
+      className: alibaba-cloud-disk-snapclass
+    # Patch CDI StorageProfile so KubeVirt DataVolumes select Block+RWO automatically.
+    # Silently skipped if CDI / OpenShift Virtualization is not installed.
+    # cloneStrategy values (must match CDI cdi.kubevirt.io/v1beta1 CDICloneStrategy):
+    #   csi-clone  — zero-copy CSI clone (fastest)
+    #   snapshot   — VolumeSnapshot-based copy
+    #   copy       — host-assisted pod copy (slowest; NOTE: NOT "host-assisted")
+    storageProfile:
+      patch: false
+      cloneStrategy: csi-clone
 
-  # Phase 2/3: disabled
+  # Phase 2: NAS (file storage) driver — required for VM live migration (ReadWriteMany)
   nas:
-    enabled: false
+    enabled: false   # set to true when NAS CSI driver is ready
+    storageClasses:
+      - name: alicloud-nas-standard
+        storageType: standard
+        mountProtocol: nfs
+        reclaimPolicy: Delete
+        allowVolumeExpansion: true
+        virtDefault: true    # recommended for live migration
+    storageProfile:
+      patch: false
+      cloneStrategy: csi-clone  # NAS supports csi-clone; no snapshot support yet
+
+  # Phase 3: OSS — not yet implemented
   oss:
     enabled: false
 
