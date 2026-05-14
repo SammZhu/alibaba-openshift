@@ -267,10 +267,11 @@ Resources:
     Type: ALIYUN::RAM::ManagedPolicy
     Properties:
       PolicyName: !Sub '${ClusterName}-node-policy'
-      Description: Permissions for OpenShift CCM and CAPA
+      Description: Permissions for OpenShift CCM, CAPA, and Alibaba Cloud CSI Driver
       PolicyDocument:
         Version: '1'
         Statement:
+          # ── ECS instance lifecycle (CCM + CAPA) ─────────────────────────────
           - Effect: Allow
             Action:
               - ecs:DescribeInstances
@@ -284,6 +285,7 @@ Resources:
               - ecs:TagResources
               - ecs:ListTagResources
             Resource: '*'
+          # ── SLB (CCM LoadBalancer service) ──────────────────────────────────
           - Effect: Allow
             Action:
               - slb:CreateLoadBalancer
@@ -297,16 +299,38 @@ Resources:
               - slb:DescribeLoadBalancerAttribute
               - slb:SetLoadBalancerDeleteProtection
             Resource: '*'
+          # ── VPC / VSwitch (CCM + CAPA network) ──────────────────────────────
           - Effect: Allow
             Action:
               - vpc:DescribeVpcs
               - vpc:DescribeVSwitches
               - vpc:DescribeRouteTableList
             Resource: '*'
+          # ── Private Zone DNS (CCM) ───────────────────────────────────────────
           - Effect: Allow
             Action:
               - pvtz:DescribeZones
               - pvtz:DescribeZoneRecords
+            Resource: '*'
+          # ── ECS Disk (Alibaba Cloud CSI Driver — Phase 1) ────────────────────
+          # Required for dynamic PersistentVolume provisioning, attachment,
+          # expansion, and snapshot operations via the disk CSI driver.
+          - Effect: Allow
+            Action:
+              - ecs:AttachDisk
+              - ecs:DetachDisk
+              - ecs:DescribeDisks
+              - ecs:CreateDisk
+              - ecs:DeleteDisk
+              - ecs:ResizeDisk
+              - ecs:ModifyDiskAttribute
+              - ecs:CreateSnapshot
+              - ecs:DeleteSnapshot
+              - ecs:DescribeSnapshots
+              - ecs:CreateAutoSnapshotPolicy
+              - ecs:ApplyAutoSnapshotPolicy
+              - ecs:DeleteAutoSnapshotPolicy
+              - ecs:DescribeAutoSnapshotPolicyEx
             Resource: '*'
 
   RolePolicyAttachment:
