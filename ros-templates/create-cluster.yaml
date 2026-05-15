@@ -65,7 +65,11 @@ Parameters:
   ComputeCount:
     Type: Number
     Default: 3
-    MinValue: 2
+    # MinValue 0 supports the "compact 3-node" topology where the control plane
+    # also schedules workloads (set ComputeCount=0 + install-config compute.replicas=0).
+    # For HA production set 2 or higher; CAPI MachineDeployment can still scale
+    # workers separately at runtime regardless of this value.
+    MinValue: 0
 
   ComputeInstanceType:
     Type: String
@@ -116,6 +120,9 @@ Parameters:
 Conditions:
   IsAgentBased: !Equals [!Ref InstallationMethod, Agent-based]
   IsAssisted:   !Equals [!Ref InstallationMethod, Assisted]
+  # Skip the worker InstanceGroup entirely when ComputeCount=0 — required by
+  # ROS because ALIYUN::ECS::InstanceGroup rejects MinAmount/MaxAmount=0.
+  HasWorkers:   !Not [!Equals [!Ref ComputeCount, 0]]
 
 Resources:
   # ── Networking ───────────────────────────────────────────────────────────────
@@ -557,6 +564,7 @@ Resources:
 
   WorkerInstanceGroup:
     Type: ALIYUN::ECS::InstanceGroup
+    Condition: HasWorkers
     DependsOn:
       - NatSNATEntry
       - NatSNATEntry2

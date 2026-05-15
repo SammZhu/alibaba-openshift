@@ -76,17 +76,23 @@ git clone <url-to>/openshift-capi-alicloud.git
 打开 [ROS 控制台](https://ros.console.aliyun.com/) → **Create Stack** → **Use the file**，
 上传 `ros-templates/create-cluster.yaml`，填以下参数：
 
-| 参数 | 示例 | 说明 |
+| 参数 | 生产示例 | 测试（compact 3 节点）|
 |---|---|---|
-| `ClusterName` | `cluster1` | OpenShift 集群名 |
-| `BaseDomain` | `example.com` | 基础域名 |
-| `Region` | `cn-hangzhou` | 目标 Region |
-| `ImageId` | Phase 0 得到的 `m-bp1...` | 自定义镜像 ID |
-| `InstallationMethod` | `Assisted` 或 `Agent-based` | 选一个 |
-| `ControlPlaneCount` | `3` | 控制平面节点数 |
-| `ComputeCount` | `2` | 初始 Worker 数（之后可由 CAPI 扩容）|
+| `ClusterName` | `cluster1` | 同上 |
+| `BaseDomain` | `example.com` | 同上 |
+| `Region` | `cn-hangzhou` | 同上 |
+| `ImageId` | Phase 0 得到的 `m-bp1...` | 同上 |
+| `InstallationMethod` | `Assisted` 或 `Agent-based` | 同上 |
+| `ControlPlaneCount` | `3` | `3` |
+| `ComputeCount` | `2` | **`0`** ← 关键：让 master 也跑工作负载 |
+| `ControlPlaneInstanceType` | `ecs.g7.4xlarge` | `ecs.g7.xlarge`（4C/16G）|
 
 剩下保留默认。点 **Create**，等 10 分钟。
+
+> **成本优化提示**：测试时用 `ComputeCount=0` + `ecs.g7.xlarge` 拼成 compact 3 节点，
+> 总成本约 ¥4/h（按量付费），日均 ¥80-100。验证完销毁即可。
+> Production 上线时再切回 3 master + 2 worker 的标准拓扑。
+> 详见下文"测试预算控制"章节。
 
 ### Stack Outputs 里要保存的值
 
@@ -305,6 +311,54 @@ EOF
 
 oc get backup -n openshift-adp -w
 ```
+
+---
+
+## 测试预算控制
+
+如果你只是验证而不是上线，按这套配置跑：
+
+### Compact 3-node 拓扑（推荐测试配置）
+
+```
+3× master（4C/16G）+ 0 worker + 1 SLB + 1 NAT + 3× 100GB ESSD
+≈ ¥4/h ≈ ¥80-100/天（按量付费）
+```
+
+**何时合适**：
+- ✅ 验证 CSI Operator + CCM + CAPI provider 的完整链路
+- ✅ 验证 PVC 挂载、Service Type=LoadBalancer、节点 ProviderID
+- ✅ 跑 OPCT 的 Kubernetes + 部分 OpenShift conformance 套件
+- ❌ 不适合：跨多 AZ 容灾验证、独立 worker 池压力测试
+
+### 关键省钱招式
+
+1. **按量付费**，不要订阅式（subscription）
+2. **测试用 Spot 实例做临时 worker**（CAPI 扩容时）：
+   ```yaml
+   # AlibabaCloudMachineTemplate.spec.template.spec 加：
+   spotStrategy: SpotAsPriceGo  # 当前 SDK 还需扩展支持
+   ```
+   现成的 spot 实例价 = 按量价的 10-30%
+3. **预算告警**（一次性配置）：
+   ```sh
+   aliyun bssopenapi CreateBudget --BudgetType DAILY --BudgetAmount 50
+   ```
+4. **资源组隔离 + 标签**，方便整批清理：
+   ```sh
+   aliyun resourcemanager CreateResourceGroup --Name openshift-test
+   ```
+5. **测试结束立即销毁**（见下文"销毁集群"）
+
+### 三种典型成本
+
+| 场景 | 配置 | 时费 | 4 小时 | 一天 |
+|---|---|---|---|---|
+| Compact 3 节点（推荐）| 3× g7.xlarge + SLB + NAT | ¥4 | ¥16 | ¥80-100 |
+| 标准 3+2 | 3× g7.xlarge + 2× g7.large | ¥6 | ¥24 | ¥120-150 |
+| 完整 OPCT 验证 | 3+2 跨多 AZ + 24h 跑 OPCT | ¥6 | — | ¥150 |
+
+新阿里云账号通常有 ¥300-1000 抵扣金，足够覆盖 1-2 次完整验证。
 
 ---
 
