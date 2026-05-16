@@ -36,18 +36,63 @@
 - ECS 试用券（通常 3 个月内有效）
 - VPC、SLB 通常没有免费额度
 
-### 0.2 创建专用 RAM 子用户
+### 0.2 准备 RAM 子用户
 
-不要用主账号操作，创建专用 RAM 用户：
+不要用主账号操作，必须用 RAM 子用户。两种情况：
+
+#### 情况 A：已有 RAM 子用户（你属于这种）
+
+先确认它的权限是否够用：
+
+1. [RAM 控制台 → Users](https://ram.console.aliyun.com/users) → 点击你的子用户名
+2. **Permissions** 标签 → 列出该用户已有的系统策略
+3. 对照下面这个清单，**缺哪个加哪个**：
+
+   | 系统策略名 | 用途 |
+   |---|---|
+   | `AliyunECSFullAccess` | 创建 ECS、安全组、自定义镜像 |
+   | `AliyunVPCFullAccess` | 创建 VPC、VSwitch、NAT、EIP |
+   | `AliyunSLBFullAccess` | 创建 API SLB |
+   | `AliyunOSSFullAccess` | 上传 ISO 到 OSS |
+   | `AliyunRAMFullAccess` | 创建 NodeRamRole（Instance Principal）|
+   | `AliyunPVTZFullAccess` | 创建 PrivateZone（DNS）|
+   | `AliyunROSFullAccess` | 创建 ROS 栈本身 |
+   | `AliyunResourceManagerFullAccess` | 创建资源组（可选）|
+
+   或者最简单：直接给 `AdministratorAccess`，覆盖一切（**仅测试场景推荐**）。
+
+   补权限：**Permissions** → **Grant Permission** → 搜索策略名 → 勾选 → **OK**。
+
+4. 检查 AccessKey 状态：
+   - **Authentication** 标签 → **AccessKeys** 子标签
+   - 如果有现役 AK 且你**还有 SK**：直接用，跳过下一步
+   - 如果只有 AK 但 SK 丢了：**Disable** 旧的，**Create AccessKey** 建新的并立即记录 SK
+   - 如果一个都没有：**Create AccessKey** 创建一对（**SK 仅显示一次**，立即保存）
+
+5. 用 CLI 自检权限是否到位：
+   ```sh
+   # 用你的 AK/SK 配置 aliyun CLI（见 0.3 节）
+   # 然后跑这几条 dry-run 命令验证权限：
+   aliyun ecs DescribeRegions --RegionId cn-hangzhou >/dev/null && echo "ECS OK"
+   aliyun vpc DescribeVpcs --RegionId cn-hangzhou >/dev/null && echo "VPC OK"
+   aliyun slb DescribeLoadBalancers --RegionId cn-hangzhou >/dev/null && echo "SLB OK"
+   aliyun ram ListRoles >/dev/null && echo "RAM OK"
+   aliyun ros DescribeRegions >/dev/null && echo "ROS OK"
+   aliyun pvtz DescribeZones >/dev/null && echo "PVTZ OK"
+   aliyun oss ls --region cn-hangzhou >/dev/null && echo "OSS OK"
+   ```
+   全部输出 "OK" 即可往下走。任一失败 → 缺对应的 FullAccess 策略，回步骤 3 补。
+
+#### 情况 B：还没有 RAM 子用户
+
+按下面步骤创建：
 
 1. [RAM 控制台](https://ram.console.aliyun.com/) → **Identities** → **Users** → **Create User**
 2. **Logon Name**: `openshift-test`
 3. **Access Mode**: 勾选 **Console Access** + **Programmatic Access**
-4. 创建后**记录** AccessKey ID 和 Secret（仅显示一次）
+4. 创建后**立即记录** AccessKey ID 和 Secret（仅显示一次）
 5. 切到 **Permissions** 标签 → **Grant Permission**
-6. 加这些系统策略（粗粒度，仅测试用）：
-   - `AdministratorAccess`（最简单）
-   - 或者细粒度：`AliyunECSFullAccess` + `AliyunVPCFullAccess` + `AliyunSLBFullAccess` + `AliyunOSSFullAccess` + `AliyunRAMFullAccess` + `AliyunPVTZFullAccess` + `AliyunROSFullAccess` + `AliyunResourceManagerFullAccess`
+6. 加上情况 A 表格中的所有系统策略，或者直接 `AdministratorAccess`
 
 ### 0.3 创建资源组（方便清理）
 
@@ -55,11 +100,20 @@
 # 安装 aliyun CLI（macOS）
 brew install aliyun-cli
 
-# 配置（用刚创建的 RAM 用户的 AK/SK）
-aliyun configure --profile default
+# 配置（用 0.2 步骤拿到的 RAM 用户 AK/SK）
+# 推荐用独立 profile，不影响你已有的默认 profile：
+aliyun configure --profile openshift-test
 # Region: cn-hangzhou
-# Access Key Id: <从上一步>
-# Access Key Secret: <从上一步>
+# Access Key Id: <你的子用户 AK>
+# Access Key Secret: <你的子用户 SK>
+#
+# 后续命令都加 --profile openshift-test，例如：
+#   aliyun ecs DescribeInstances --profile openshift-test --RegionId cn-hangzhou
+#
+# 或者全程导出环境变量代替 --profile：
+#   export ALIBABA_CLOUD_PROFILE=openshift-test
+#
+# 本文档后续命令省略 --profile，默认你已设置 ALIBABA_CLOUD_PROFILE。
 
 # 创建资源组
 aliyun resourcemanager CreateResourceGroup \
