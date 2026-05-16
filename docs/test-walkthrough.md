@@ -135,7 +135,7 @@ git clone https://github.com/SammZhu/openshift-capi-alicloud.git
 4. 填写：
    - **Cluster name**: `cluster1`（任意，记下来）
    - **Base domain**: `example.local`（测试用，无需真实域名）
-   - **OpenShift version**: 4.16 或更高
+   - **OpenShift version**: **4.20**（推荐 EUS，4.20 标准 14 月 + EUS 12 月 + ELS 24 月 ≈ 50 月支持；4.21 是奇数版本只 14 月）
    - **CPU architecture**: x86_64
 5. **Next** → **Operators** 页面：全部跳过 → **Next**
 6. **Host discovery** 页面 → **Add hosts** → 选 **Minimal image file**
