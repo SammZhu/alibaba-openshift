@@ -57,9 +57,12 @@
    | `AliyunRAMFullAccess` | 创建 NodeRamRole（Instance Principal）|
    | `AliyunPVTZFullAccess` | 创建 PrivateZone（DNS）|
    | `AliyunROSFullAccess` | 创建 ROS 栈本身 |
-   | `AliyunResourceManagerFullAccess` | 创建资源组（可选）|
 
    或者最简单：直接给 `AdministratorAccess`，覆盖一切（**仅测试场景推荐**）。
+
+   > 资源组（Resource Group）功能没有单独的公开 FullAccess 策略——
+   > 要么用 `AdministratorAccess`（已包含），要么跳过 0.4 节（资源组是
+   > 可选的，仅方便清理；用资源标签 `cluster=test-xxx` 一样能批量过滤）。
 
    补权限：**Permissions** → **Grant Permission** → 搜索策略名 → 勾选 → **OK**。
 
@@ -94,7 +97,7 @@
 5. 切到 **Permissions** 标签 → **Grant Permission**
 6. 加上情况 A 表格中的所有系统策略，或者直接 `AdministratorAccess`
 
-### 0.3 创建资源组（方便清理）
+### 0.3 安装并配置 aliyun CLI（必做）
 
 ```sh
 # 安装 aliyun CLI（macOS）
@@ -106,25 +109,27 @@ aliyun configure --profile openshift-test
 # Region: cn-hangzhou
 # Access Key Id: <你的子用户 AK>
 # Access Key Secret: <你的子用户 SK>
-#
-# 后续命令都加 --profile openshift-test，例如：
-#   aliyun ecs DescribeInstances --profile openshift-test --RegionId cn-hangzhou
-#
-# 或者全程导出环境变量代替 --profile：
-#   export ALIBABA_CLOUD_PROFILE=openshift-test
-#
-# 本文档后续命令省略 --profile，默认你已设置 ALIBABA_CLOUD_PROFILE。
 
-# 创建资源组
+# 后续命令默认你已设置环境变量：
+export ALIBABA_CLOUD_PROFILE=openshift-test
+```
+
+### 0.4 创建资源组（可选，方便统一清理）
+
+> 跳过这一步不影响后续。改用资源标签 `cluster=test-${ClusterName}` 一样能批量
+> 过滤删除。下面只在你拥有 `AdministratorAccess` 时可行（资源组创建权限不在
+> ECS/VPC/SLB 等 FullAccess 策略里）。
+
+```sh
 aliyun resourcemanager CreateResourceGroup \
   --Name openshift-test \
   --DisplayName "OpenShift testing"
 
-# 记录返回的 ResourceGroupId（rg-xxxxx）
+# 返回 JSON 含 ResourceGroupId（rg-xxxxxxxxxx），保存下来
 export RG_ID=rg-xxxxxxxxxx
 ```
 
-### 0.4 配置预算告警
+### 0.5 配置预算告警
 
 ```sh
 # 设置每日 ¥50 预算告警（避免意外漏算）
@@ -135,7 +140,7 @@ export RG_ID=rg-xxxxxxxxxx
 或网页：[费用中心 → 预算管理](https://usercenter.console.aliyun.com/#/manage/budget)：
 - 创建预算 → 类型 "每日" → 金额 ¥50 → 通知 80%/100% → 邮箱
 
-### 0.5 本地工具
+### 0.6 本地工具
 
 ```sh
 # macOS
@@ -153,7 +158,7 @@ openshift-install version
 brew install butane
 ```
 
-### 0.6 Red Hat 账号
+### 0.7 Red Hat 账号
 
 1. 注册 [console.redhat.com](https://console.redhat.com)（免费）
 2. **Downloads** → **Pull secret** → **Copy** 或 **Download**（保存到 `~/.openshift/pull-secret.json`）
@@ -164,7 +169,7 @@ brew install butane
    cat ~/.ssh/openshift_ed25519.pub
    ```
 
-### 0.7 Clone 三个仓库（同级目录）
+### 0.8 Clone 三个仓库（同级目录）
 
 ```sh
 mkdir -p ~/openshift-alibaba && cd ~/openshift-alibaba
