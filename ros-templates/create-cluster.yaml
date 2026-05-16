@@ -26,16 +26,16 @@ Parameters:
 
   Region:
     Type: String
-    Default: cn-hangzhou
+    Default: cn-wulanchabu
     Description: Alibaba Cloud region
 
   ZoneId:
     Type: String
-    Description: Availability zone for primary VSwitch (e.g. cn-hangzhou-h)
+    Description: Availability zone for primary VSwitch (e.g. cn-wulanchabu-a)
 
   ZoneId2:
     Type: String
-    Description: Availability zone for secondary VSwitch (e.g. cn-hangzhou-i)
+    Description: Availability zone for secondary VSwitch (e.g. cn-wulanchabu-b)
 
   VpcCidr:
     Type: String

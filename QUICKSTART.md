@@ -30,7 +30,7 @@ Phase 5  Day-2 操作示例                             按需
 
 - 已开通：**OSS**、**ECS**、**VPC**、**SLB**、**PrivateZone**、**ROS**、**NAS**（可选）、**RAM**
 - RAM 用户权限：`AdministratorAccess` 最简单（生产环境再精细化）
-- 决定 **Region**（如 `cn-hangzhou`）— 整个流程都在同一个 Region
+- 决定 **Region**（如 `cn-wulanchabu`）— 整个流程都在同一个 Region
 
 ### 本地工具
 
@@ -84,7 +84,7 @@ git clone <url-to>/openshift-capi-alicloud.git
 |---|---|---|
 | `ClusterName` | `cluster1` | 同上 |
 | `BaseDomain` | `example.com` | 同上 |
-| `Region` | `cn-hangzhou` | 同上 |
+| `Region` | `cn-wulanchabu` | 同上 |
 | `ImageId` | Phase 0 得到的 `m-bp1...` | 同上 |
 | `InstallationMethod` | `Assisted` 或 `Agent-based` | 同上 |
 | `ControlPlaneCount` | `3` | `3` |

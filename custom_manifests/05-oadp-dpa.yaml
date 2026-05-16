@@ -50,9 +50,9 @@ spec:
           # prefix: openshift-backups
         config:
           # Use the OSS internal endpoint when cluster and bucket are in the same region.
-          # Replace <region> with your region, e.g. cn-hangzhou, cn-beijing, cn-shanghai.
+          # Replace <region> with your region, e.g. cn-wulanchabu, cn-zhangjiakou, cn-hangzhou.
           s3Url: https://oss-<region>-internal.aliyuncs.com
-          region: <region>                       # e.g. cn-hangzhou
+          region: <region>                       # e.g. cn-wulanchabu
           s3ForcePathStyle: "true"               # required for OSS path-style access
           insecureSkipTLSVerify: "false"
         credential:

@@ -195,8 +195,8 @@ Choose values for all parameters **before** generating the ISO — they must mat
 ```
 ClusterName:   my-cluster
 BaseDomain:    example.com
-Region:        cn-hangzhou
-ZoneId:        cn-hangzhou-h
+Region:        cn-wulanchabu
+ZoneId:        cn-wulanchabu-a
 RendezvousIp:  10.0.16.5   (must be within PrivateSubnetCidr 10.0.16.0/20)
 ```
 
@@ -337,7 +337,7 @@ alibaba-openshift/
 |-----------|---------|-------------|
 | `ClusterName` | — | OpenShift cluster name; must match Red Hat console |
 | `BaseDomain` | — | Base domain (e.g. `example.com`) |
-| `Region` | `cn-hangzhou` | Alibaba Cloud region |
+| `Region` | `cn-wulanchabu` | Alibaba Cloud region |
 | `ZoneId` | — | Primary AZ (masters 1/2 + workers) |
 | `ZoneId2` | — | Secondary AZ (master 3) |
 | `ImageId` | — | Custom ECS image ID from imported ISO |
