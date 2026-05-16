@@ -66,11 +66,42 @@
 
    补权限：**Permissions** → **Grant Permission** → 搜索策略名 → 勾选 → **OK**。
 
-4. 检查 AccessKey 状态：
-   - **Authentication** 标签 → **AccessKeys** 子标签
-   - 如果有现役 AK 且你**还有 SK**：直接用，跳过下一步
-   - 如果只有 AK 但 SK 丢了：**Disable** 旧的，**Create AccessKey** 建新的并立即记录 SK
-   - 如果一个都没有：**Create AccessKey** 创建一对（**SK 仅显示一次**，立即保存）
+4. 选择 CLI 认证方式：
+
+   阿里云推荐**优先用临时凭证而非长期 AccessKey**。三种方式按推荐度排：
+
+   | 方式 | 凭证寿命 | 适合 | 设置复杂度 |
+   |---|---|---|---|
+   | **A. CloudShell**（推荐）| 会话级 | 一次性测试，不碰本地凭证 | 零 |
+   | **B. RAM 用户 + STS 临时令牌** | 1-12 h | 本地操作但不留长期 AK | 低 |
+   | **C. RAM 用户 + 长期 AccessKey** | 永久（手动轮转）| CI/CD 自动化 | 低 |
+
+   **本测试 walkthrough 场景下推荐 A 或 B**：
+
+   - **A. CloudShell**：浏览器里直接运行 aliyun CLI，凭证由阿里云自动注入，
+     关闭浏览器即失效。但**本机的 oc / openshift-install 工具就够不着 OpenShift
+     集群的 API**（除非把 kubeconfig 也搬进 CloudShell），所以适合只跑
+     Phase A/B/G 这些纯阿里云操作的步骤。
+     入口：[shell.aliyun.com](https://shell.aliyun.com/) 或控制台右上角 `>_` 图标。
+
+   - **B. STS 临时令牌**：本地 aliyun CLI 用临时令牌，不持久化 AK：
+     ```sh
+     # 浏览器里登录 RAM 用户 → 个人头像 → AccessKey → "获取临时凭证"
+     # 或者用主账号 AssumeRole 拿临时令牌
+     aliyun configure --mode StsToken --profile openshift-test
+     # 粘贴 AccessKeyId / AccessKeySecret / StsToken（三个）
+     # 默认有效期 1-12 小时
+     ```
+     测试结束令牌自动失效，无需手动清理。
+
+   - **C. 长期 AccessKey**：传统方式，安全性最弱但兼容性最好：
+     - **Authentication** 标签 → **AccessKeys** 子标签
+     - 已有现役 AK 且 SK 还在：直接用
+     - SK 丢了：Disable 旧的 → Create AccessKey 建新的（**SK 仅显示一次**）
+     - 一个都没有：Create AccessKey
+
+   > 后续命令都假设你已经把凭证配进了 `aliyun-cli` 的 `openshift-test` profile，
+   > 不区分用 A/B/C 哪种方式获取的凭证。
 
 5. 用 CLI 自检权限是否到位：
    ```sh
