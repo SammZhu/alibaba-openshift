@@ -4,6 +4,10 @@
 **约 90–120 分钟**。
 
 > 详细架构和设计原理见 [README.md](README.md)。本指南只给路径，不解释为什么。
+>
+> **第一次手动验证**？请用 [`docs/test-walkthrough.md`](docs/test-walkthrough.md) ——
+> 它是完整的"按步骤照做"操作手册（含 Assisted 和 Agent-based 两条路径、
+> 每个命令的预期输出、故障排查表、成本核对清单）。
 
 ---
 
