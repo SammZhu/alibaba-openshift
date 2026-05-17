@@ -227,7 +227,14 @@
       changed_when: false
       retries: 60
       delay: 30
-      until: (image_poll.stdout | from_json).Images.Image[0].Status == 'Available'
+      # Image may not appear immediately after ImportImage — wait for list to be non-empty first
+      until: >-
+        (image_poll.stdout | from_json).Images.Image | length > 0 and
+        (image_poll.stdout | from_json).Images.Image[0].Status == 'Available'
+      failed_when: >-
+        image_poll.rc != 0 or
+        ((image_poll.stdout | from_json).Images.Image | length > 0 and
+         (image_poll.stdout | from_json).Images.Image[0].Status in ['CreateFailed', 'Deprecated'])
 
     # ── Persist state ─────────────────────────────────────────────────────
     - name: Save state
