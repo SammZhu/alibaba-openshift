@@ -61,7 +61,8 @@ if [ -z "${ECS_IMAGE_ID:-}" ]; then
     --Architecture x86_64 \
     --DiskDeviceMapping.1.Format ISO \
     --DiskDeviceMapping.1.OSSBucket "$OSS_BUCKET" \
-    --DiskDeviceMapping.1.OSSObject "$OSS_OBJECT" 2>&1)" || {
+    --DiskDeviceMapping.1.OSSObject "$OSS_OBJECT" \
+    --BootMode UEFI 2>&1)" || {
     echo "$IMPORT_OUTPUT" >&2
     die "ImportImage failed. Common causes:
     - Forbidden.RAM           → role just created; retry in 60s (RAM propagation)

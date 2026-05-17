@@ -208,6 +208,8 @@
           - "{{ oss_bucket }}"
           - --DiskDeviceMapping.1.OSSObject
           - "{{ oss_object }}"
+          - --BootMode
+          - UEFI
           - --profile
           - "{{ aliyun_profile }}"
       register: import_result
