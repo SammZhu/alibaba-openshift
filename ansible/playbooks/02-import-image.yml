@@ -34,6 +34,7 @@
       no_log: true
 
     # ── Ensure OSS bucket exists in the right region ──────────────────────
+    # ossutil requires --flag=value form; space-separated (-i VALUE) is not supported.
     - name: Check OSS bucket
       ansible.builtin.command:
         argv:
@@ -41,12 +42,9 @@
           - oss
           - ls
           - "oss://{{ oss_bucket }}/"
-          - -e
-          - "{{ _oss_endpoint }}"
-          - -i
-          - "{{ _oss_ak }}"
-          - -k
-          - "{{ _oss_sk }}"
+          - "--endpoint={{ _oss_endpoint }}"
+          - "--access-key-id={{ _oss_ak }}"
+          - "--access-key-secret={{ _oss_sk }}"
       register: bucket_check
       changed_when: false
       failed_when: false
@@ -59,12 +57,9 @@
           - oss
           - mb
           - "oss://{{ oss_bucket }}"
-          - -e
-          - "{{ _oss_endpoint }}"
-          - -i
-          - "{{ _oss_ak }}"
-          - -k
-          - "{{ _oss_sk }}"
+          - "--endpoint={{ _oss_endpoint }}"
+          - "--access-key-id={{ _oss_ak }}"
+          - "--access-key-secret={{ _oss_sk }}"
       when: bucket_check.rc != 0
       no_log: true
 
@@ -76,12 +71,9 @@
           - oss
           - stat
           - "oss://{{ oss_bucket }}/{{ oss_object }}"
-          - -e
-          - "{{ _oss_endpoint }}"
-          - -i
-          - "{{ _oss_ak }}"
-          - -k
-          - "{{ _oss_sk }}"
+          - "--endpoint={{ _oss_endpoint }}"
+          - "--access-key-id={{ _oss_ak }}"
+          - "--access-key-secret={{ _oss_sk }}"
       register: oss_stat
       changed_when: false
       failed_when: false
@@ -95,12 +87,9 @@
           - cp
           - "{{ iso_path }}"
           - "oss://{{ oss_bucket }}/{{ oss_object }}"
-          - -e
-          - "{{ _oss_endpoint }}"
-          - -i
-          - "{{ _oss_ak }}"
-          - -k
-          - "{{ _oss_sk }}"
+          - "--endpoint={{ _oss_endpoint }}"
+          - "--access-key-id={{ _oss_ak }}"
+          - "--access-key-secret={{ _oss_sk }}"
           - -f
       register: upload_result
       no_log: true

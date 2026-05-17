@@ -82,18 +82,16 @@
         that: _oss_creds.stdout | length > 0
         fail_msg: "Could not read AK/SK for profile '{{ aliyun_profile }}' from ~/.aliyun/config.json"
 
-    - name: Verify OSS access (ossutil does not support --profile; pass -i/-k/-e directly)
+    # ossutil requires --flag=value form; space-separated (-i VALUE) is not supported.
+    - name: Verify OSS access (ossutil does not support --profile; use --access-key-id= form)
       ansible.builtin.command:
         argv:
           - aliyun
           - oss
           - ls
-          - -e
-          - "oss-{{ region }}.aliyuncs.com"
-          - -i
-          - "{{ _oss_creds.stdout.split(' ')[0] }}"
-          - -k
-          - "{{ _oss_creds.stdout.split(' ')[1] }}"
+          - "--endpoint=oss-{{ region }}.aliyuncs.com"
+          - "--access-key-id={{ _oss_creds.stdout.split(' ')[0] }}"
+          - "--access-key-secret={{ _oss_creds.stdout.split(' ')[1] }}"
       register: oss_check
       changed_when: false
       failed_when: oss_check.rc != 0
