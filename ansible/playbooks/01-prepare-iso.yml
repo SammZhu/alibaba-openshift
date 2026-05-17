@@ -45,6 +45,31 @@
         src: "{{ ssh_pub_key_file }}"
       register: ssh_pub_slurp
 
+    # Build body as a JSON string so integer fields are serialized correctly.
+    # In Ansible's uri module, body_format=json with a dict converts values via
+    # Python's json.dumps — but only if the Python types are already correct.
+    # Using to_json inside Jinja2 guarantees control_plane_count is an int, not "3".
+    - name: Build cluster create payload
+      ansible.builtin.set_fact:
+        _cluster_body: "{{ {
+          'name': cluster_name,
+          'openshift_version': openshift_version | string,
+          'cpu_architecture': 'x86_64',
+          'base_dns_domain': base_domain,
+          'high_availability_mode': 'Full',
+          'control_plane_count': control_plane_count | int,
+          'pull_secret': pull_slurp.content | b64decode,
+          'ssh_public_key': ssh_pub_slurp.content | b64decode | trim,
+          'platform': {
+            'type': 'external',
+            'external': {
+              'platform_name': 'AlibabaCloud',
+              'cloud_controller_manager': 'External'
+            }
+          }
+        } | to_json }}"
+      no_log: true
+
     - name: Create Assisted cluster object
       ansible.builtin.uri:
         url: "{{ assisted_api }}/clusters"
@@ -52,23 +77,11 @@
         headers:
           Authorization: "Bearer {{ ai_access_token }}"
           Content-Type: application/json
-        body_format: json
-        body:
-          name: "{{ cluster_name }}"
-          openshift_version: "{{ openshift_version }}"
-          cpu_architecture: x86_64
-          base_dns_domain: "{{ base_domain }}"
-          high_availability_mode: Full
-          control_plane_count: "{{ control_plane_count | int }}"
-          pull_secret: "{{ pull_slurp.content | b64decode }}"
-          ssh_public_key: "{{ ssh_pub_slurp.content | b64decode | trim }}"
-          platform:
-            type: external
-            external:
-              platform_name: AlibabaCloud
-              cloud_controller_manager: External
+        body: "{{ _cluster_body }}"
+        body_format: raw
         status_code: 201
       register: cluster_create
+      no_log: true
       when: cluster_id is not defined or cluster_id | length == 0
 
     - name: Capture new cluster ID
