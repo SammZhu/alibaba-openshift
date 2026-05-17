@@ -79,6 +79,16 @@
       failed_when: false
       no_log: true
 
+    # regex_search with capture group args ('\\1') is not supported in all
+    # Ansible versions. Extract size with regex_replace in a separate fact.
+    - name: Parse remote ISO size from OSS stat output
+      ansible.builtin.set_fact:
+        _remote_size: >-
+          {{ (oss_stat.stdout | regex_search('Content-Length\s*:\s*\d+')
+              | default('Content-Length: 0')
+              | regex_replace('.*:\s*(\d+)', '\1')) | int }}
+      when: oss_stat.rc == 0
+
     - name: Upload ISO to OSS (skipped when size matches)
       ansible.builtin.command:
         argv:
@@ -92,10 +102,7 @@
           - "--access-key-secret={{ _oss_sk }}"
           - -f
       register: upload_result
-      when: |
-        oss_stat.rc != 0 or
-        ((oss_stat.stdout | regex_search('Content-Length\s*:\s*(\d+)', '\1') | first | default('0') | int)
-          != iso_stat.stat.size)
+      when: oss_stat.rc != 0 or (_remote_size | default(0) | int) != iso_stat.stat.size
 
     # ── Ensure RAM role for ECS→OSS import (first-time setup) ─────────────
     - name: Check AliyunECSImageImportDefaultRole exists
