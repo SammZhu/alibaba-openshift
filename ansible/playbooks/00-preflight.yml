@@ -24,7 +24,8 @@
         - "{{ ssh_pub_key_file }}"
         - "{{ ssh_priv_key_file }}"
         - "{{ offline_token_file }}"
-      failed_when: not input_files.results[0].stat.exists  # checked individually below
+      # No failed_when here — Ansible only exposes .results AFTER the loop.
+      # The assert step below fails per-file with a clear message.
 
     - name: Assert each input file is present
       ansible.builtin.assert:
