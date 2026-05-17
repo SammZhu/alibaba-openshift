@@ -190,6 +190,9 @@ Resources:
       CidrBlock: !Ref PublicSubnetCidr
       ZoneId: !Ref ZoneId
       VSwitchName: !Sub '${ClusterName}-public-vsw'
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
 
   NatGateway:
     Type: ALIYUN::VPC::NatGateway
@@ -198,12 +201,18 @@ Resources:
       VSwitchId: !Ref PublicVSwitch
       NatGatewayName: !Sub '${ClusterName}-nat'
       NatType: Enhanced
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
 
   EIP:
     Type: ALIYUN::VPC::EIP
     Properties:
       Bandwidth: 100
       InternetChargeType: PayByTraffic
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
 
   EIPAssociation:
     Type: ALIYUN::VPC::EIPAssociation
@@ -255,6 +264,9 @@ Resources:
           PortRange: -1/-1
           SourceGroupId: !Ref WorkerSecurityGroup
           Description: From workers
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
 
   WorkerSecurityGroup:
     Type: ALIYUN::ECS::SecurityGroup
@@ -285,6 +297,9 @@ Resources:
           PortRange: 30000/32767
           SourceCidrIp: !Ref VpcCidr
           Description: NodePort services (SLB health-check and VPC-internal access)
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
 
   # ── RAM Role (Instance Principal) ───────────────────────────────────────────
 
@@ -410,6 +425,11 @@ Resources:
       VpcId: !Ref Vpc
       VSwitchId: !Ref PrivateVSwitch
       LoadBalancerSpec: slb.s2.small
+      # SLB uses TagKey/TagValue in the underlying API; ROS supports both forms
+      # but TagKey/TagValue is the documented one for ALIYUN::SLB::LoadBalancer.
+      Tags:
+        - TagKey: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          TagValue: owned
 
   ApiSLBListener:
     Type: ALIYUN::SLB::Listener
@@ -444,9 +464,13 @@ Resources:
   # ── Private DNS ──────────────────────────────────────────────────────────────
 
   PrivateZone:
-    Type: ALIYUN::PVTZone::Zone
+    Type: ALIYUN::PVTZ::Zone
     Properties:
       ZoneName: !Sub '${ClusterName}.${BaseDomain}'
+      # ALIYUN::PVTZ::Zone supports Tags since 2023.
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
 
   PrivateZoneVpcBinding:
     Type: ALIYUN::PVTZ::ZoneVpcBinder

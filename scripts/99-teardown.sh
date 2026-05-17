@@ -116,25 +116,31 @@ TAG_KEY="kubernetes.io/cluster/${CLUSTER_NAME}"
 
 count() { local n; n="$(echo "$1" | jq 'length' 2>/dev/null || echo 0)"; echo "$n"; }
 
-ECS="$(aliyun ecs DescribeInstances --RegionId "$REGION" \
-  --Tag.1.Key "$TAG_KEY" --Tag.1.Value owned \
-  --query 'Instances.Instance[].[InstanceName,Status]' 2>/dev/null || echo '[]')"
-DISKS="$(aliyun ecs DescribeDisks --RegionId "$REGION" \
-  --Tag.1.Key "$TAG_KEY" --Tag.1.Value owned \
-  --query 'Disks.Disk[].[DiskName,Status]' 2>/dev/null || echo '[]')"
-SLBS="$(aliyun slb DescribeLoadBalancers --RegionId "$REGION" \
-  --Tag.1.TagKey "$TAG_KEY" --Tag.1.TagValue owned \
-  --query 'LoadBalancers.LoadBalancer[].[LoadBalancerName,LoadBalancerStatus]' 2>/dev/null || echo '[]')"
-EIPS="$(aliyun vpc DescribeEipAddresses --RegionId "$REGION" \
-  --Tag.1.Key "$TAG_KEY" --Tag.1.Value owned \
-  --query 'EipAddresses.EipAddress[].[Name,Status]' 2>/dev/null || echo '[]')"
+scan() {
+  local svc="$1" action="$2" tagflag="${3:---Tag.1.Key}" tagvalflag="${4:---Tag.1.Value}"
+  aliyun "$svc" "$action" --RegionId "$REGION" \
+    "$tagflag" "$TAG_KEY" "$tagvalflag" owned 2>/dev/null || echo '{}'
+}
+
+ECS="$(scan ecs DescribeInstances)"
+DISKS="$(scan ecs DescribeDisks)"
+SECGRPS="$(scan ecs DescribeSecurityGroups)"
+SLBS="$(scan slb DescribeLoadBalancers --Tag.1.TagKey --Tag.1.TagValue)"
+EIPS="$(scan vpc DescribeEipAddresses)"
+NATS="$(scan vpc DescribeNatGateways)"
+VSWITCHES="$(scan vpc DescribeVSwitches)"
+VPCS="$(scan vpc DescribeVpcs)"
+ZONES="$(scan pvtz DescribeZones)"
+
+count_json() { echo "$1" | jq -r '[(.. | objects | select(has("InstanceId") or has("DiskId") or has("LoadBalancerId") or has("AllocationId") or has("SecurityGroupId") or has("NatGatewayId") or has("VSwitchId") or has("VpcId") or has("ZoneId"))) ] | length' 2>/dev/null || echo 0; }
 
 ORPHANS=0
-for label in ECS DISKS SLBS EIPS; do
-  n="$(count "${!label}")"
+for entry in "ECS:$ECS" "DISKS:$DISKS" "SECGRPS:$SECGRPS" "SLBS:$SLBS" "EIPS:$EIPS" "NATS:$NATS" "VSWITCHES:$VSWITCHES" "VPCS:$VPCS" "ZONES:$ZONES"; do
+  label="${entry%%:*}"
+  body="${entry#*:}"
+  n="$(count_json "$body")"
   if [ "$n" -gt 0 ]; then
-    warn "$n orphan $label resources still exist:"
-    echo "${!label}" | jq -r '.[] | "  - " + (.|tostring)'
+    warn "$n orphan $label resource(s) still exist"
     ORPHANS=$((ORPHANS+n))
   else
     ok "$label: 0 orphans"

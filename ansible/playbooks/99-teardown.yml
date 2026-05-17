@@ -133,10 +133,15 @@
       changed_when: false
       failed_when: false
       loop:
-        - { svc: ecs, action: DescribeInstances, label: ECS }
-        - { svc: ecs, action: DescribeDisks,     label: Disks }
-        - { svc: slb, action: DescribeLoadBalancers, label: SLBs }
-        - { svc: vpc, action: DescribeEipAddresses,  label: EIPs }
+        - { svc: ecs, action: DescribeInstances,        label: "ECS instances" }
+        - { svc: ecs, action: DescribeDisks,            label: "Disks (CSI orphans)" }
+        - { svc: ecs, action: DescribeSecurityGroups,   label: "Security Groups" }
+        - { svc: slb, action: DescribeLoadBalancers,    label: "SLBs (CCM orphans)" }
+        - { svc: vpc, action: DescribeEipAddresses,     label: "EIPs" }
+        - { svc: vpc, action: DescribeNatGateways,      label: "NAT Gateways" }
+        - { svc: vpc, action: DescribeVSwitches,        label: "VSwitches" }
+        - { svc: vpc, action: DescribeVpcs,             label: "VPCs" }
+        - { svc: pvtz, action: DescribeZones,           label: "PrivateZones" }
       loop_control:
         label: "{{ item.label }}"
 
