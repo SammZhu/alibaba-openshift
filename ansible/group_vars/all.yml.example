@@ -33,13 +33,13 @@ enable_jump_host:     true
 jump_host_type:       ecs.t6-c1m1.large
 
 # ── Files (resolved at runtime) ──────────────────────────────────────────────
-pull_secret_file:     "{{ ansible_env.HOME }}/.openshift/pull-secret.json"
-ssh_pub_key_file:     "{{ ansible_env.HOME }}/.ssh/openshift_ed25519.pub"
-ssh_priv_key_file:    "{{ ansible_env.HOME }}/.ssh/openshift_ed25519"
-offline_token_file:   "{{ ansible_env.HOME }}/.openshift/offline-token"
+pull_secret_file:     "{{ lookup('env', 'HOME') }}/.openshift/pull-secret.json"
+ssh_pub_key_file:     "{{ lookup('env', 'HOME') }}/.ssh/openshift_ed25519.pub"
+ssh_priv_key_file:    "{{ lookup('env', 'HOME') }}/.ssh/openshift_ed25519"
+offline_token_file:   "{{ lookup('env', 'HOME') }}/.openshift/offline-token"
 
 # ── Output directory (kubeconfig, ISO, etc.) ─────────────────────────────────
-output_dir:           "{{ ansible_env.HOME }}/openshift-install/{{ cluster_name }}"
+output_dir:           "{{ lookup('env', 'HOME') }}/openshift-install/{{ cluster_name }}"
 
 # ── Installation method (only Assisted is automated today) ───────────────────
 installation_method:  Assisted
