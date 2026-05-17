@@ -11,10 +11,17 @@
 
 set -euo pipefail
 source "$(dirname "$0")/lib/common.sh"
-preflight
+preflight_with_assisted
 
 FORCE=false
-[ "${1:-}" = "--force" ] && FORCE=true
+SKIP_APP_CLEANUP=false
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=true ;;
+    --skip-app-cleanup) SKIP_APP_CLEANUP=true ;;
+    *) die "Unknown arg: $arg" ;;
+  esac
+done
 
 confirm() {
   $FORCE && return 0
@@ -25,20 +32,54 @@ confirm() {
 cat <<EOF
 
 Teardown will:
-  1. Delete Assisted Installer cluster (releases the Red Hat record only)
-  2. Delete ROS stack (releases all Aliyun resources tagged owned)
-  3. Verify no orphan SLB / disks / EIPs remain (read-only)
-  4. Clear .state
-
-Make sure you have already run on the cluster:
-  oc delete svc -A --field-selector spec.type=LoadBalancer
-  oc delete pvc -A --all
-  (wait ~3 min for CCM/CSI to actually delete the Aliyun resources)
+  0. (auto, via jump host SSH) delete LoadBalancer Services + PVCs to release
+     CCM-managed SLBs and CSI-managed disks. Skip with --skip-app-cleanup.
+  1. Delete Assisted Installer cluster (Red Hat side only — frees no Aliyun \$)
+  2. Delete ROS stack (frees VPC, ECS, SLBs, NAT, EIP, PrivateZone, jump host)
+  3. Verify no orphan resources remain (read-only scan by cluster tag)
+  4. Clear scripts/.state
 
 EOF
 confirm "Continue?" || die "Aborted"
 
 state_load
+
+# ── 0. App-layer cleanup via jump host ───────────────────────────────────────
+if ! $SKIP_APP_CLEANUP && [ -n "${JUMP_HOST_IP:-}" ]; then
+  log "Cleaning up application-layer Aliyun resources via jump host..."
+  if ssh -i "$SSH_PRIVATE_KEY_FILE" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+       root@"$JUMP_HOST_IP" 'test -f /root/kubeconfig' 2>/dev/null; then
+    ssh -i "$SSH_PRIVATE_KEY_FILE" -o StrictHostKeyChecking=no \
+        root@"$JUMP_HOST_IP" 'bash -s' <<'CLEANUP'
+set -e
+export KUBECONFIG=/root/kubeconfig
+echo "Deleting LoadBalancer Services..."
+oc get svc -A --field-selector spec.type=LoadBalancer -o json \
+  | jq -r '.items[] | "\(.metadata.namespace) \(.metadata.name)"' \
+  | while read -r ns name; do
+      [ -n "$name" ] && oc delete svc -n "$ns" "$name" --wait=false || true
+    done
+echo "Deleting all PVCs..."
+oc delete pvc --all -A --wait=false 2>/dev/null || true
+echo "Waiting 3 min for CCM/CSI to actually release the Aliyun resources..."
+sleep 180
+CLEANUP
+    ok "App-layer cleanup done"
+  else
+    warn "Could not reach jump host or kubeconfig missing; skipping app cleanup."
+    warn "If LoadBalancer Services or PVCs still exist, the corresponding"
+    warn "SLBs/disks will survive the ROS stack delete as orphans."
+    confirm "Continue anyway?" || die "Aborted"
+  fi
+elif $SKIP_APP_CLEANUP; then
+  warn "App-layer cleanup skipped per --skip-app-cleanup"
+else
+  warn "JUMP_HOST_IP not set — cannot auto-cleanup app layer."
+  warn "If you have other access to the cluster, run there first:"
+  warn "  oc delete svc -A --field-selector spec.type=LoadBalancer"
+  warn "  oc delete pvc -A --all"
+  confirm "Continue without app cleanup?" || die "Aborted"
+fi
 
 # ── 1. Delete Assisted cluster ───────────────────────────────────────────────
 if [ -n "${CLUSTER_ID:-}" ]; then

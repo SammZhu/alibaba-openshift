@@ -65,24 +65,30 @@ state_require() {
 ASSISTED_API="https://api.openshift.com/api/assisted-install/v2"
 SSO_URL="https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token"
 
-ai_access_token() {
-  [ -f "${OFFLINE_TOKEN_FILE:-}" ] || die "OFFLINE_TOKEN_FILE not configured"
-  local offline
-  offline="$(cat "$OFFLINE_TOKEN_FILE")"
-  curl -sf \
-    --data-urlencode "grant_type=refresh_token" \
-    --data-urlencode "client_id=cloud-services" \
-    --data-urlencode "refresh_token=${offline}" \
-    "$SSO_URL" | jq -r .access_token
-}
+# Kept for backwards-compat; new code should call ai_token (auto-cached + auto-refresh).
+ai_access_token() { _AI_TOKEN=""; _AI_TOKEN_EXPIRES_AT=0; ai_token; }
 
-# Cached access token for the duration of one script run.
+# Access token cache with auto-refresh. Assisted SSO tokens default to ~15 min
+# TTL — install monitoring spans 45-60 min, so we MUST refresh during long polls.
 _AI_TOKEN=""
+_AI_TOKEN_EXPIRES_AT=0
 ai_token() {
-  if [ -z "$_AI_TOKEN" ]; then
-    _AI_TOKEN="$(ai_access_token)"
+  local now; now="$(date +%s)"
+  # Refresh 60 s before stated expiry to leave room for clock drift + the call.
+  if [ -z "$_AI_TOKEN" ] || [ "$now" -ge "$_AI_TOKEN_EXPIRES_AT" ]; then
+    [ -f "${OFFLINE_TOKEN_FILE:-}" ] || die "OFFLINE_TOKEN_FILE not configured"
+    local offline resp expires
+    offline="$(cat "$OFFLINE_TOKEN_FILE")"
+    resp="$(curl -sf \
+      --data-urlencode "grant_type=refresh_token" \
+      --data-urlencode "client_id=cloud-services" \
+      --data-urlencode "refresh_token=${offline}" \
+      "$SSO_URL")" || die "Failed to refresh Assisted access token — offline token may be revoked"
+    _AI_TOKEN="$(echo "$resp" | jq -r .access_token)"
+    expires="$(echo "$resp" | jq -r '.expires_in // 900')"
     [ -n "$_AI_TOKEN" ] && [ "$_AI_TOKEN" != "null" ] \
-      || die "Failed to get Assisted access token — check OFFLINE_TOKEN"
+      || die "Token refresh returned no access_token. Get a fresh offline token from https://console.redhat.com/openshift/token"
+    _AI_TOKEN_EXPIRES_AT=$((now + expires - 60))
   fi
   echo "$_AI_TOKEN"
 }
@@ -114,9 +120,40 @@ aliyun_q() {
   aliyun "$svc" "$action" "${flags[@]}"
 }
 
+# ── ECS Image Import RAM role ────────────────────────────────────────────────
+# Alibaba Cloud requires AliyunECSImageImportDefaultRole to exist before
+# ImportImage works. The web console auto-creates it on first use; CLI/SDK
+# users must create it themselves (Forbidden.RAM otherwise).
+ensure_ecs_image_import_role() {
+  if aliyun ram GetRole --RoleName AliyunECSImageImportDefaultRole >/dev/null 2>&1; then
+    return 0
+  fi
+  log "Creating AliyunECSImageImportDefaultRole (one-time)..."
+  local policy='{"Statement":[{"Action":"sts:AssumeRole","Effect":"Allow","Principal":{"Service":["ecs.aliyuncs.com"]}}],"Version":"1"}'
+  aliyun ram CreateRole \
+    --RoleName AliyunECSImageImportDefaultRole \
+    --AssumeRolePolicyDocument "$policy" >/dev/null \
+    || die "Failed to create AliyunECSImageImportDefaultRole — check RAM permissions"
+  aliyun ram AttachPolicyToRole \
+    --PolicyType System \
+    --PolicyName AliyunECSImageImportRolePolicy \
+    --RoleName AliyunECSImageImportDefaultRole >/dev/null \
+    || die "Failed to attach AliyunECSImageImportRolePolicy"
+  ok "RAM role + policy created"
+}
+
 # ── Validation ───────────────────────────────────────────────────────────────
 preflight() {
   for tool in aliyun curl jq base64; do need "$tool"; done
   load_config
   state_load
+}
+
+# Same as preflight, but also verifies the offline token can mint an access
+# token. Use in scripts that hit the Assisted API (01, 04, 99).
+preflight_with_assisted() {
+  preflight
+  log "Verifying Red Hat offline token..."
+  ai_token >/dev/null  # exits via die() with an actionable error if invalid
+  ok "Assisted API auth ready"
 }

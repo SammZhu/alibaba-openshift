@@ -11,14 +11,34 @@
 
 set -euo pipefail
 source "$(dirname "$0")/lib/common.sh"
-preflight
 
 [ -f "$PULL_SECRET_FILE" ]    || die "PULL_SECRET_FILE not found: $PULL_SECRET_FILE"
 [ -f "$SSH_PUBLIC_KEY_FILE" ] || die "SSH_PUBLIC_KEY_FILE not found: $SSH_PUBLIC_KEY_FILE"
 [ -f "$OFFLINE_TOKEN_FILE" ]  || die "OFFLINE_TOKEN_FILE not found. Get from https://console.redhat.com/openshift/token"
 
+preflight_with_assisted
+
 mkdir -p "$OUTPUT_DIR"
 ISO_PATH="${OUTPUT_DIR}/discovery-${CLUSTER_NAME}.iso"
+
+# ── Detect same-named clusters in Assisted (avoid silent duplicates) ─────────
+# If a previous run created a cluster but state was lost, we'd end up creating
+# a second cluster with the same name — confusing and slows Assisted UI.
+if [ -z "${CLUSTER_ID:-}" ]; then
+  EXISTING_ID="$(ai_curl GET "/clusters" \
+    | jq -r ".[] | select(.name==\"${CLUSTER_NAME}\" and .base_dns_domain==\"${BASE_DOMAIN}\") | .id" \
+    | head -n1)"
+  if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "null" ]; then
+    warn "Found existing Assisted cluster with same name+domain: $EXISTING_ID"
+    warn "Re-using it. To start fresh, delete it first:"
+    warn "  curl -X DELETE \"${ASSISTED_API}/clusters/${EXISTING_ID}\" -H \"Authorization: Bearer \$(./lib/common.sh ai_token)\""
+    state_set CLUSTER_ID "$EXISTING_ID"
+    # Try to find existing infra-env for this cluster too
+    EXISTING_INFRA="$(ai_curl GET "/infra-envs?cluster_id=${EXISTING_ID}" | jq -r '.[0].id // empty')"
+    [ -n "$EXISTING_INFRA" ] && state_set INFRA_ENV_ID "$EXISTING_INFRA"
+    state_load
+  fi
+fi
 
 # ── Prevent accidental duplicate clusters in Assisted ────────────────────────
 if grep -q "^CLUSTER_ID=" "$STATE_FILE" 2>/dev/null; then

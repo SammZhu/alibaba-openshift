@@ -10,7 +10,7 @@
 
 set -euo pipefail
 source "$(dirname "$0")/lib/common.sh"
-preflight
+preflight_with_assisted
 state_require CLUSTER_ID INFRA_ENV_ID API_SLB_IP
 
 # Manifests to upload, format: <folder>|<file-name>|<local-source-path>
@@ -22,7 +22,9 @@ MANIFESTS=(
 )
 
 # ── Step 1: Wait for all hosts to register in Assisted ───────────────────────
-EXPECTED_HOSTS="$CONTROL_PLANE_COUNT"  # No bootstrap, no workers in compact 3-node
+# Compact 3-node: just CONTROL_PLANE_COUNT (typically 3).
+# Standard topology: + COMPUTE_COUNT workers.
+EXPECTED_HOSTS=$((CONTROL_PLANE_COUNT + COMPUTE_COUNT))
 log "Waiting for $EXPECTED_HOSTS hosts to register with Assisted..."
 SECONDS_WAITED=0
 while true; do
@@ -36,14 +38,19 @@ while true; do
   [ "$SECONDS_WAITED" -gt 1800 ] && die "Hosts did not register within 30 min — check ECS console.bootlog / Assisted UI"
 done
 
-# ── Step 2: Assign roles ─────────────────────────────────────────────────────
-log "Assigning master role to all hosts..."
-echo "$HOSTS_JSON" | jq -c '.[]' | while read -r host; do
-  HOST_ID="$(echo "$host" | jq -r .id)"
-  HOST_NAME="$(echo "$host" | jq -r '.requested_hostname // .inventory | fromjson? .hostname // "unknown"' 2>/dev/null || echo "?")"
-  log "  $HOST_ID ($HOST_NAME) -> master"
+# ── Step 2: Assign roles (first CONTROL_PLANE_COUNT = master, rest = worker) ─
+log "Assigning roles: $CONTROL_PLANE_COUNT master + $COMPUTE_COUNT worker"
+i=0
+echo "$HOSTS_JSON" | jq -r '.[].id' | while read -r HOST_ID; do
+  if [ "$i" -lt "$CONTROL_PLANE_COUNT" ]; then
+    ROLE=master
+  else
+    ROLE=worker
+  fi
+  log "  $HOST_ID -> $ROLE"
   ai_curl PATCH "/infra-envs/$INFRA_ENV_ID/hosts/$HOST_ID" \
-    '{"host_role":"master"}' >/dev/null
+    "{\"host_role\":\"$ROLE\"}" >/dev/null
+  i=$((i+1))
 done
 
 # ── Step 3: Upload custom manifests ──────────────────────────────────────────
@@ -81,20 +88,32 @@ ai_curl POST "/clusters/$CLUSTER_ID/actions/install" >/dev/null
 
 # ── Step 6: Poll until installed ─────────────────────────────────────────────
 log "Installing (45-60 min). Status updates every minute..."
+log "  (Assisted access token auto-refreshes every ~15 min via common.sh)"
 SECONDS_WAITED=0
 LAST_STATUS=""
 while true; do
-  STATUS="$(ai_curl GET "/clusters/$CLUSTER_ID" | jq -r .status)"
+  CLUSTER_JSON="$(ai_curl GET "/clusters/$CLUSTER_ID")"
+  STATUS="$(echo "$CLUSTER_JSON" | jq -r .status)"
+  STATUS_INFO="$(echo "$CLUSTER_JSON" | jq -r '.status_info // ""')"
   if [ "$STATUS" != "$LAST_STATUS" ]; then
     echo
-    log "  [$((SECONDS_WAITED/60)) min] status: $STATUS"
+    log "  [$((SECONDS_WAITED/60)) min] $STATUS — $STATUS_INFO"
     LAST_STATUS="$STATUS"
   else
     printf '\r  [%3d min] %s ' "$((SECONDS_WAITED/60))" "$STATUS"
   fi
   case "$STATUS" in
-    installed) echo; ok "Cluster installed!"; break;;
-    error|cancelled) echo; die "Install failed: $STATUS";;
+    installed)
+      echo; ok "Cluster installed!"; break;;
+    error|cancelled)
+      echo
+      warn "Install failed: $STATUS_INFO"
+      warn "Full diagnosis:  curl -sH 'Authorization: Bearer \$(./lib/common.sh ai_token)' '${ASSISTED_API}/clusters/${CLUSTER_ID}' | jq"
+      die "Install failed";;
+    pending-for-input|installing-pending-user-action)
+      echo
+      die "Cluster waiting on user input — see Assisted UI:
+    https://console.redhat.com/openshift/assisted-installer/clusters/${CLUSTER_ID}";;
   esac
   sleep 60
   SECONDS_WAITED=$((SECONDS_WAITED + 60))

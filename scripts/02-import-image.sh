@@ -49,8 +49,11 @@ fi
 
 # ── Import as ECS custom image ───────────────────────────────────────────────
 if [ -z "${ECS_IMAGE_ID:-}" ]; then
+  # Ensure ECS can read from OSS during import (first-time setup).
+  ensure_ecs_image_import_role
+
   log "Submitting ImportImage..."
-  ECS_IMAGE_ID="$(aliyun ecs ImportImage \
+  IMPORT_OUTPUT="$(aliyun ecs ImportImage \
     --RegionId "$REGION" \
     --ImageName "openshift-${CLUSTER_NAME}-iso" \
     --OSType Linux \
@@ -58,10 +61,15 @@ if [ -z "${ECS_IMAGE_ID:-}" ]; then
     --Architecture x86_64 \
     --DiskDeviceMapping.1.Format ISO \
     --DiskDeviceMapping.1.OSSBucket "$OSS_BUCKET" \
-    --DiskDeviceMapping.1.OSSObject "$OSS_OBJECT" \
-    --query 'ImageId' --output text)"
-  [ -n "$ECS_IMAGE_ID" ] && [ "$ECS_IMAGE_ID" != "None" ] \
-    || die "ImportImage failed. If first time, you may need to authorise ECS→OSS in the web console (Image → Import Image → first time triggers RAM consent)."
+    --DiskDeviceMapping.1.OSSObject "$OSS_OBJECT" 2>&1)" || {
+    echo "$IMPORT_OUTPUT" >&2
+    die "ImportImage failed. Common causes:
+    - Forbidden.RAM           → role just created; retry in 60s (RAM propagation)
+    - InvalidOSSObject.NotFound → check OSS_BUCKET / region match
+    - InvalidImageName        → ImageName already exists; bump version or delete first"
+  }
+  ECS_IMAGE_ID="$(echo "$IMPORT_OUTPUT" | jq -r '.ImageId // empty')"
+  [ -n "$ECS_IMAGE_ID" ] || die "ImportImage returned no ImageId. Raw response: $IMPORT_OUTPUT"
   state_set ECS_IMAGE_ID "$ECS_IMAGE_ID"
 fi
 

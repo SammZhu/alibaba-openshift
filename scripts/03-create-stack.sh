@@ -22,15 +22,35 @@ TEMPLATE_FILE="${REPO_ROOT}/ros-templates/create-cluster.yaml"
 [ -f "$TEMPLATE_FILE" ] || die "Template not found: $TEMPLATE_FILE"
 SSH_PUB_KEY="$(<"$SSH_PUBLIC_KEY_FILE")"
 
-# ── Idempotency: skip if stack already CREATE_COMPLETE ───────────────────────
+STACK_NAME="openshift-${CLUSTER_NAME}"
+
+# ── Idempotency: re-use existing stack (by ID in state, or by name lookup) ──
+if [ -z "${ROS_STACK_ID:-}" ]; then
+  # State lost but stack may still exist — find by name to avoid AlreadyExists error.
+  FOUND_ID="$(aliyun ros ListStacks --RegionId "$REGION" \
+    --StackName.1 "$STACK_NAME" \
+    --query 'Stacks[0].StackId' --output text 2>/dev/null || echo "")"
+  if [ -n "$FOUND_ID" ] && [ "$FOUND_ID" != "None" ]; then
+    warn "Stack '${STACK_NAME}' already exists ($FOUND_ID), adopting"
+    state_set ROS_STACK_ID "$FOUND_ID"
+    state_load
+  fi
+fi
+
+STACK_ID=""
 if [ -n "${ROS_STACK_ID:-}" ]; then
   CURRENT_STATUS="$(aliyun ros GetStack --StackId "$ROS_STACK_ID" --query 'Status' --output text 2>/dev/null || echo "MISSING")"
   case "$CURRENT_STATUS" in
     CREATE_COMPLETE) ok "Stack $ROS_STACK_ID already complete; refreshing outputs"; STACK_ID="$ROS_STACK_ID";;
     CREATE_IN_PROGRESS) log "Stack $ROS_STACK_ID still creating; will resume polling"; STACK_ID="$ROS_STACK_ID";;
-    CREATE_FAILED|ROLLBACK_*|DELETE_*) die "Stack in state $CURRENT_STATUS — clean up before re-running";;
-    MISSING) warn "Stack $ROS_STACK_ID gone; creating new"; STACK_ID="";;
-    *) warn "Unexpected stack state $CURRENT_STATUS; will create new"; STACK_ID="";;
+    CREATE_FAILED|ROLLBACK_FAILED|ROLLBACK_COMPLETE)
+      die "Stack in state $CURRENT_STATUS — delete it first:
+    aliyun ros DeleteStack --StackId $ROS_STACK_ID --RegionId $REGION
+    rm scripts/.state  # then rerun" ;;
+    DELETE_IN_PROGRESS|DELETE_FAILED)
+      die "Stack is being / failed deleting ($CURRENT_STATUS); wait or clean up before rerun" ;;
+    MISSING) warn "Stack $ROS_STACK_ID gone; creating new"; STACK_ID=""; ROS_STACK_ID="";;
+    *) warn "Unexpected stack state $CURRENT_STATUS; will create new"; STACK_ID=""; ROS_STACK_ID="";;
   esac
 fi
 
@@ -91,7 +111,7 @@ if [ -z "${STACK_ID:-}" ]; then
 
   STACK_ID="$(aliyun ros CreateStack \
     --RegionId "$REGION" \
-    --StackName "openshift-${CLUSTER_NAME}" \
+    --StackName "$STACK_NAME" \
     --DisableRollback true \
     --TimeoutInMinutes 60 \
     --TemplateBody "$TEMPLATE_BODY" \
