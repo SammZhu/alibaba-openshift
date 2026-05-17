@@ -40,14 +40,18 @@ Phase 5  Day-2 操作示例                             按需
 
 ### 本地工具
 
-| 工具 | 用途 |
-|---|---|
-| `aliyun` CLI | 可选，所有阿里云操作都能用控制台代替 |
-| `openshift-install` | Agent-based 必需，Assisted 可选 |
-| `oc`（`kubectl`）| 集群安装完成后访问 |
-| `ansible-core` (≥2.16) | 自动化主路径（`pip install --user ansible-core` 或 `dnf install ansible-core`）|
-| `kustomize` | Phase 3 部署组件需要 |
-| `podman`（或 `docker`）| 仅当你要自己构建镜像 |
+> 本项目的安装指令都按 **RHEL 8 / Alibaba Linux 3**（EL8 兼容）写。
+> 其它发行版（Ubuntu / macOS）请自行替换包管理器。
+
+| 工具 | 用途 | RHEL 8 / AL3 安装 |
+|---|---|---|
+| `aliyun` CLI | 操作阿里云 | GitHub release 二进制（详见 `docs/test-walkthrough.md` §0.3）|
+| `oc` / `kubectl` 4.20 | 集群访问 | mirror.openshift.com `openshift-client-linux-amd64-rhel8.tar.gz`（**必须 -rhel8 版**，否则 GLIBC 报错）|
+| `openshift-install` 4.20 | Agent-based 必需 | mirror.openshift.com `openshift-install-linux.tar.gz`（静态 Go，generic 版可用）|
+| `ansible-core` ≥ 2.16 | 自动化主路径 | `sudo dnf install ansible-core` |
+| `kustomize` v5+ | Phase 3 部署组件 | `github.com/kubernetes-sigs/kustomize` linux_amd64 二进制 |
+| `jq` / `yq` / `git` | 通用 | `sudo dnf install jq git` + yq GitHub 二进制 |
+| `podman` | 仅自己构建镜像时 | `sudo dnf install podman` |
 
 ### Red Hat 账号
 

@@ -165,8 +165,12 @@
 ### 0.3 安装并配置 aliyun CLI（必做）
 
 ```sh
-# 安装 aliyun CLI（macOS）
-brew install aliyun-cli
+# 安装 aliyun CLI（RHEL 8 / Alibaba Linux 3 — 没有 dnf 包，从 GitHub 直接下二进制）
+ALI_VER=3.0.216    # 可去 https://github.com/aliyun/aliyun-cli/releases 看最新
+curl -sLO "https://github.com/aliyun/aliyun-cli/releases/download/v${ALI_VER}/aliyun-cli-linux-${ALI_VER}-amd64.tgz"
+tar -xzf "aliyun-cli-linux-${ALI_VER}-amd64.tgz"
+sudo install -m 0755 aliyun /usr/local/bin/
+rm -f aliyun aliyun-cli-linux-*.tgz
 
 # 配置（用 0.2 步骤拿到的 RAM 用户 AK/SK）
 # 推荐用独立 profile，不影响你已有的默认 profile：
@@ -207,21 +211,50 @@ export RG_ID=rg-xxxxxxxxxx
 
 ### 0.6 本地工具
 
-```sh
-# macOS
-brew install kubectl openshift-cli kustomize jq yq
+适用于 **RHEL 8 / Alibaba Linux 3 / 其它 EL8 兼容发行版**。其它系统请相应替换。
 
-# 下载 openshift-install
-curl -L https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-install-mac-arm64.tar.gz | tar -xz
-sudo mv openshift-install /usr/local/bin/
+```sh
+# 系统包
+sudo dnf install -y jq tar gzip git curl
+sudo dnf install -y python3-pip ansible-core   # Ansible 自动化需要
+
+# Go 工具单装：yq（go.dev 二进制）
+curl -sL -o /tmp/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+sudo install -m 0755 /tmp/yq /usr/local/bin/yq && rm -f /tmp/yq
+
+# OpenShift CLI 4.20（注意：RHEL 8 必须用 -rhel8 编译版，generic linux 版 GLIBC 太新跑不了）
+cd /tmp
+curl -sLO https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest-4.20/openshift-client-linux-amd64-rhel8.tar.gz
+tar -xzf openshift-client-linux-amd64-rhel8.tar.gz
+sudo install -m 0755 oc kubectl /usr/local/bin/
+rm -f openshift-client-linux-amd64-rhel8.tar.gz oc kubectl README.md
+
+# openshift-install 4.20（generic linux 版在 RHEL 8 上能跑——它是静态链接）
+curl -sLO https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest-4.20/openshift-install-linux.tar.gz
+tar -xzf openshift-install-linux.tar.gz
+sudo install -m 0755 openshift-install /usr/local/bin/
+rm -f openshift-install-linux.tar.gz openshift-install README.md
+
+# kustomize（v5+，Go 静态二进制）
+curl -sL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.5.0/kustomize_v5.5.0_linux_amd64.tar.gz" \
+  | tar -xz -C /tmp && sudo install -m 0755 /tmp/kustomize /usr/local/bin/
 
 # 验证
-oc version --client
-openshift-install version
+oc version --client                    # Client Version: 4.20.x
+openshift-install version              # openshift-install 4.20.x
+ansible --version                      # ansible-core 2.16+
+kustomize version
 
-# 仅 Agent-based 路径需要 Butane（生成 MachineConfig）
-brew install butane
+# 仅 Agent-based 路径需要 Butane（生成 MachineConfig，本测试默认走 Assisted，跳过）
+curl -sLo /tmp/butane "https://mirror.openshift.com/pub/openshift-v4/clients/butane/latest/butane-amd64"
+sudo install -m 0755 /tmp/butane /usr/local/bin/butane
 ```
+
+> **路径冲突排查**：若 `which oc` 输出 `~/bin/oc` 而不是 `/usr/local/bin/oc`，说明
+> 旧版本 oc 在你 PATH 优先位置。删掉旧的：`rm -f ~/bin/oc ~/bin/kubectl`。
+
+> **不要用** `openshift-client-linux.tar.gz`（无 `-rhel8` 后缀的版本）—
+> 它在 RHEL 8 上会报 `GLIBC_2.32 not found`（RHEL 8 是 GLIBC 2.28）。
 
 ### 0.7 Red Hat 账号
 
@@ -265,25 +298,40 @@ git clone https://github.com/SammZhu/openshift-capi-alicloud.git
 6. **Host discovery** 页面 → **Add hosts** → 选 **Minimal image file**
 7. SSH public key: 粘贴 `~/.ssh/openshift_ed25519.pub` 内容
 8. **Generate Discovery ISO**
-9. **Download Discovery ISO** → 保存到本地，例如 `~/Downloads/discovery_image_cluster1.iso`
+9. **Download Discovery ISO** → 浏览器下载 ISO 文件（约 100 MB）
 
 > ⚠️ **保持这个浏览器标签页打开**——稍后还要回来
 
 #### 步骤 2：上传 ISO 到 OSS
 
+如果浏览器和 aliyun CLI 在同一台 RHEL VM（带桌面）→ 直接用本地路径上传。
+
+如果浏览器在另一台机器（笔记本）而 aliyun CLI 在 RHEL VM（srv-down）→ 先 scp：
+
 ```sh
-# 创建 Bucket（名字必须全局唯一，加你的标识）
-aliyun oss mb oss://openshift-iso-samchoo-test --region cn-wulanchabu
+# 在笔记本上：传 ISO 到 RHEL VM
+scp ~/Downloads/discovery_image_cluster1.iso srv-down:/root/discovery.iso
+```
+
+然后在 RHEL VM 上：
+
+```sh
+ISO=/root/discovery.iso       # 替换为你 ISO 的实际路径
+BUCKET=openshift-iso-samzhu    # 替换为你的全局唯一名
+
+# 创建 Bucket（首次）
+aliyun oss mb "oss://${BUCKET}" --region cn-wulanchabu
 
 # 上传 ISO
-aliyun oss cp ~/Downloads/discovery_image_cluster1.iso \
-  oss://openshift-iso-samchoo-test/discovery.iso \
-  --region cn-wulanchabu
+aliyun oss cp "$ISO" "oss://${BUCKET}/discovery.iso" --region cn-wulanchabu
 
 # 验证
-aliyun oss ls oss://openshift-iso-samchoo-test/ --region cn-wulanchabu
+aliyun oss ls "oss://${BUCKET}/" --region cn-wulanchabu
 # 应见 100MB 左右的 discovery.iso
 ```
+
+> **想跳过手动下载？** 用 `ansible/playbooks/01-prepare-iso.yml` 自动通过 Assisted
+> REST API 直接拿 ISO 到 RHEL VM —— 零浏览器、零 scp。手动只在调试时用。
 
 ### 路径 B1 — Agent-based Installer
 
@@ -553,12 +601,20 @@ agent 会自动联系 Red Hat Console 上报。
 
 #### 步骤 6：下载 kubeconfig
 
-安装完成后，Console 顶部 **Download kubeconfig**：
+安装完成后 Console 顶部 **Download kubeconfig**（浏览器下载）。然后传到 RHEL VM：
+
 ```sh
+# 笔记本上：scp 到 RHEL VM
+scp ~/Downloads/kubeconfig.cluster1 srv-down:/root/kubeconfig
+
+# RHEL VM 上整理路径（可选，方便管理）
 mkdir -p ~/openshift-install/$CLUSTER_NAME/auth
-mv ~/Downloads/kubeconfig.cluster1 ~/openshift-install/$CLUSTER_NAME/auth/kubeconfig
+mv /root/kubeconfig ~/openshift-install/$CLUSTER_NAME/auth/kubeconfig
 chmod 600 ~/openshift-install/$CLUSTER_NAME/auth/kubeconfig
 ```
+
+> **想跳过手动下载？** 用 `ansible/playbooks/04-install-cluster.yml` 自动通过
+> Assisted REST API 下载到 RHEL VM、并自动 scp 到跳板。
 
 **Console 上还会显示**:
 - kubeadmin password（保存到 `auth/kubeadmin-password`）
@@ -624,9 +680,9 @@ JUMP_IP=$(aliyun ros GetStack --StackId $STACK_ID \
   --query "Outputs[?OutputKey=='JumpHostPublicIp'].OutputValue" --output text)
 echo "Jump host: $JUMP_IP"
 
-# 把本地 kubeconfig 拷到跳板
+# 把 RHEL VM 上的 kubeconfig 拷到跳板
 scp -i ~/.ssh/openshift_ed25519 \
-  ~/Downloads/kubeconfig.cluster1 \
+  ~/openshift-install/$CLUSTER_NAME/auth/kubeconfig \
   root@$JUMP_IP:/root/kubeconfig
 
 # SSH 进跳板
@@ -852,12 +908,12 @@ oc get clusteroperators
 
 如果要做合规性测试，**预算追加 ¥80**（24 小时不能销毁集群）。
 
-### F.1 安装 OPCT
+### F.1 安装 OPCT（在跳板上跑，集群必须可达）
 
 ```sh
-# 选择 macOS arm64 或 linux amd64
-curl -L https://github.com/redhat-openshift-ecosystem/opct/releases/latest/download/opct-darwin-arm64.tar.gz | tar -xz
-sudo mv opct /usr/local/bin/
+# 跳板上（Alibaba Linux 3 = RHEL 8 兼容）
+curl -sL https://github.com/redhat-openshift-ecosystem/opct/releases/latest/download/opct-linux-amd64.tar.gz | tar -xz -C /tmp
+sudo install -m 0755 /tmp/opct /usr/local/bin/
 opct version
 ```
 
