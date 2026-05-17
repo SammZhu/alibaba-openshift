@@ -114,6 +114,20 @@
         - infra_list is defined
         - infra_list.json | length > 0
 
+    - name: Build infra-env create payload
+      ansible.builtin.set_fact:
+        _infra_body: "{{ {
+          'name': cluster_name + '-infra',
+          'cluster_id': cluster_id,
+          'image_type': 'minimal-iso',
+          'pull_secret': pull_slurp.content | b64decode,
+          'ssh_authorized_key': ssh_pub_slurp.content | b64decode | trim,
+          'openshift_version': openshift_version | string,
+          'cpu_architecture': 'x86_64'
+        } | to_json }}"
+      no_log: true
+      when: infra_env_id is not defined or infra_env_id | length == 0
+
     - name: Create infra-env if missing
       ansible.builtin.uri:
         url: "{{ assisted_api }}/infra-envs"
@@ -121,17 +135,11 @@
         headers:
           Authorization: "Bearer {{ ai_access_token }}"
           Content-Type: application/json
-        body_format: json
-        body:
-          name: "{{ cluster_name }}-infra"
-          cluster_id: "{{ cluster_id }}"
-          image_type: minimal-iso
-          pull_secret: "{{ pull_slurp.content | b64decode }}"
-          ssh_authorized_key: "{{ ssh_pub_slurp.content | b64decode | trim }}"
-          openshift_version: "{{ openshift_version }}"
-          cpu_architecture: x86_64
+        body: "{{ _infra_body }}"
+        body_format: raw
         status_code: 201
       register: infra_create
+      no_log: true
       when: infra_env_id is not defined or infra_env_id | length == 0
 
     - name: Capture new infra-env ID
