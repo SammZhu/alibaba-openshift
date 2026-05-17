@@ -6,7 +6,6 @@
   ansible.builtin.slurp:
     src: "{{ offline_token_file }}"
   register: offline_slurp
-  no_log: true
 
 - name: Exchange offline token for access token
   ansible.builtin.uri:
