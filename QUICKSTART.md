@@ -382,6 +382,18 @@ oc get backup -n openshift-adp -w
 
 ## 销毁集群
 
+**推荐**：用自动化（一条命令搞定应用层清理 + 删栈 + 9 类资源孤儿扫描）：
+
+```sh
+# Ansible
+ansible-playbook ansible/playbooks/99-teardown.yml
+
+# 或 shell
+./scripts/99-teardown.sh
+```
+
+手动等价：
+
 ```sh
 # 1. 删除 OpenShift 内的工作负载（让 CCM/CSI 清理 SLB + 磁盘 + 快照）
 oc delete pvc --all -A
@@ -392,10 +404,22 @@ sleep 180
 
 # 3. ROS 删除栈
 aliyun ros DeleteStack --StackId <stack-id>
+
+# 4. 用 cluster tag 扫描孤儿（详见 docs/test-walkthrough.md G.3）
+TAG_KEY="kubernetes.io/cluster/cluster1"
+for cmd in 'ecs DescribeInstances' 'ecs DescribeDisks' 'ecs DescribeSecurityGroups' \
+           'vpc DescribeEipAddresses' 'vpc DescribeNatGateways' 'vpc DescribeVSwitches' \
+           'vpc DescribeVpcs' 'pvtz DescribeZones'; do
+  echo "=== $cmd ==="
+  aliyun $cmd --RegionId cn-wulanchabu --Tag.1.Key "$TAG_KEY" --Tag.1.Value owned 2>/dev/null | jq '.[][] | length' 2>/dev/null
+done
+# SLB 单独（用 TagKey/TagValue，不是 Tag.1.Key/Value）
+aliyun slb DescribeLoadBalancers --RegionId cn-wulanchabu --Tag.1.TagKey "$TAG_KEY" --Tag.1.TagValue owned
 ```
 
 > **重要**：直接 ROS 删栈而不先清理工作负载会留下"孤儿" SLB 和磁盘，
-> 需要手动清理才能避免持续计费。
+> 需要按 tag 手动清理才能避免持续计费。ROS 模板已经给 17 个顶级资源都打了
+> `kubernetes.io/cluster/${ClusterName}=owned` 标签，孤儿扫描可靠覆盖。
 
 ---
 

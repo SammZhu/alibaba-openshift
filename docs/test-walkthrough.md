@@ -937,31 +937,69 @@ done
 ### G.3 检查孤儿资源（**重要**）
 
 ROS 删栈不会清理它没创建的东西（CCM 建的 SLB、CSI 建的盘）。
+ROS 模板给所有可标签资源打了 `kubernetes.io/cluster/${CLUSTER_NAME}=owned`，
+按这个标签扫一遍就能定位所有应被栈管理但还没释放的资源。
+
+> **如果用了 `ansible-playbook 99-teardown.yml` 或 `./scripts/99-teardown.sh`，
+> 这一步已经自动做了**（自动化版扫 9 类资源）。手动操作如下：
 
 ```sh
-# 检查残留
-echo "=== ECS 实例 ==="
+TAG_KEY="kubernetes.io/cluster/cluster1"
+
+# ECS 实例
 aliyun ecs DescribeInstances --RegionId cn-wulanchabu \
-  --query 'Instances.Instance[?contains(InstanceName, `cluster1`)].[InstanceName,Status]' --output table
+  --Tag.1.Key "$TAG_KEY" --Tag.1.Value owned \
+  --query 'Instances.Instance[].[InstanceName,Status]' --output table
 
-echo "=== 云盘 ==="
+# 云盘（CSI 创建的 PV 也会被 ROS 销毁前漏掉，先在跳板上 oc delete pvc）
 aliyun ecs DescribeDisks --RegionId cn-wulanchabu \
-  --query 'Disks.Disk[?contains(DiskName, `cluster1`) || contains(Description, `kubernetes`)].[DiskName,Status]' --output table
+  --Tag.1.Key "$TAG_KEY" --Tag.1.Value owned \
+  --query 'Disks.Disk[].[DiskName,Status]' --output table
 
-echo "=== SLB ==="
+# 安全组
+aliyun ecs DescribeSecurityGroups --RegionId cn-wulanchabu \
+  --Tag.1.Key "$TAG_KEY" --Tag.1.Value owned \
+  --query 'SecurityGroups.SecurityGroup[].[SecurityGroupName]' --output table
+
+# SLB（注意：SLB 的标签字段名是 TagKey/TagValue）
 aliyun slb DescribeLoadBalancers --RegionId cn-wulanchabu \
+  --Tag.1.TagKey "$TAG_KEY" --Tag.1.TagValue owned \
   --query 'LoadBalancers.LoadBalancer[].[LoadBalancerName,LoadBalancerStatus]' --output table
 
-echo "=== EIP ==="
+# EIP
 aliyun vpc DescribeEipAddresses --RegionId cn-wulanchabu \
+  --Tag.1.Key "$TAG_KEY" --Tag.1.Value owned \
   --query 'EipAddresses.EipAddress[].[Name,Status]' --output table
 
-echo "=== VPC ==="
+# NAT Gateway
+aliyun vpc DescribeNatGateways --RegionId cn-wulanchabu \
+  --Tag.1.Key "$TAG_KEY" --Tag.1.Value owned \
+  --query 'NatGateways.NatGateway[].[Name,Status]' --output table
+
+# VSwitch
+aliyun vpc DescribeVSwitches --RegionId cn-wulanchabu \
+  --Tag.1.Key "$TAG_KEY" --Tag.1.Value owned \
+  --query 'VSwitches.VSwitch[].[VSwitchName,Status]' --output table
+
+# VPC
 aliyun vpc DescribeVpcs --RegionId cn-wulanchabu \
-  --query 'Vpcs.Vpc[?contains(VpcName, `cluster1`)].[VpcName,Status]' --output table
+  --Tag.1.Key "$TAG_KEY" --Tag.1.Value owned \
+  --query 'Vpcs.Vpc[].[VpcName,Status]' --output table
+
+# PrivateZone
+aliyun pvtz DescribeZones \
+  --Tag.1.Key "$TAG_KEY" --Tag.1.Value owned \
+  --query 'Zones.Zone[].[ZoneName,RecordCount]' --output table
 ```
 
-任何 cluster1 相关的残留都要手动删除。
+任何残留都要手动删除（按依赖反向：磁盘 → SLB → EIP → NAT → ECS → 安全组 → VSwitch → VPC → PrivateZone）。
+
+> **未标签化的 2 类 RAM 资源**（NodeRamRole / NodeRamPolicy）不会被孤儿扫描发现，
+> 但 ROS 栈删除时会一并销毁。如果栈本身删失败，手动清理：
+> ```sh
+> aliyun ram DeleteRole --RoleName <cluster>-node-role
+> aliyun ram DeletePolicy --PolicyName <cluster>-node-policy
+> ```
 
 ### G.4 成本核对
 
