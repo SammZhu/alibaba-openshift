@@ -35,6 +35,26 @@
 
 **总计：单次完整验证 4-6 小时，¥80-100 费用**
 
+### Phase → Ansible playbook 速查
+
+| Phase | 文档章节 | Ansible playbook |
+|---|---|---|
+| Day 0 | 一次性准备 | （手动） |
+| A | 准备 OpenShift 引导镜像 | `ansible/playbooks/01-prepare-iso.yml` |
+| A.2-4 | 上传 OSS + 导入 ECS 镜像 | `ansible/playbooks/02-import-image.yml` |
+| B | 创建云基础设施 | `ansible/playbooks/03-create-stack.yml` |
+| C | 安装 OpenShift | `ansible/playbooks/04-install-cluster.yml` |
+| — | 上述 A-C 一条龙 | `ansible/playbooks/site.yml` |
+| D | 应用 post-install 组件 | `ansible/playbooks/05-deploy-post-install.yml` |
+| E | 功能验证 | （手动，参看本文 E 节） |
+| F | OPCT 合规性测试 | （手动，参看本文 F 节） |
+| G | 销毁 | `ansible/playbooks/99-teardown.yml` |
+
+阅读建议：
+- **想一键跑** → 直接看 `ansible/README.md`
+- **想理解每步在做什么 / 调试某个 Phase** → 看本文对应章节
+- **想看 shell 版怎么实现** → 看 `scripts/README.md`（已弃用，仅参考）
+
 ---
 
 ## Day 0：一次性准备
@@ -640,8 +660,11 @@ oc get nodes
 # 跳板上（仓库已自动 clone）
 cd /root/openshift-alibaba/alibaba-openshift
 
-# 一键部署 CAPI Provider + CSI Operator + CSI Driver CR
-./scripts/deploy-post-install.sh
+# ── 推荐：Ansible 版本 ──
+ansible-playbook ansible/playbooks/05-deploy-post-install.yml
+
+# ── 或：shell 版本（等价，已弃用但保留）──
+./scripts/05-deploy-post-install.sh
 
 # 输出应包含：
 # [✓] Connected to OpenShift X.Y.Z

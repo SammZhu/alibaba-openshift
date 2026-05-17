@@ -4,8 +4,12 @@ Installing OpenShift Container Platform on Alibaba Cloud using the **External Pl
 
 Supports two installation methods via the same ROS template — choose `InstallationMethod` when creating the stack.
 
-> **👉 想直接动手？看 [QUICKSTART.md](QUICKSTART.md)** —— 从零到运行集群的端到端步骤（约 90–120 分钟）。
-> 本 README 是设计参考；QUICKSTART 是操作手册。
+> **👉 想直接动手？**
+> - **全自动（推荐）**：[`ansible/README.md`](ansible/README.md) —— 一条命令端到端，~90 分钟
+> - **手动 / 调试**：[`QUICKSTART.md`](QUICKSTART.md) —— 五个 Phase 分步指导
+> - **第一次跑 / 想理解每步原理**：[`docs/test-walkthrough.md`](docs/test-walkthrough.md) —— 含预期输出 + 故障排查
+>
+> 本 README 是设计参考。
 
 ---
 

@@ -5,8 +5,14 @@
 
 > 详细架构和设计原理见 [README.md](README.md)。本指南只给路径，不解释为什么。
 >
-> **第一次手动验证**？请用 [`docs/test-walkthrough.md`](docs/test-walkthrough.md) ——
-> 它是完整的"按步骤照做"操作手册（含 Assisted 和 Agent-based 两条路径、
+> **想全自动跑？** ✅ 用 [`ansible/`](ansible/README.md) —— 一条命令端到端：
+> ```sh
+> cp ansible/group_vars/all.yml.example ansible/group_vars/all.yml && vi $_
+> cd ansible && ansible-playbook playbooks/site.yml
+> ```
+>
+> **想手动跑或调试？** 用 [`docs/test-walkthrough.md`](docs/test-walkthrough.md) ——
+> 完整的"按步骤照做"操作手册（含 Assisted/Agent-based 两条路径、
 > 每个命令的预期输出、故障排查表、成本核对清单）。
 
 ---
@@ -39,7 +45,8 @@ Phase 5  Day-2 操作示例                             按需
 | `aliyun` CLI | 可选，所有阿里云操作都能用控制台代替 |
 | `openshift-install` | Agent-based 必需，Assisted 可选 |
 | `oc`（`kubectl`）| 集群安装完成后访问 |
-| `kustomize` | 跑 `deploy-post-install.sh` 需要 |
+| `ansible-core` (≥2.16) | 自动化主路径（`pip install --user ansible-core` 或 `dnf install ansible-core`）|
+| `kustomize` | Phase 3 部署组件需要 |
 | `podman`（或 `docker`）| 仅当你要自己构建镜像 |
 
 ### Red Hat 账号
@@ -50,7 +57,7 @@ Phase 5  Day-2 操作示例                             按需
 
 ### 仓库
 
-把这三个 git 仓库 **clone 到同一个父目录**——`deploy-post-install.sh` 假设它们是同级目录：
+把这三个 git 仓库 **clone 到同一个父目录**——自动化（ansible/、scripts/）假设它们是同级目录：
 
 ```sh
 mkdir openshift-alibaba && cd openshift-alibaba
@@ -167,6 +174,13 @@ openshift-install agent wait-for install-complete --dir install-dir/
 
 ## Phase 3 — 应用 post-install 组件
 
+> 推荐用 Ansible（在跳板上）：
+> ```sh
+> ansible-playbook ansible/playbooks/05-deploy-post-install.yml
+> ```
+
+或 shell 等价版本：
+
 ```sh
 # 设置 kubeconfig
 export KUBECONFIG=install-dir/auth/kubeconfig
@@ -176,10 +190,10 @@ export KUBECONFIG=install-dir/auth/kubeconfig
 oc get nodes
 
 # 一键部署 CAPI + CSI Operator + CSI Driver CR
-./scripts/deploy-post-install.sh
+./scripts/05-deploy-post-install.sh
 
 # 如果要装 OADP 备份：
-./scripts/deploy-post-install.sh --with-oadp
+./scripts/05-deploy-post-install.sh --with-oadp
 # 然后编辑 OSS 凭证并 apply：
 vi custom_manifests/05-oadp-oss-credentials.yaml
 oc apply -f custom_manifests/05-oadp-oss-credentials.yaml
