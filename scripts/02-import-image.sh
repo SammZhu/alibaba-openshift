@@ -39,7 +39,7 @@ fi
 # ── Upload ISO (skip if same size already there) ─────────────────────────────
 REMOTE_SIZE="$(aliyun oss stat "oss://${OSS_BUCKET}/${OSS_OBJECT}" --region "$REGION" 2>/dev/null \
   | awk '/Content-Length/ {print $2}' || echo "")"
-LOCAL_SIZE="$(stat -c%s "$ISO_PATH" 2>/dev/null || stat -f%z "$ISO_PATH")"
+LOCAL_SIZE="$(stat -c%s "$ISO_PATH")"
 if [ -n "$REMOTE_SIZE" ] && [ "$REMOTE_SIZE" = "$LOCAL_SIZE" ]; then
   ok "ISO already in OSS with matching size; skipping upload"
 else

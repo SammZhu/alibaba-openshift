@@ -3,6 +3,10 @@
 > **⚠️ 已被 [`ansible/`](../ansible/) 取代**——后者更稳健（原生 retry/idempotent、
 > 结构化 HTTP/JSON、跨 playbook state 自动传递）。本 shell 版本保留作快速参考，
 > 不再维护新特性。
+>
+> **平台**：仅 RHEL 8 / Alibaba Cloud Linux 3 / 其它 EL8 兼容发行版（GNU coreutils）。
+> macOS / BSD 上某些命令选项不同（`sed -i`/`base64 -w0`/`stat -c%s`），不会跑。
+> 跨平台用 `ansible/`。
 
 
 

@@ -59,7 +59,7 @@ for entry in "${MANIFESTS[@]}"; do
   IFS='|' read -r folder fname path <<< "$entry"
   [ -f "$path" ] || die "Manifest source not found: $path"
   log "  $folder/$fname"
-  CONTENT_B64="$(base64 -w0 < "$path" 2>/dev/null || base64 -i "$path" | tr -d '\n')"
+  CONTENT_B64="$(base64 -w0 < "$path")"
   PAYLOAD="$(jq -n --arg f "$folder" --arg n "$fname" --arg c "$CONTENT_B64" \
     '{folder:$f, file_name:$n, content:$c}')"
   ai_curl POST "/clusters/$CLUSTER_ID/manifests" "$PAYLOAD" >/dev/null

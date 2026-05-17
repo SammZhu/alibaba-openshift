@@ -1,5 +1,10 @@
 # Shared helpers for the test-cluster automation scripts.
 # Sourced by every 0X-*.sh script — never executed directly.
+#
+# Platform: RHEL 8 / Alibaba Cloud Linux 3 (or any EL8-compatible).
+# Uses GNU sed (-i), GNU base64 (-w0), GNU stat (-c%s) — these scripts
+# will NOT run unmodified on macOS / BSD. Use the ansible/ playbooks
+# for cross-platform automation.
 
 set -euo pipefail
 
@@ -43,11 +48,9 @@ state_load() {
 state_set() {
   local key="$1" value="$2"
   mkdir -p "$(dirname "$STATE_FILE")"
-  # Replace existing line or append
-  if [ -f "$STATE_FILE" ] && grep -q "^${key}=" "$STATE_FILE"; then
-    # Use a tmp file for portability between gnu/bsd sed
-    grep -v "^${key}=" "$STATE_FILE" > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
-  fi
+  # GNU sed -i (RHEL 8 / Alibaba Linux 3). Removes any prior assignment
+  # of the same key, then appends the new value.
+  [ -f "$STATE_FILE" ] && sed -i "/^${key}=/d" "$STATE_FILE"
   echo "${key}=${value}" >> "$STATE_FILE"
   ok "state: ${key}=${value}"
 }
