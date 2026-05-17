@@ -1,0 +1,52 @@
+---
+# Copy to group_vars/all.yml and edit. group_vars/all.yml is gitignored.
+
+# ── Cluster identity ─────────────────────────────────────────────────────────
+cluster_name:        cluster1
+base_domain:         example.local
+openshift_version:   "4.20"
+
+# ── Alibaba Cloud ────────────────────────────────────────────────────────────
+region:              cn-wulanchabu
+zone:                cn-wulanchabu-a
+zone2:               cn-wulanchabu-b
+oss_bucket:          openshift-iso-samzhu-test   # must be globally unique
+aliyun_profile:      openshift-test              # aliyun-cli profile
+
+# ── Compute sizing (compact 3-node, no separate workers) ─────────────────────
+control_plane_count:  3
+control_plane_type:   ecs.g7.xlarge
+compute_count:        0       # 0 = compact (masters schedule workloads)
+compute_type:         ecs.g7.xlarge
+system_disk_category: cloud_essd
+system_disk_size:     120
+
+# ── Network ──────────────────────────────────────────────────────────────────
+vpc_cidr:             10.0.0.0/16
+private_subnet_cidr:  10.0.16.0/20
+private_subnet_cidr2: 10.0.32.0/20
+public_subnet_cidr:   10.0.0.0/20
+rendezvous_ip:        10.0.16.5
+
+# ── Jump host (SSH into VPC) ─────────────────────────────────────────────────
+enable_jump_host:     true
+jump_host_type:       ecs.t6-c1m1.large
+
+# ── Files (resolved at runtime) ──────────────────────────────────────────────
+pull_secret_file:     "{{ ansible_env.HOME }}/.openshift/pull-secret.json"
+ssh_pub_key_file:     "{{ ansible_env.HOME }}/.ssh/openshift_ed25519.pub"
+ssh_priv_key_file:    "{{ ansible_env.HOME }}/.ssh/openshift_ed25519"
+offline_token_file:   "{{ ansible_env.HOME }}/.openshift/offline-token"
+
+# ── Output directory (kubeconfig, ISO, etc.) ─────────────────────────────────
+output_dir:           "{{ ansible_env.HOME }}/openshift-install/{{ cluster_name }}"
+
+# ── Installation method (only Assisted is automated today) ───────────────────
+installation_method:  Assisted
+
+# ── Repo locations on the local machine ──────────────────────────────────────
+repo_root:            "{{ playbook_dir }}/../.."
+
+# ── Internal: endpoints (don't change unless instructed) ─────────────────────
+assisted_api:  https://api.openshift.com/api/assisted-install/v2
+sso_url:       https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token

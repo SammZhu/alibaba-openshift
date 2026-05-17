@@ -1,0 +1,17 @@
+---
+# Merge `new_state` (dict, set by caller) into state.yml.
+# Usage:
+#   - ansible.builtin.include_tasks: ../tasks/save_state.yml
+#     vars:
+#       new_state:
+#         cluster_id: "{{ cluster_id }}"
+#         infra_env_id: "{{ infra_env_id }}"
+- name: Load existing state to merge
+  ansible.builtin.include_tasks: load_state.yml
+
+- name: Write merged state back to disk
+  ansible.builtin.copy:
+    dest: "{{ playbook_dir }}/../state.yml"
+    mode: "0600"
+    content: |
+      {{ (pipeline_state | default({})) | combine(new_state | default({})) | to_nice_yaml(indent=2) }}

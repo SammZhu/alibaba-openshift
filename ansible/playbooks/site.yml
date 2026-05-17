@@ -1,0 +1,9 @@
+---
+# Convenience wrapper: run Phases 00 → 04 in sequence.
+# Phase 05 must run on the jump host (different inventory target).
+# Phase 99 must run with explicit confirmation.
+- ansible.builtin.import_playbook: 00-preflight.yml
+- ansible.builtin.import_playbook: 01-prepare-iso.yml
+- ansible.builtin.import_playbook: 02-import-image.yml
+- ansible.builtin.import_playbook: 03-create-stack.yml
+- ansible.builtin.import_playbook: 04-install-cluster.yml

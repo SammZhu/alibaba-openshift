@@ -1,0 +1,182 @@
+---
+# Phase 03 — submit ROS stack, wait, capture outputs.
+- name: Create ROS stack
+  hosts: local
+  gather_facts: false
+  vars:
+    stack_name: "openshift-{{ cluster_name }}"
+    template_file: "{{ repo_root }}/alibaba-openshift/ros-templates/create-cluster.yaml"
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: Read SSH public key
+      ansible.builtin.slurp:
+        src: "{{ ssh_pub_key_file }}"
+      register: ssh_pub_slurp
+
+    - name: Read ROS template body
+      ansible.builtin.slurp:
+        src: "{{ template_file }}"
+      register: tpl_slurp
+
+    # ── Adopt existing stack by name if state was lost ─────────────────────
+    - name: List stacks by name
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - ListStacks
+          - --RegionId
+          - "{{ region }}"
+          - --StackName.1
+          - "{{ stack_name }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: stack_list
+      changed_when: false
+      failed_when: false
+      when: ros_stack_id is not defined or ros_stack_id | length == 0
+
+    - name: Adopt existing stack
+      ansible.builtin.set_fact:
+        ros_stack_id: "{{ ((stack_list.stdout | from_json).Stacks | first).StackId }}"
+      when:
+        - ros_stack_id is not defined or ros_stack_id | length == 0
+        - stack_list is defined and stack_list.rc == 0
+        - ((stack_list.stdout | from_json).Stacks | length) > 0
+
+    # ── Create stack if still missing ──────────────────────────────────────
+    - name: Build ROS Parameters JSON
+      ansible.builtin.set_fact:
+        ros_params:
+          - {ParameterKey: ClusterName,              ParameterValue: "{{ cluster_name }}"}
+          - {ParameterKey: BaseDomain,               ParameterValue: "{{ base_domain }}"}
+          - {ParameterKey: Region,                   ParameterValue: "{{ region }}"}
+          - {ParameterKey: ZoneId,                   ParameterValue: "{{ zone }}"}
+          - {ParameterKey: ZoneId2,                  ParameterValue: "{{ zone2 }}"}
+          - {ParameterKey: VpcCidr,                  ParameterValue: "{{ vpc_cidr }}"}
+          - {ParameterKey: PrivateSubnetCidr,        ParameterValue: "{{ private_subnet_cidr }}"}
+          - {ParameterKey: PrivateSubnetCidr2,       ParameterValue: "{{ private_subnet_cidr2 }}"}
+          - {ParameterKey: PublicSubnetCidr,         ParameterValue: "{{ public_subnet_cidr }}"}
+          - {ParameterKey: ControlPlaneCount,        ParameterValue: "{{ control_plane_count }}"}
+          - {ParameterKey: ControlPlaneInstanceType, ParameterValue: "{{ control_plane_type }}"}
+          - {ParameterKey: ComputeCount,             ParameterValue: "{{ compute_count }}"}
+          - {ParameterKey: ComputeInstanceType,      ParameterValue: "{{ compute_type }}"}
+          - {ParameterKey: SystemDiskCategory,       ParameterValue: "{{ system_disk_category }}"}
+          - {ParameterKey: SystemDiskSize,           ParameterValue: "{{ system_disk_size }}"}
+          - {ParameterKey: InstallationMethod,       ParameterValue: "{{ installation_method }}"}
+          - {ParameterKey: ImageId,                  ParameterValue: "{{ ecs_image_id }}"}
+          - {ParameterKey: RendezvousIp,             ParameterValue: "{{ rendezvous_ip }}"}
+          - {ParameterKey: EnableJumpHost,           ParameterValue: "{{ enable_jump_host | string | lower }}"}
+          - {ParameterKey: JumpHostInstanceType,     ParameterValue: "{{ jump_host_type }}"}
+          - {ParameterKey: SshPublicKey,             ParameterValue: "{{ ssh_pub_slurp.content | b64decode | trim }}"}
+
+    - name: Submit ROS CreateStack
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - CreateStack
+          - --RegionId
+          - "{{ region }}"
+          - --StackName
+          - "{{ stack_name }}"
+          - --DisableRollback
+          - "true"
+          - --TimeoutInMinutes
+          - "60"
+          - --TemplateBody
+          - "{{ tpl_slurp.content | b64decode }}"
+          - --Parameters
+          - "{{ ros_params | to_json }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: create_result
+      when: ros_stack_id is not defined or ros_stack_id | length == 0
+
+    - name: Capture new stack ID
+      ansible.builtin.set_fact:
+        ros_stack_id: "{{ (create_result.stdout | from_json).StackId }}"
+      when: create_result is changed
+
+    - name: Persist stack ID before waiting (so a kill mid-wait doesn't lose it)
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        new_state: { ros_stack_id: "{{ ros_stack_id }}" }
+
+    # ── Wait for CREATE_COMPLETE ───────────────────────────────────────────
+    - name: Poll stack until CREATE_COMPLETE (10-15 min)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - GetStack
+          - --StackId
+          - "{{ ros_stack_id }}"
+          - --RegionId
+          - "{{ region }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: stack_poll
+      changed_when: false
+      retries: 60
+      delay: 20
+      until:
+        - (stack_poll.stdout | from_json).Status == 'CREATE_COMPLETE'
+      failed_when:
+        - (stack_poll.stdout | from_json).Status is defined
+        - (stack_poll.stdout | from_json).Status in ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE', 'DELETE_IN_PROGRESS', 'DELETE_FAILED']
+
+    # ── Capture outputs ────────────────────────────────────────────────────
+    - name: Parse stack outputs
+      ansible.builtin.set_fact:
+        outputs: "{{ (stack_poll.stdout | from_json).Outputs }}"
+
+    - name: Pick required outputs
+      ansible.builtin.set_fact:
+        vpc_id:           "{{ (outputs | selectattr('OutputKey', 'equalto', 'VpcId')              | first).OutputValue }}"
+        private_vswitch: "{{ (outputs | selectattr('OutputKey', 'equalto', 'VSwitchId')          | first).OutputValue }}"
+        api_slb_ip:       "{{ (outputs | selectattr('OutputKey', 'equalto', 'ApiSLBIp')           | first).OutputValue }}"
+        worker_sg:        "{{ (outputs | selectattr('OutputKey', 'equalto', 'WorkerSecurityGroup')| first).OutputValue }}"
+        node_ram_role:    "{{ (outputs | selectattr('OutputKey', 'equalto', 'NodeRamRoleName')    | first).OutputValue }}"
+        install_config:   "{{ (outputs | selectattr('OutputKey', 'equalto', 'InstallConfig')      | first).OutputValue }}"
+        dynamic_manifest: "{{ (outputs | selectattr('OutputKey', 'equalto', 'DynamicCustomManifest')| first).OutputValue }}"
+
+    - name: Pick jump host IP (optional)
+      ansible.builtin.set_fact:
+        jump_host_ip: "{{ (outputs | selectattr('OutputKey', 'equalto', 'JumpHostPublicIp') | list | first).OutputValue }}"
+      when: (outputs | selectattr('OutputKey', 'equalto', 'JumpHostPublicIp') | list | length) > 0
+
+    # ── Save ROS-generated CCM ConfigMap to disk for Phase 04 ──────────────
+    - name: Save alibaba-ccm-config.yaml
+      ansible.builtin.copy:
+        dest: "{{ output_dir }}/alibaba-ccm-config.yaml"
+        content: "{{ dynamic_manifest }}"
+        mode: "0644"
+
+    - name: Save install-config.yaml (reference copy)
+      ansible.builtin.copy:
+        dest: "{{ output_dir }}/install-config.yaml"
+        content: "{{ install_config }}"
+        mode: "0644"
+
+    # ── Persist state ──────────────────────────────────────────────────────
+    - name: Save state
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        new_state:
+          ros_stack_id: "{{ ros_stack_id }}"
+          vpc_id: "{{ vpc_id }}"
+          private_vswitch: "{{ private_vswitch }}"
+          api_slb_ip: "{{ api_slb_ip }}"
+          worker_sg: "{{ worker_sg }}"
+          node_ram_role: "{{ node_ram_role }}"
+          dynamic_manifest_file: "{{ output_dir }}/alibaba-ccm-config.yaml"
+          jump_host_ip: "{{ jump_host_ip | default('') }}"
+
+    - name: Phase 03 done
+      ansible.builtin.debug:
+        msg: |
+          API SLB: {{ api_slb_ip }}
+          Jump host: {{ jump_host_ip | default('(disabled)') }}
+          Next: ansible-playbook playbooks/04-install-cluster.yml

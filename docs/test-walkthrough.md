@@ -6,16 +6,19 @@
 - **路径 A — Assisted Installer**：通过 Red Hat 网页 UI 安装（推荐第一次）
 - **路径 B — Agent-based Installer**：本地命令行安装（自动化友好）
 
-> **🤖 想直接全自动跑？** 用 [`scripts/`](../scripts/README.md)：
+> **🤖 想直接全自动跑？** 用 [`ansible/`](../ansible/README.md)（推荐）：
 > ```sh
-> cp scripts/config.sh.example scripts/config.sh && vi scripts/config.sh
-> ./scripts/all.sh   # 跑完 01-04，约 90 分钟
+> cp ansible/group_vars/all.yml.example ansible/group_vars/all.yml && vi $_
+> cd ansible && ansible-playbook playbooks/site.yml   # 跑完 00-04，约 90 分钟
 > ```
+> Ansible 版用原生 retry/idempotent + 结构化 HTTP/JSON，比 shell 稳健。
 > 本文档详细解释每一步**为什么**和**手动该怎么点**，仅在出错排查或想理解机制时阅读。
-> 6 个脚本各自对应这里的一个 Phase：
-> `01-prepare-iso.sh` (A.1-3) / `02-import-image.sh` (A.2-4) /
-> `03-create-stack.sh` (B) / `04-install-cluster.sh` (C) /
-> `05-deploy-post-install.sh` (D，跳板上跑) / `99-teardown.sh` (G)
+> 6 个 playbook 各自对应这里的一个 Phase：
+> `01-prepare-iso.yml` (A) / `02-import-image.yml` (A.2-4) /
+> `03-create-stack.yml` (B) / `04-install-cluster.yml` (C) /
+> `05-deploy-post-install.yml` (D，跳板上跑) / `99-teardown.yml` (G)。
+>
+> `scripts/` 下的 bash 等价版已弃用，留作快速参考。
 
 ---
 

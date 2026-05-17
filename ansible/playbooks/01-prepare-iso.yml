@@ -1,0 +1,168 @@
+---
+# Phase 01 — create Assisted cluster + infra-env, download Discovery ISO.
+- name: Prepare OpenShift Discovery ISO via Assisted Installer API
+  hosts: local
+  gather_facts: false
+  vars:
+    iso_path: "{{ output_dir }}/discovery-{{ cluster_name }}.iso"
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+
+    # ── Adopt existing cluster by name to avoid duplicates ─────────────────
+    - name: List existing Assisted clusters
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters"
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        status_code: 200
+        return_content: true
+      register: cluster_list
+      when: cluster_id is not defined or cluster_id | length == 0
+
+    - name: Adopt existing cluster with matching name + domain
+      ansible.builtin.set_fact:
+        cluster_id: "{{ (cluster_list.json
+                          | selectattr('name', 'equalto', cluster_name)
+                          | selectattr('base_dns_domain', 'equalto', base_domain)
+                          | list | first).id }}"
+      when:
+        - cluster_id is not defined or cluster_id | length == 0
+        - cluster_list is defined
+        - (cluster_list.json
+            | selectattr('name', 'equalto', cluster_name)
+            | selectattr('base_dns_domain', 'equalto', base_domain)
+            | list | length) > 0
+
+    # ── Create cluster if still missing ────────────────────────────────────
+    - name: Read pull secret
+      ansible.builtin.slurp:
+        src: "{{ pull_secret_file }}"
+      register: pull_slurp
+      no_log: true
+
+    - name: Read SSH public key
+      ansible.builtin.slurp:
+        src: "{{ ssh_pub_key_file }}"
+      register: ssh_pub_slurp
+
+    - name: Create Assisted cluster object
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ ai_access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "{{ cluster_name }}"
+          openshift_version: "{{ openshift_version }}"
+          cpu_architecture: x86_64
+          base_dns_domain: "{{ base_domain }}"
+          high_availability_mode: Full
+          control_plane_count: "{{ control_plane_count | int }}"
+          pull_secret: "{{ pull_slurp.content | b64decode }}"
+          ssh_public_key: "{{ ssh_pub_slurp.content | b64decode | trim }}"
+          platform:
+            type: external
+            external:
+              platform_name: AlibabaCloud
+              cloud_controller_manager: External
+        status_code: 201
+      register: cluster_create
+      when: cluster_id is not defined or cluster_id | length == 0
+
+    - name: Capture new cluster ID
+      ansible.builtin.set_fact:
+        cluster_id: "{{ cluster_create.json.id }}"
+      when: cluster_create is changed
+
+    # ── Create infra-env (this is what generates the ISO) ──────────────────
+    - name: Look up infra-env for the cluster
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/infra-envs?cluster_id={{ cluster_id }}"
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        status_code: 200
+        return_content: true
+      register: infra_list
+      when: infra_env_id is not defined or infra_env_id | length == 0
+
+    - name: Adopt existing infra-env
+      ansible.builtin.set_fact:
+        infra_env_id: "{{ (infra_list.json | first).id }}"
+      when:
+        - infra_env_id is not defined or infra_env_id | length == 0
+        - infra_list is defined
+        - infra_list.json | length > 0
+
+    - name: Create infra-env if missing
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/infra-envs"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ ai_access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          name: "{{ cluster_name }}-infra"
+          cluster_id: "{{ cluster_id }}"
+          image_type: minimal-iso
+          pull_secret: "{{ pull_slurp.content | b64decode }}"
+          ssh_authorized_key: "{{ ssh_pub_slurp.content | b64decode | trim }}"
+          openshift_version: "{{ openshift_version }}"
+          cpu_architecture: x86_64
+        status_code: 201
+      register: infra_create
+      when: infra_env_id is not defined or infra_env_id | length == 0
+
+    - name: Capture new infra-env ID
+      ansible.builtin.set_fact:
+        infra_env_id: "{{ infra_create.json.id }}"
+      when: infra_create is changed
+
+    # ── Wait for ISO URL ───────────────────────────────────────────────────
+    - name: Poll for ISO download URL
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/downloads/image-url"
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        status_code: 200
+        return_content: true
+      register: iso_url_resp
+      retries: 30
+      delay: 5
+      until:
+        - iso_url_resp.status == 200
+        - iso_url_resp.json.url is defined
+        - iso_url_resp.json.url | length > 0
+
+    # ── Download (idempotent: skip if file already same size) ──────────────
+    - name: Stat existing ISO on disk
+      ansible.builtin.stat:
+        path: "{{ iso_path }}"
+      register: iso_stat
+
+    - name: Download Discovery ISO
+      ansible.builtin.get_url:
+        url: "{{ iso_url_resp.json.url }}"
+        dest: "{{ iso_path }}"
+        mode: "0644"
+        force: true
+      when: not iso_stat.stat.exists or iso_stat.stat.size < (50 * 1024 * 1024)
+
+    - name: Confirm ISO size sanity-checks (≥ 50 MB)
+      ansible.builtin.stat:
+        path: "{{ iso_path }}"
+      register: iso_stat_final
+      failed_when: iso_stat_final.stat.size < (50 * 1024 * 1024)
+
+    # ── Persist state ──────────────────────────────────────────────────────
+    - name: Save state
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        new_state:
+          cluster_id: "{{ cluster_id }}"
+          infra_env_id: "{{ infra_env_id }}"
+          iso_path: "{{ iso_path }}"
+
+    - name: Phase 01 done
+      ansible.builtin.debug:
+        msg: "ISO ready at {{ iso_path }} — next: 02-import-image.yml"

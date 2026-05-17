@@ -1,0 +1,215 @@
+---
+# Phase 02 — upload ISO to OSS, ensure RAM role, ImportImage, wait Available.
+- name: Import Discovery ISO as ECS custom image
+  hosts: local
+  gather_facts: false
+  vars:
+    oss_object: "discovery-{{ cluster_name }}.iso"
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: Assert ISO exists from Phase 01
+      ansible.builtin.stat:
+        path: "{{ iso_path }}"
+      register: iso_stat
+      failed_when: not iso_stat.stat.exists
+
+    # ── Ensure OSS bucket exists in the right region ──────────────────────
+    - name: Check OSS bucket
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - oss
+          - ls
+          - "oss://{{ oss_bucket }}/"
+          - --region
+          - "{{ region }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: bucket_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create OSS bucket if missing
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - oss
+          - mb
+          - "oss://{{ oss_bucket }}"
+          - --region
+          - "{{ region }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      when: bucket_check.rc != 0
+
+    # ── Upload ISO (idempotent by size) ───────────────────────────────────
+    - name: Check current object size in OSS
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - oss
+          - stat
+          - "oss://{{ oss_bucket }}/{{ oss_object }}"
+          - --region
+          - "{{ region }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: oss_stat
+      changed_when: false
+      failed_when: false
+
+    - name: Upload ISO to OSS (skipped when size matches)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - oss
+          - cp
+          - "{{ iso_path }}"
+          - "oss://{{ oss_bucket }}/{{ oss_object }}"
+          - --region
+          - "{{ region }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+          - -f
+      register: upload_result
+      when: |
+        oss_stat.rc != 0 or
+        ((oss_stat.stdout | regex_search('Content-Length\\s*:\\s*(\\d+)', '\\1') | first | default('0') | int)
+          != iso_stat.stat.size)
+
+    # ── Ensure RAM role for ECS→OSS import (first-time setup) ─────────────
+    - name: Check AliyunECSImageImportDefaultRole exists
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ram
+          - GetRole
+          - --RoleName
+          - AliyunECSImageImportDefaultRole
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: role_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create AliyunECSImageImportDefaultRole
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ram
+          - CreateRole
+          - --RoleName
+          - AliyunECSImageImportDefaultRole
+          - --AssumeRolePolicyDocument
+          - '{"Statement":[{"Action":"sts:AssumeRole","Effect":"Allow","Principal":{"Service":["ecs.aliyuncs.com"]}}],"Version":"1"}'
+          - --profile
+          - "{{ aliyun_profile }}"
+      when: role_check.rc != 0
+
+    - name: Attach AliyunECSImageImportRolePolicy
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ram
+          - AttachPolicyToRole
+          - --PolicyType
+          - System
+          - --PolicyName
+          - AliyunECSImageImportRolePolicy
+          - --RoleName
+          - AliyunECSImageImportDefaultRole
+          - --profile
+          - "{{ aliyun_profile }}"
+      when: role_check.rc != 0
+      register: attach_result
+      failed_when:
+        - attach_result.rc != 0
+        - "'EntityAlreadyExists' not in attach_result.stderr"
+
+    - name: Wait 30s for RAM role propagation
+      ansible.builtin.pause:
+        seconds: 30
+      when: role_check.rc != 0
+
+    # ── ImportImage (idempotent: skip when ECS_IMAGE_ID present + Available) ─
+    - name: Check existing image status
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeImages
+          - --RegionId
+          - "{{ region }}"
+          - --ImageId
+          - "{{ ecs_image_id | default('PLACEHOLDER') }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: image_describe
+      changed_when: false
+      failed_when: false
+      when: ecs_image_id is defined and ecs_image_id | length > 0
+
+    - name: Submit ImportImage when needed
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - ImportImage
+          - --RegionId
+          - "{{ region }}"
+          - --ImageName
+          - "openshift-{{ cluster_name }}-iso"
+          - --OSType
+          - Linux
+          - --Platform
+          - Others_Linux
+          - --Architecture
+          - x86_64
+          - --DiskDeviceMapping.1.Format
+          - ISO
+          - --DiskDeviceMapping.1.OSSBucket
+          - "{{ oss_bucket }}"
+          - --DiskDeviceMapping.1.OSSObject
+          - "{{ oss_object }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: import_result
+      when: |
+        ecs_image_id is not defined or ecs_image_id | length == 0 or
+        (image_describe is defined and image_describe.rc != 0)
+
+    - name: Capture new ECS image ID
+      ansible.builtin.set_fact:
+        ecs_image_id: "{{ (import_result.stdout | from_json).ImageId }}"
+      when: import_result is changed
+
+    # ── Wait for Available ────────────────────────────────────────────────
+    - name: Poll image status until Available (~15-30 min)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeImages
+          - --RegionId
+          - "{{ region }}"
+          - --ImageId
+          - "{{ ecs_image_id }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: image_poll
+      changed_when: false
+      retries: 60
+      delay: 30
+      until: (image_poll.stdout | from_json).Images.Image[0].Status == 'Available'
+
+    # ── Persist state ─────────────────────────────────────────────────────
+    - name: Save state
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        new_state:
+          ecs_image_id: "{{ ecs_image_id }}"
+
+    - name: Phase 02 done
+      ansible.builtin.debug:
+        msg: "ECS image {{ ecs_image_id }} ready — next: 03-create-stack.yml"

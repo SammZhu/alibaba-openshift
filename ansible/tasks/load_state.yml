@@ -1,0 +1,23 @@
+---
+# Load pipeline state from state.yml if present.
+# Variables set: cluster_id, infra_env_id, iso_path, ecs_image_id,
+#                ros_stack_id, vpc_id, private_vswitch, api_slb_ip,
+#                worker_sg, node_ram_role, jump_host_ip, kubeconfig_path
+- name: Check whether state file exists
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/../state.yml"
+  register: state_stat
+
+- name: Load existing pipeline state
+  ansible.builtin.include_vars:
+    file: "{{ playbook_dir }}/../state.yml"
+    name: pipeline_state
+  when: state_stat.stat.exists
+
+- name: Promote state values to top-level facts
+  ansible.builtin.set_fact:
+    "{{ item.key }}": "{{ item.value }}"
+  loop: "{{ pipeline_state | default({}) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: state_stat.stat.exists

@@ -1,0 +1,10 @@
+---
+# Static inventory.
+# - `local` is the operator's machine; runs Phases 00–04 and 99.
+# - `jumphost` is populated dynamically by Phase 03 (via add_host) and used by
+#   Phase 05 plus the app-layer cleanup in Phase 99. No need to edit by hand.
+all:
+  hosts:
+    local:
+      ansible_connection: local
+      ansible_python_interpreter: "{{ ansible_playbook_python }}"

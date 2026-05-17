@@ -1,0 +1,215 @@
+---
+# Phase 04 — wait for hosts, assign roles, upload manifests, install, kubeconfig.
+- name: Install OpenShift via Assisted Installer
+  hosts: local
+  gather_facts: false
+  vars:
+    expected_hosts: "{{ (control_plane_count | int) + (compute_count | int) }}"
+    manifests_to_upload:
+      - folder: manifests
+        name: 00-ovn-mtu.yaml
+        src: "{{ repo_root }}/alibaba-openshift/custom_manifests/00-ovn-mtu.yaml"
+      - folder: manifests
+        name: 01-alibaba-ccm.yaml
+        src: "{{ repo_root }}/alibaba-openshift/custom_manifests/01-alibaba-ccm.yaml"
+      - folder: manifests
+        name: alibaba-ccm-config.yaml
+        src: "{{ dynamic_manifest_file }}"
+      - folder: openshift
+        name: 03-machineconfig-providerid.yaml
+        src: "{{ repo_root }}/alibaba-openshift/custom_manifests/03-machineconfig-providerid.yaml"
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+
+    - ansible.builtin.assert:
+        that:
+          - cluster_id is defined
+          - infra_env_id is defined
+          - dynamic_manifest_file is defined
+        fail_msg: "Run Phases 01-03 first"
+
+    # ── Wait for hosts to register ─────────────────────────────────────────
+    - name: Poll for {{ expected_hosts }} hosts to discover
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts"
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        return_content: true
+      register: hosts_resp
+      retries: 90
+      delay: 20
+      until: |
+        (hosts_resp.json | selectattr('status', 'in', ['known', 'known-unbound', 'insufficient']) | list | length)
+          >= (expected_hosts | int)
+
+    # ── Refresh token (poll may have taken >15min) ────────────────────────
+    - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+
+    # ── Assign roles (first N as master, rest worker) ─────────────────────
+    - name: Compute role assignments
+      ansible.builtin.set_fact:
+        host_role_map: |
+          {%- set out = [] -%}
+          {%- for h in hosts_resp.json -%}
+            {%- set _ = out.append({'id': h.id,
+                                     'role': 'master' if loop.index <= (control_plane_count | int) else 'worker'}) -%}
+          {%- endfor -%}
+          {{ out }}
+
+    - name: PATCH host roles
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts/{{ item.id }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ ai_access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body: { host_role: "{{ item.role }}" }
+        status_code: [200, 201]
+      loop: "{{ host_role_map }}"
+      loop_control: { label: "{{ item.id }} -> {{ item.role }}" }
+
+    # ── Upload custom manifests ───────────────────────────────────────────
+    - name: Slurp each manifest
+      ansible.builtin.slurp:
+        src: "{{ item.src }}"
+      register: manifest_slurps
+      loop: "{{ manifests_to_upload }}"
+      loop_control: { label: "{{ item.folder }}/{{ item.name }}" }
+
+    - name: POST each manifest to Assisted
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}/manifests"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ ai_access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          folder: "{{ item.item.folder }}"
+          file_name: "{{ item.item.name }}"
+          content: "{{ item.content }}"
+        status_code: [201, 409]      # 409 = already exists, idempotent
+      loop: "{{ manifest_slurps.results }}"
+      loop_control: { label: "{{ item.item.folder }}/{{ item.item.name }}" }
+
+    # ── Wait cluster ready ────────────────────────────────────────────────
+    - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+
+    - name: Poll cluster until ready-to-install
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        return_content: true
+      register: cluster_poll
+      retries: 40
+      delay: 15
+      until: cluster_poll.json.status == 'ready'
+      failed_when:
+        - cluster_poll.json.status is defined
+        - cluster_poll.json.status in ['pending-for-input', 'installing-pending-user-action', 'error', 'cancelled']
+
+    # ── Install ───────────────────────────────────────────────────────────
+    - name: Trigger install
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}/actions/install"
+        method: POST
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        status_code: [202, 409]   # 409 if already installing
+      when: cluster_poll.json.status == 'ready'
+
+    # ── Poll until installed (token refreshes each iteration) ─────────────
+    - name: Poll install status (~45-60 min)
+      block:
+        - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+        - name: Get cluster status
+          ansible.builtin.uri:
+            url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
+            headers: { Authorization: "Bearer {{ ai_access_token }}" }
+            return_content: true
+          register: install_poll
+          retries: 60
+          delay: 60
+          until: install_poll.json.status == 'installed'
+          failed_when:
+            - install_poll.json.status is defined
+            - install_poll.json.status in ['error', 'cancelled', 'pending-for-input', 'installing-pending-user-action']
+
+    # ── Download credentials ──────────────────────────────────────────────
+    - name: Ensure auth dir
+      ansible.builtin.file:
+        path: "{{ output_dir }}/auth"
+        state: directory
+        mode: "0700"
+
+    - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+
+    - name: Download kubeconfig
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}/downloads/credentials?file_name=kubeconfig"
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        dest: "{{ output_dir }}/auth/kubeconfig"
+        mode: "0600"
+
+    - name: Download kubeadmin password
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}/downloads/credentials?file_name=kubeadmin-password"
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        dest: "{{ output_dir }}/auth/kubeadmin-password"
+        mode: "0600"
+
+    # ── SCP kubeconfig to jump host (if available) ────────────────────────
+    - name: Wait for jump host cloud-init to finish (userdata.done marker)
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -i
+          - "{{ ssh_priv_key_file }}"
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - ConnectTimeout=5
+          - "root@{{ jump_host_ip }}"
+          - test -f /var/log/userdata.done
+      register: jump_ready
+      changed_when: false
+      failed_when: false
+      retries: 30
+      delay: 10
+      until: jump_ready.rc == 0
+      when: jump_host_ip | default('') | length > 0
+
+    - name: Copy kubeconfig to jump host
+      ansible.builtin.command:
+        argv:
+          - scp
+          - -i
+          - "{{ ssh_priv_key_file }}"
+          - -o
+          - StrictHostKeyChecking=no
+          - "{{ output_dir }}/auth/kubeconfig"
+          - "root@{{ jump_host_ip }}:/root/kubeconfig"
+      when: jump_host_ip | default('') | length > 0
+      register: scp_result
+      changed_when: scp_result.rc == 0
+
+    # ── Persist + summary ─────────────────────────────────────────────────
+    - name: Save state
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        new_state:
+          kubeconfig_path: "{{ output_dir }}/auth/kubeconfig"
+          kubeadmin_password_path: "{{ output_dir }}/auth/kubeadmin-password"
+
+    - name: Phase 04 done
+      ansible.builtin.debug:
+        msg: |
+          Cluster installed.
+          Kubeconfig: {{ output_dir }}/auth/kubeconfig
+          {% if jump_host_ip | default('') | length > 0 %}
+          Next: ssh -i {{ ssh_priv_key_file }} root@{{ jump_host_ip }}
+                cd /root/openshift-alibaba/alibaba-openshift
+                ansible-playbook ansible/playbooks/05-deploy-post-install.yml
+          {% else %}
+          Next: from inside the VPC, run 05-deploy-post-install.yml
+          {% endif %}

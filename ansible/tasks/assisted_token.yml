@@ -1,0 +1,31 @@
+---
+# Exchange the long-lived Red Hat offline token for a short-lived (~15 min)
+# access token. Sets fact `ai_access_token`. Re-include any time you need a
+# fresh token — token has ~15min TTL but each refresh round-trip is ~200ms.
+- name: Read offline token from disk
+  ansible.builtin.slurp:
+    src: "{{ offline_token_file }}"
+  register: offline_slurp
+  no_log: true
+
+- name: Exchange offline token for access token
+  ansible.builtin.uri:
+    url: "{{ sso_url }}"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      grant_type: refresh_token
+      client_id: cloud-services
+      refresh_token: "{{ offline_slurp.content | b64decode | trim }}"
+    status_code: 200
+    return_content: true
+  register: token_resp
+  retries: 3
+  delay: 5
+  until: token_resp.status == 200
+  no_log: true
+
+- name: Cache access token
+  ansible.builtin.set_fact:
+    ai_access_token: "{{ token_resp.json.access_token }}"
+  no_log: true

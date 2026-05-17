@@ -1,0 +1,159 @@
+---
+# Phase 99 — clean up the cluster cleanly to avoid orphan billing.
+# Steps:
+#   0. App-layer: delete LoadBalancer Services + PVCs via jump host
+#   1. Delete Assisted Installer cluster record
+#   2. Delete ROS stack (frees ALL Aliyun resources)
+#   3. Orphan scan
+#   4. Clear state.yml
+#
+# Run with: ansible-playbook playbooks/99-teardown.yml
+# Skip the app-layer cleanup (e.g. cluster already gone) with:
+#   ansible-playbook playbooks/99-teardown.yml -e skip_app_cleanup=true
+# Force (no interactive confirm) with:
+#   ansible-playbook playbooks/99-teardown.yml -e teardown_confirmed=true
+- name: Teardown
+  hosts: local
+  gather_facts: false
+  vars:
+    skip_app_cleanup: false
+    teardown_confirmed: false
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: Confirm teardown (skip with -e teardown_confirmed=true)
+      ansible.builtin.pause:
+        prompt: "Type 'yes' to delete cluster {{ cluster_name }} and ROS stack {{ ros_stack_id | default('?') }}"
+      register: confirm_input
+      when: not teardown_confirmed | bool
+
+    - ansible.builtin.assert:
+        that:
+          - teardown_confirmed | bool or confirm_input.user_input == 'yes'
+        fail_msg: "Aborted"
+
+    # ── Step 0: app-layer cleanup ──────────────────────────────────────────
+    - name: App-layer cleanup via jump host
+      when:
+        - not skip_app_cleanup | bool
+        - jump_host_ip is defined and jump_host_ip | length > 0
+      block:
+        - name: Delete LoadBalancer Services + PVCs on the cluster
+          ansible.builtin.command:
+            argv:
+              - ssh
+              - -i
+              - "{{ ssh_priv_key_file }}"
+              - -o
+              - StrictHostKeyChecking=no
+              - -o
+              - ConnectTimeout=10
+              - "root@{{ jump_host_ip }}"
+              - bash
+              - -lc
+              - |
+                set -e
+                export KUBECONFIG=/root/kubeconfig
+                test -f $KUBECONFIG || { echo "no kubeconfig on jump"; exit 0; }
+                oc get svc -A --field-selector spec.type=LoadBalancer -o json \
+                  | jq -r '.items[] | "\(.metadata.namespace) \(.metadata.name)"' \
+                  | while read ns name; do [ -n "$name" ] && oc delete svc -n "$ns" "$name" --wait=false || true; done
+                oc delete pvc --all -A --wait=false 2>/dev/null || true
+          failed_when: false
+          register: app_cleanup
+
+        - name: Wait 180 s for CCM / CSI to release Aliyun resources
+          ansible.builtin.pause:
+            seconds: 180
+
+    # ── Step 1: Delete Assisted cluster ────────────────────────────────────
+    - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+      when: cluster_id is defined and cluster_id | length > 0
+
+    - name: Delete Assisted cluster record
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
+        method: DELETE
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        status_code: [204, 404, 405]
+      when: cluster_id is defined and cluster_id | length > 0
+
+    # ── Step 2: Delete ROS stack ───────────────────────────────────────────
+    - name: Delete ROS stack
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - DeleteStack
+          - --StackId
+          - "{{ ros_stack_id }}"
+          - --RegionId
+          - "{{ region }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      when: ros_stack_id is defined and ros_stack_id | length > 0
+      failed_when: false
+
+    - name: Wait for stack to disappear
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - GetStack
+          - --StackId
+          - "{{ ros_stack_id }}"
+          - --RegionId
+          - "{{ region }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: stack_check
+      changed_when: false
+      failed_when: false
+      retries: 40
+      delay: 30
+      until: "stack_check.rc != 0 and ('StackNotFound' in stack_check.stderr or 'does not exist' in stack_check.stderr)"
+      when: ros_stack_id is defined and ros_stack_id | length > 0
+
+    # ── Step 3: Orphan scan ────────────────────────────────────────────────
+    - name: Scan for orphan resources
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - "{{ item.svc }}"
+          - "{{ item.action }}"
+          - --RegionId
+          - "{{ region }}"
+          - --Tag.1.Key
+          - "kubernetes.io/cluster/{{ cluster_name }}"
+          - --Tag.1.Value
+          - owned
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: orphan_scan
+      changed_when: false
+      failed_when: false
+      loop:
+        - { svc: ecs, action: DescribeInstances, label: ECS }
+        - { svc: ecs, action: DescribeDisks,     label: Disks }
+        - { svc: slb, action: DescribeLoadBalancers, label: SLBs }
+        - { svc: vpc, action: DescribeEipAddresses,  label: EIPs }
+      loop_control:
+        label: "{{ item.label }}"
+
+    - name: Show orphan summary
+      ansible.builtin.debug:
+        msg: |
+          {{ item.item.label }}: {{ item.stdout | regex_findall('"InstanceId"|"DiskId"|"LoadBalancerId"|"AllocationId"') | length }} found
+      loop: "{{ orphan_scan.results }}"
+      loop_control:
+        label: "{{ item.item.label }}"
+
+    # ── Step 4: Clear state ────────────────────────────────────────────────
+    - name: Remove state.yml
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../state.yml"
+        state: absent
+
+    - name: Teardown done
+      ansible.builtin.debug:
+        msg: "Check the Aliyun billing dashboard in 1h to confirm zero ongoing charges."

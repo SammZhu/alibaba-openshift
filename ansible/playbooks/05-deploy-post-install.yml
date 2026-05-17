@@ -1,0 +1,116 @@
+---
+# Phase 05 — deploy CAPI + CSI Operator + CSI driver CR onto the cluster.
+# Runs on the jump host (or anywhere with KUBECONFIG and network access to
+# the API SLB). Driven by the existing scripts/05-deploy-post-install.sh
+# wrapped for retry semantics.
+- name: Deploy post-install components
+  hosts: local
+  gather_facts: false
+  vars:
+    csi_operator_img: quay.io/samzhu/alibaba-cloud-csi-operator:v1.35.3
+    capi_provider_img: quay.io/samzhu/openshift-capi-alicloud:v0.1.0
+    kubeconfig_file: "{{ ansible_env.KUBECONFIG | default('/root/kubeconfig') }}"
+  tasks:
+    - name: Assert kubeconfig is present
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_file }}"
+      register: kc_stat
+      failed_when: not kc_stat.stat.exists
+
+    - name: Verify cluster reachable
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", get, nodes]
+      changed_when: false
+      register: oc_nodes
+      retries: 5
+      delay: 10
+      until: oc_nodes.rc == 0
+
+    # ── CAPI provider ──────────────────────────────────────────────────────
+    - name: Apply CAPI CRDs
+      ansible.builtin.command:
+        argv:
+          - oc
+          - --kubeconfig
+          - "{{ kubeconfig_file }}"
+          - apply
+          - -f
+          - "{{ playbook_dir }}/../../openshift-capi-alicloud/config/crd/bases/"
+      register: capi_crd
+      changed_when: "'unchanged' not in capi_crd.stdout"
+
+    - name: Render CAPI controller manifest with image override
+      ansible.builtin.shell: >
+        sed 's|image: quay.io/samzhu/openshift-capi-alicloud:.*|image: {{ capi_provider_img }}|'
+        '{{ playbook_dir }}/../../alibaba-openshift/custom_manifests/02-capa-controller.yaml'
+      register: capi_rendered
+      changed_when: false
+
+    - name: Apply CAPI controller
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+      args:
+        stdin: "{{ capi_rendered.stdout }}"
+      register: capi_apply
+      changed_when: "'unchanged' not in capi_apply.stdout"
+
+    # ── CSI operator ──────────────────────────────────────────────────────
+    - name: Set CSI operator image in kustomize
+      ansible.builtin.command:
+        argv:
+          - kustomize
+          - edit
+          - set
+          - image
+          - "controller={{ csi_operator_img }}"
+        chdir: "{{ playbook_dir }}/../../alibaba-cloud-csi-operator/config/manager"
+      changed_when: false
+
+    - name: Render CSI operator kustomize
+      ansible.builtin.command:
+        argv: [kustomize, build, "{{ playbook_dir }}/../../alibaba-cloud-csi-operator/config/default"]
+      register: csi_rendered
+      changed_when: false
+
+    - name: Apply CSI operator
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+      args:
+        stdin: "{{ csi_rendered.stdout }}"
+      register: csi_apply
+      changed_when: "'unchanged' not in csi_apply.stdout"
+
+    - name: Wait for AlibabaCloudCSIDriver CRD Established
+      ansible.builtin.command:
+        argv:
+          - oc
+          - --kubeconfig
+          - "{{ kubeconfig_file }}"
+          - wait
+          - --for=condition=Established
+          - --timeout=120s
+          - crd/alibabacloudcsidrivers.csi.alibabacloud.com
+      changed_when: false
+
+    - name: Apply CSI driver CR
+      ansible.builtin.command:
+        argv:
+          - oc
+          - --kubeconfig
+          - "{{ kubeconfig_file }}"
+          - apply
+          - -f
+          - "{{ playbook_dir }}/../../alibaba-openshift/custom_manifests/04-csi-driver-cr.yaml"
+      register: csi_cr
+      changed_when: "'unchanged' not in csi_cr.stdout"
+
+    - name: Phase 05 done
+      ansible.builtin.debug:
+        msg: |
+          ✓ CAPI provider, CSI operator, CSI driver CR all applied.
+
+          Verify:
+            oc get pods -n capa-system
+            oc get pods -n alibaba-cloud-csi-operator-system
+            oc get alibabacloudcsidriver cluster -o yaml
+            oc get storageclass | grep alicloud
