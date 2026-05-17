@@ -87,7 +87,14 @@
     - name: Capture new cluster ID
       ansible.builtin.set_fact:
         cluster_id: "{{ cluster_create.json.id }}"
-      when: cluster_create is changed
+      when: cluster_create is not skipped
+
+    - name: Assert cluster_id is defined
+      ansible.builtin.assert:
+        that: cluster_id is defined and cluster_id | length > 0
+        fail_msg: >-
+          cluster_id is not set. Cluster creation or adoption failed.
+          Check Assisted API response above.
 
     # ── Create infra-env (this is what generates the ISO) ──────────────────
     - name: Look up infra-env for the cluster
@@ -130,7 +137,7 @@
     - name: Capture new infra-env ID
       ansible.builtin.set_fact:
         infra_env_id: "{{ infra_create.json.id }}"
-      when: infra_create is changed
+      when: infra_create is not skipped
 
     # ── Wait for ISO URL ───────────────────────────────────────────────────
     - name: Poll for ISO download URL
