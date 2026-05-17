@@ -406,8 +406,30 @@ done
    | `InstallationMethod` | `Assisted` 或 `Agent-based`（与 Phase A 一致）|
    | `ImageId` | 上一步得到的 `m-bp1xxx...` |
    | `RendezvousIp` | `10.0.16.5`（仅 Agent-based 用）|
+   | **`EnableJumpHost`** | **`true`**（本地操作必填，详见 B.1.1）|
+   | **`SshPublicKey`** | **粘贴你 `~/.ssh/openshift_ed25519.pub` 内容** |
+   | `JumpHostInstanceType` | `ecs.t6-c1m1.large`（1C/1G burst，默认）|
 
 6. **Next** → **Confirm** → 勾选两个确认框 → **Create**
+
+### B.1.1 为什么必须开 EnableJumpHost
+
+集群的 API SLB 是 **VPC 内网 IP**，PrivateZone 解析也只在 VPC 内有效——
+你的本地 RHEL VM **既 ping 不到 API SLB，也解析不了 `api.cluster1.example.local`**。
+
+`EnableJumpHost=true` 会额外创建：
+
+- 1× `ecs.t6-c1m1.large`（1C/1G burst）+ 20 GB ESSD
+- 1× 公网 EIP（1 Mbps 按流量计费）
+- 自动开机脚本，预装：oc、kubectl、openshift-install、kustomize、aliyun CLI、jq、git
+- 自动 clone 三个工程仓库到 `/root/openshift-alibaba/`
+- 自动授权你的 SSH 公钥给 root
+
+**费用增量约 ¥2/天**。Compact 3-node 总日费 ≈ ¥80-100 + 跳板 ≈ ¥85/天。
+
+> **不开跳板能不能跑？** 能装集群（PrivateZone 内部解析自动），但你拿到
+> kubeconfig 后**没法本地用 oc 操作集群**，因为 API SLB 在 VPC 内网。
+> 仅看 Red Hat Console 显示"装完了"的话可以跳过这个选项。
 
 ### B.2 等栈完成（10-15 分钟）
 
@@ -558,16 +580,54 @@ openshift-install agent wait-for install-complete --dir .
 
 ## Phase D：应用 post-install 组件
 
-```sh
-# 设置 kubeconfig（指向上一步下载/生成的）
-export KUBECONFIG=~/openshift-install/$CLUSTER_NAME/auth/kubeconfig
+> 集群装完后你拿到了 `kubeconfig`（Assisted: Console 下载；Agent-based: `install-dir/auth/kubeconfig`）。
+> 因为本地 RHEL VM 看不到 VPC 内网，**所有 oc 操作都在跳板上跑**。
 
-# 验证集群可达
+### D.0 把 kubeconfig 拷到跳板
+
+```sh
+# 从 ROS Outputs 拿跳板 IP
+JUMP_IP=$(aliyun ros GetStack --StackId $STACK_ID \
+  --query "Outputs[?OutputKey=='JumpHostPublicIp'].OutputValue" --output text)
+echo "Jump host: $JUMP_IP"
+
+# 把本地 kubeconfig 拷到跳板
+scp -i ~/.ssh/openshift_ed25519 \
+  ~/Downloads/kubeconfig.cluster1 \
+  root@$JUMP_IP:/root/kubeconfig
+
+# SSH 进跳板
+ssh -i ~/.ssh/openshift_ed25519 root@$JUMP_IP
+```
+
+> 首次 SSH 跳板，确认 cloud-init 已跑完：
+> ```sh
+> # 在跳板上
+> tail /var/log/userdata.log
+> # 应见 "9. Marker file" 一行
+> ls /var/log/userdata.done
+> # 文件存在 → 工具齐全
+> which oc kubectl openshift-install kustomize aliyun
+> # 全部输出 /usr/local/bin/...
+> ```
+> 如果还没装完，等 1-2 分钟（开机后台跑的）。
+
+### D.1 在跳板上验证集群
+
+```sh
+# 跳板上
+export KUBECONFIG=/root/kubeconfig
 oc get nodes
 # 期望：3 个 master 节点，状态 Ready
+```
+
+### D.2 在跳板上跑部署脚本
+
+```sh
+# 跳板上（仓库已自动 clone）
+cd /root/openshift-alibaba/alibaba-openshift
 
 # 一键部署 CAPI Provider + CSI Operator + CSI Driver CR
-cd ~/openshift-alibaba/alibaba-openshift
 ./scripts/deploy-post-install.sh
 
 # 输出应包含：
@@ -576,8 +636,6 @@ cd ~/openshift-alibaba/alibaba-openshift
 # [✓] CSI operator deployed
 # [✓] CSI driver CR applied
 ```
-
-> **如果脚本报错"oc not found"**：装 oc → `brew install openshift-cli`
 
 > **如果报"AlibabaCloudCSIDriver CRD never became Established"**：
 > 等 30 秒再跑一次，OLM 异步建 CRD 有延迟。

@@ -117,12 +117,38 @@ Parameters:
     Default: openshift-node-role
     Description: RAM Role name to bind to all ECS nodes (Instance Principal for CCM/CAPA)
 
+  # ── Testing-only: SSH jump host into the VPC ─────────────────────────────────
+  # The cluster's API SLB is intranet-only and PrivateZone records resolve only
+  # inside the VPC. Set EnableJumpHost=true to provision a tiny ECS with a
+  # public EIP + pre-installed oc/kubectl/openshift-install/aliyun CLI so an
+  # operator working from a local workstation can SSH in and run oc commands.
+  # Cost: ~¥2/day (1C/1G burst instance + 1 Mbps EIP, pay-by-traffic).
+  # Production deployments should leave this off and use a proper VPN gateway.
+  EnableJumpHost:
+    Type: Boolean
+    Default: false
+    Description: Provision a public SSH jump host with pre-installed cluster tools (testing only)
+
+  JumpHostInstanceType:
+    Type: String
+    Default: ecs.t6-c1m1.large
+    Description: ECS type for the jump host. Burst-class (t6) is cheapest for occasional SSH use.
+
+  SshPublicKey:
+    Type: String
+    Default: ""
+    Description: |
+      SSH public key authorised on the jump host (paste full content of ~/.ssh/id_*.pub).
+      Required only when EnableJumpHost=true. RHCOS nodes get SSH keys via ignition,
+      not from this parameter.
+
 Conditions:
   IsAgentBased: !Equals [!Ref InstallationMethod, Agent-based]
   IsAssisted:   !Equals [!Ref InstallationMethod, Assisted]
   # Skip the worker InstanceGroup entirely when ComputeCount=0 — required by
   # ROS because ALIYUN::ECS::InstanceGroup rejects MinAmount/MaxAmount=0.
   HasWorkers:   !Not [!Equals [!Ref ComputeCount, 0]]
+  HasJumpHost:  !Equals [!Ref EnableJumpHost, true]
 
 Resources:
   # ── Networking ───────────────────────────────────────────────────────────────
@@ -586,7 +612,150 @@ Resources:
         - Key: openshift-node-role
           Value: worker
 
+  # ── Optional SSH jump host (testing only) ────────────────────────────────────
+  # Looks up the latest Alibaba Linux 3 image dynamically so the template stays
+  # portable across regions and image refreshes.
+  JumpHostImageLookup:
+    Type: DATASOURCE::ECS::Images
+    Condition: HasJumpHost
+    Properties:
+      OwnerAlias: system
+      OSType: linux
+      Architecture: x86_64
+      ImageName: aliyun_3_x64_20G_alibase_*
+      Status: Available
+
+  JumpHostSecurityGroup:
+    Type: ALIYUN::ECS::SecurityGroup
+    Condition: HasJumpHost
+    Properties:
+      VpcId: !Ref Vpc
+      SecurityGroupName: !Sub '${ClusterName}-jumphost-sg'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          PortRange: 22/22
+          SourceCidrIp: 0.0.0.0/0
+          Description: SSH from anywhere (testing)
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+
+  JumpHostInstance:
+    Type: ALIYUN::ECS::Instance
+    Condition: HasJumpHost
+    DependsOn:
+      - NatSNATEntry
+    Properties:
+      InstanceName: !Sub '${ClusterName}-jumphost'
+      InstanceType: !Ref JumpHostInstanceType
+      ImageId: !Select [0, !GetAtt JumpHostImageLookup.ImageIds]
+      SecurityGroupId: !Ref JumpHostSecurityGroup
+      VSwitchId: !Ref PublicVSwitch
+      SystemDiskCategory: cloud_essd
+      SystemDiskSize: 20
+      # Password disabled — SSH key auth only via UserData below.
+      Password: ''
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #!/bin/bash
+            set -euxo pipefail
+            exec > /var/log/userdata.log 2>&1
+
+            # 1. Authorise operator SSH key for root
+            mkdir -p /root/.ssh && chmod 700 /root/.ssh
+            echo "${SshPublicKey}" >> /root/.ssh/authorized_keys
+            chmod 600 /root/.ssh/authorized_keys
+
+            # 2. OS packages
+            yum install -y --setopt=tsflags=nodocs git tar gzip jq curl bash-completion
+
+            # 3. OpenShift CLI (RHEL 8 compat — works on Alibaba Linux 3)
+            cd /tmp
+            curl -sL -O https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest-4.20/openshift-client-linux-amd64-rhel8.tar.gz
+            tar -xzf openshift-client-linux-amd64-rhel8.tar.gz
+            install -m 0755 oc kubectl /usr/local/bin/
+            rm -f openshift-client-linux-amd64-rhel8.tar.gz oc kubectl README.md
+
+            # 4. openshift-install (generic linux)
+            curl -sL -O https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest-4.20/openshift-install-linux.tar.gz
+            tar -xzf openshift-install-linux.tar.gz
+            install -m 0755 openshift-install /usr/local/bin/
+            rm -f openshift-install-linux.tar.gz openshift-install README.md
+
+            # 5. kustomize
+            curl -sL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.5.0/kustomize_v5.5.0_linux_amd64.tar.gz" \
+              | tar -xz -C /usr/local/bin/
+            chmod 0755 /usr/local/bin/kustomize
+
+            # 6. aliyun CLI
+            curl -sL -o /tmp/aliyun-cli.tgz https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz
+            tar -xzf /tmp/aliyun-cli.tgz -C /usr/local/bin/
+            rm /tmp/aliyun-cli.tgz
+
+            # 7. Clone project repos
+            mkdir -p /root/openshift-alibaba && cd /root/openshift-alibaba
+            git clone https://github.com/SammZhu/alibaba-openshift.git || true
+            git clone https://github.com/SammZhu/alibaba-cloud-csi-operator.git || true
+            git clone https://github.com/SammZhu/openshift-capi-alicloud.git || true
+
+            # 8. Welcome message
+            cat > /etc/motd <<MOTD
+
+            ──────────────────────────────────────────────────────────
+            OpenShift on Alibaba Cloud — Jump Host
+            Cluster: ${ClusterName}.${BaseDomain}
+            API SLB: api.${ClusterName}.${BaseDomain}:6443 (PrivateZone)
+
+            Tools installed:
+              oc / kubectl / openshift-install / kustomize / aliyun
+            Project repos: /root/openshift-alibaba/
+
+            Typical workflow:
+              1. scp kubeconfig core@<this-host>:/root/kubeconfig
+              2. export KUBECONFIG=/root/kubeconfig
+              3. oc get nodes
+              4. cd /root/openshift-alibaba/alibaba-openshift
+              5. ./scripts/deploy-post-install.sh
+            ──────────────────────────────────────────────────────────
+            MOTD
+
+            # 9. Marker file so 'cloud-init status' shows readiness
+            touch /var/log/userdata.done
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+        - Key: role
+          Value: jumphost
+
+  JumpHostEip:
+    Type: ALIYUN::VPC::EIP
+    Condition: HasJumpHost
+    Properties:
+      Bandwidth: 1                        # 1 Mbps — sufficient for SSH
+      InternetChargeType: PayByTraffic    # Cheapest for low-traffic SSH usage
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+
+  JumpHostEipAssociation:
+    Type: ALIYUN::VPC::EIPAssociation
+    Condition: HasJumpHost
+    Properties:
+      AllocationId: !Ref JumpHostEip
+      InstanceId: !Ref JumpHostInstance
+
 Outputs:
+  JumpHostPublicIp:
+    Condition: HasJumpHost
+    Value: !GetAtt JumpHostEip.EipAddress
+    Description: Jump host public EIP — SSH target for operator access
+
+  JumpHostSshCommand:
+    Condition: HasJumpHost
+    Value: !Sub 'ssh root@${JumpHostEip.EipAddress}'
+    Description: Ready-to-run SSH command (uses the key passed in SshPublicKey)
+
   VpcId:
     Value: !Ref Vpc
     Description: VPC ID — needed for CCM cloud.conf and CAPA AlibabaCloudCluster
