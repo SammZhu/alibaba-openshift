@@ -57,7 +57,7 @@ if [ -z "${ECS_IMAGE_ID:-}" ]; then
     --RegionId "$REGION" \
     --ImageName "openshift-${CLUSTER_NAME}-iso" \
     --OSType Linux \
-    --Platform "Others Linux" \
+    --Platform CoreOS \
     --Architecture x86_64 \
     --DiskDeviceMapping.1.Format ISO \
     --DiskDeviceMapping.1.OSSBucket "$OSS_BUCKET" \

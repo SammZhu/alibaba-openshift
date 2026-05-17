@@ -199,7 +199,7 @@
           - --OSType
           - Linux
           - --Platform
-          - Others Linux
+          - CoreOS
           - --Architecture
           - x86_64
           - --DiskDeviceMapping.1.Format
