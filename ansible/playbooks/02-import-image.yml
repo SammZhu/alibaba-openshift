@@ -158,8 +158,10 @@
         seconds: 30
       when: role_check.rc != 0
 
-    # ── ImportImage (idempotent: skip when ECS_IMAGE_ID present + Available) ─
-    - name: Check existing image status
+    # ── ImportImage (idempotent by image name) ────────────────────────────
+    # Always look up by name first — state may have been lost on a previous
+    # failed run but the image could already exist (InvalidImageName.Duplicated).
+    - name: Look up existing image by name
       ansible.builtin.command:
         argv:
           - aliyun
@@ -167,14 +169,22 @@
           - DescribeImages
           - --RegionId
           - "{{ region }}"
-          - --ImageId
-          - "{{ ecs_image_id | default('PLACEHOLDER') }}"
+          - --ImageName
+          - "openshift-{{ cluster_name }}-iso"
+          - --ImageOwnerAlias
+          - self
           - --profile
           - "{{ aliyun_profile }}"
-      register: image_describe
+      register: image_lookup
       changed_when: false
       failed_when: false
-      when: ecs_image_id is defined and ecs_image_id | length > 0
+
+    - name: Adopt existing image if found
+      ansible.builtin.set_fact:
+        ecs_image_id: "{{ (image_lookup.stdout | from_json).Images.Image[0].ImageId }}"
+      when:
+        - image_lookup.rc == 0
+        - (image_lookup.stdout | from_json).Images.Image | length > 0
 
     - name: Submit ImportImage when needed
       ansible.builtin.command:
@@ -201,9 +211,7 @@
           - --profile
           - "{{ aliyun_profile }}"
       register: import_result
-      when: |
-        ecs_image_id is not defined or ecs_image_id | length == 0 or
-        (image_describe is defined and image_describe.rc != 0)
+      when: ecs_image_id is not defined or ecs_image_id | length == 0
 
     - name: Capture new ECS image ID
       ansible.builtin.set_fact:
