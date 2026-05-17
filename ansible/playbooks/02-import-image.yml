@@ -202,7 +202,7 @@
     - name: Capture new ECS image ID
       ansible.builtin.set_fact:
         ecs_image_id: "{{ (import_result.stdout | from_json).ImageId }}"
-      when: import_result is changed
+      when: import_result is not skipped
 
     # ── Wait for Available ────────────────────────────────────────────────
     - name: Poll image status until Available (~15-30 min)

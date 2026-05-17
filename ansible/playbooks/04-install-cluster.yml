@@ -63,8 +63,8 @@
         headers:
           Authorization: "Bearer {{ ai_access_token }}"
           Content-Type: application/json
-        body_format: json
-        body: { host_role: "{{ item.role }}" }
+        body: "{{ {'host_role': item.role} | to_json }}"
+        body_format: raw
         status_code: [200, 201]
       loop: "{{ host_role_map }}"
       loop_control: { label: "{{ item.id }} -> {{ item.role }}" }
@@ -84,11 +84,9 @@
         headers:
           Authorization: "Bearer {{ ai_access_token }}"
           Content-Type: application/json
-        body_format: json
-        body:
-          folder: "{{ item.item.folder }}"
-          file_name: "{{ item.item.name }}"
-          content: "{{ item.content }}"
+        # Use to_json to prevent jinja2_native from misinterpreting content field
+        body: "{{ {'folder': item.item.folder, 'file_name': item.item.name, 'content': item.content} | to_json }}"
+        body_format: raw
         status_code: [201, 409]      # 409 = already exists, idempotent
       loop: "{{ manifest_slurps.results }}"
       loop_control: { label: "{{ item.item.folder }}/{{ item.item.name }}" }

@@ -58,12 +58,12 @@
           - {ParameterKey: PrivateSubnetCidr,        ParameterValue: "{{ private_subnet_cidr }}"}
           - {ParameterKey: PrivateSubnetCidr2,       ParameterValue: "{{ private_subnet_cidr2 }}"}
           - {ParameterKey: PublicSubnetCidr,         ParameterValue: "{{ public_subnet_cidr }}"}
-          - {ParameterKey: ControlPlaneCount,        ParameterValue: "{{ control_plane_count }}"}
+          - {ParameterKey: ControlPlaneCount,        ParameterValue: "{{ control_plane_count | string }}"}
           - {ParameterKey: ControlPlaneInstanceType, ParameterValue: "{{ control_plane_type }}"}
-          - {ParameterKey: ComputeCount,             ParameterValue: "{{ compute_count }}"}
+          - {ParameterKey: ComputeCount,             ParameterValue: "{{ compute_count | string }}"}
           - {ParameterKey: ComputeInstanceType,      ParameterValue: "{{ compute_type }}"}
           - {ParameterKey: SystemDiskCategory,       ParameterValue: "{{ system_disk_category }}"}
-          - {ParameterKey: SystemDiskSize,           ParameterValue: "{{ system_disk_size }}"}
+          - {ParameterKey: SystemDiskSize,           ParameterValue: "{{ system_disk_size | string }}"}
           - {ParameterKey: InstallationMethod,       ParameterValue: "{{ installation_method }}"}
           - {ParameterKey: ImageId,                  ParameterValue: "{{ ecs_image_id }}"}
           - {ParameterKey: RendezvousIp,             ParameterValue: "{{ rendezvous_ip }}"}
@@ -97,7 +97,7 @@
     - name: Capture new stack ID
       ansible.builtin.set_fact:
         ros_stack_id: "{{ (create_result.stdout | from_json).StackId }}"
-      when: create_result is changed
+      when: create_result is not skipped
 
     - name: Persist stack ID before waiting (so a kill mid-wait doesn't lose it)
       ansible.builtin.include_tasks: ../tasks/save_state.yml
