@@ -92,7 +92,6 @@
           - "--access-key-secret={{ _oss_sk }}"
           - -f
       register: upload_result
-      no_log: true
       when: |
         oss_stat.rc != 0 or
         ((oss_stat.stdout | regex_search('Content-Length\s*:\s*(\d+)', '\1') | first | default('0') | int)
