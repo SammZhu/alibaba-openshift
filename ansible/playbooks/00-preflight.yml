@@ -52,7 +52,7 @@
       changed_when: false
       failed_when: ali_check.rc != 0
 
-    - name: Verify aliyun-cli has VPC, SLB, RAM, ROS, PVTZ, OSS access
+    - name: Verify aliyun-cli has VPC, SLB, RAM, ROS, PVTZ access
       ansible.builtin.command:
         argv: "{{ item }}"
       register: svc_check
@@ -64,9 +64,40 @@
         - [aliyun, ram, ListRoles,       --profile, "{{ aliyun_profile }}"]
         - [aliyun, ros, DescribeRegions, --profile, "{{ aliyun_profile }}"]
         - [aliyun, pvtz, DescribeZones,  --profile, "{{ aliyun_profile }}"]
-        - [aliyun, oss, ls,              --region, "{{ region }}", --profile, "{{ aliyun_profile }}"]
       loop_control:
         label: "{{ item[1] }} {{ item[2] }}"
+
+    # OSS uses ossutil under the hood, which does NOT support --profile.
+    # Read AK/SK directly from ~/.aliyun/config.json for the named profile.
+    - name: Read AK/SK from aliyun config for OSS check
+      ansible.builtin.shell: |
+        jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret' \
+          ~/.aliyun/config.json
+      register: _oss_creds
+      changed_when: false
+      check_mode: false
+
+    - name: Assert aliyun profile credentials found
+      ansible.builtin.assert:
+        that: _oss_creds.stdout | length > 0
+        fail_msg: "Could not read AK/SK for profile '{{ aliyun_profile }}' from ~/.aliyun/config.json"
+
+    - name: Verify OSS access (ossutil does not support --profile; pass -i/-k/-e directly)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - oss
+          - ls
+          - -e
+          - "oss-{{ region }}.aliyuncs.com"
+          - -i
+          - "{{ _oss_creds.stdout.split(' ')[0] }}"
+          - -k
+          - "{{ _oss_creds.stdout.split(' ')[1] }}"
+      register: oss_check
+      changed_when: false
+      failed_when: oss_check.rc != 0
+      no_log: true  # Don't print credentials to Ansible output
 
     - name: Ensure output directory exists
       ansible.builtin.file:

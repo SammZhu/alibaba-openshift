@@ -5,6 +5,9 @@
   gather_facts: false
   vars:
     oss_object: "discovery-{{ cluster_name }}.iso"
+    # ossutil (used by `aliyun oss`) does NOT support --profile.
+    # We read AK/SK from ~/.aliyun/config.json and pass via -i/-k/-e flags.
+    _oss_endpoint: "oss-{{ region }}.aliyuncs.com"
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
 
@@ -14,6 +17,22 @@
       register: iso_stat
       failed_when: not iso_stat.stat.exists
 
+    # ── Read OSS credentials from aliyun profile ──────────────────────────
+    # ossutil does not understand --profile; extract AK/SK from config.json.
+    - name: Read AK/SK from aliyun profile for OSS commands
+      ansible.builtin.shell: |
+        jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret' \
+          ~/.aliyun/config.json
+      register: _oss_creds_raw
+      changed_when: false
+      no_log: true
+
+    - name: Set OSS credential facts
+      ansible.builtin.set_fact:
+        _oss_ak: "{{ _oss_creds_raw.stdout.split(' ')[0] }}"
+        _oss_sk: "{{ _oss_creds_raw.stdout.split(' ')[1] }}"
+      no_log: true
+
     # ── Ensure OSS bucket exists in the right region ──────────────────────
     - name: Check OSS bucket
       ansible.builtin.command:
@@ -22,13 +41,16 @@
           - oss
           - ls
           - "oss://{{ oss_bucket }}/"
-          - --region
-          - "{{ region }}"
-          - --profile
-          - "{{ aliyun_profile }}"
+          - -e
+          - "{{ _oss_endpoint }}"
+          - -i
+          - "{{ _oss_ak }}"
+          - -k
+          - "{{ _oss_sk }}"
       register: bucket_check
       changed_when: false
       failed_when: false
+      no_log: true
 
     - name: Create OSS bucket if missing
       ansible.builtin.command:
@@ -37,11 +59,14 @@
           - oss
           - mb
           - "oss://{{ oss_bucket }}"
-          - --region
-          - "{{ region }}"
-          - --profile
-          - "{{ aliyun_profile }}"
+          - -e
+          - "{{ _oss_endpoint }}"
+          - -i
+          - "{{ _oss_ak }}"
+          - -k
+          - "{{ _oss_sk }}"
       when: bucket_check.rc != 0
+      no_log: true
 
     # ── Upload ISO (idempotent by size) ───────────────────────────────────
     - name: Check current object size in OSS
@@ -51,13 +76,16 @@
           - oss
           - stat
           - "oss://{{ oss_bucket }}/{{ oss_object }}"
-          - --region
-          - "{{ region }}"
-          - --profile
-          - "{{ aliyun_profile }}"
+          - -e
+          - "{{ _oss_endpoint }}"
+          - -i
+          - "{{ _oss_ak }}"
+          - -k
+          - "{{ _oss_sk }}"
       register: oss_stat
       changed_when: false
       failed_when: false
+      no_log: true
 
     - name: Upload ISO to OSS (skipped when size matches)
       ansible.builtin.command:
@@ -67,15 +95,18 @@
           - cp
           - "{{ iso_path }}"
           - "oss://{{ oss_bucket }}/{{ oss_object }}"
-          - --region
-          - "{{ region }}"
-          - --profile
-          - "{{ aliyun_profile }}"
+          - -e
+          - "{{ _oss_endpoint }}"
+          - -i
+          - "{{ _oss_ak }}"
+          - -k
+          - "{{ _oss_sk }}"
           - -f
       register: upload_result
+      no_log: true
       when: |
         oss_stat.rc != 0 or
-        ((oss_stat.stdout | regex_search('Content-Length\\s*:\\s*(\\d+)', '\\1') | first | default('0') | int)
+        ((oss_stat.stdout | regex_search('Content-Length\s*:\s*(\d+)', '\1') | first | default('0') | int)
           != iso_stat.stat.size)
 
     # ── Ensure RAM role for ECS→OSS import (first-time setup) ─────────────
