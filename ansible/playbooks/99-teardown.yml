@@ -114,6 +114,24 @@
       until: "stack_check.rc != 0 and ('StackNotFound' in stack_check.stderr or 'does not exist' in stack_check.stderr)"
       when: ros_stack_id is defined and ros_stack_id | length > 0
 
+    # ── Step 2b: Delete ECS custom image ──────────────────────────────────
+    - name: Delete ECS custom image
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DeleteImage
+          - --RegionId
+          - "{{ region }}"
+          - --ImageId
+          - "{{ ecs_image_id }}"
+          - --Force
+          - "true"
+          - --profile
+          - "{{ aliyun_profile }}"
+      when: ecs_image_id is defined and ecs_image_id | length > 0
+      failed_when: false
+
     # ── Step 3: Orphan scan ────────────────────────────────────────────────
     - name: Scan for orphan resources
       ansible.builtin.command:

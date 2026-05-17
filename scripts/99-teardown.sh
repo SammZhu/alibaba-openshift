@@ -110,6 +110,13 @@ if [ -n "${ROS_STACK_ID:-}" ]; then
   done
 fi
 
+# ── 2b. Delete ECS custom image ──────────────────────────────────────────────
+if [ -n "${ECS_IMAGE_ID:-}" ]; then
+  log "Deleting ECS custom image $ECS_IMAGE_ID..."
+  aliyun ecs DeleteImage --RegionId "$REGION" --ImageId "$ECS_IMAGE_ID" --Force true >/dev/null 2>&1 \
+    && ok "Image deleted" || warn "Image delete failed (may already be gone)"
+fi
+
 # ── 3. Orphan check ──────────────────────────────────────────────────────────
 log "Scanning for orphan resources tagged with this cluster..."
 TAG_KEY="kubernetes.io/cluster/${CLUSTER_NAME}"
