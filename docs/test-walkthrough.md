@@ -6,6 +6,17 @@
 - **路径 A — Assisted Installer**：通过 Red Hat 网页 UI 安装（推荐第一次）
 - **路径 B — Agent-based Installer**：本地命令行安装（自动化友好）
 
+> **🤖 想直接全自动跑？** 用 [`scripts/`](../scripts/README.md)：
+> ```sh
+> cp scripts/config.sh.example scripts/config.sh && vi scripts/config.sh
+> ./scripts/all.sh   # 跑完 01-04，约 90 分钟
+> ```
+> 本文档详细解释每一步**为什么**和**手动该怎么点**，仅在出错排查或想理解机制时阅读。
+> 6 个脚本各自对应这里的一个 Phase：
+> `01-prepare-iso.sh` (A.1-3) / `02-import-image.sh` (A.2-4) /
+> `03-create-stack.sh` (B) / `04-install-cluster.sh` (C) /
+> `05-deploy-post-install.sh` (D，跳板上跑) / `99-teardown.sh` (G)
+
 ---
 
 ## 目录
@@ -400,7 +411,6 @@ done
    | `ComputeCount` | **`0`** ← compact |
    | `ControlPlaneInstanceType` | `ecs.g7.xlarge` ← 4C/16G |
    | `ComputeInstanceType` | `ecs.g7.xlarge`（不会用到，留默认）|
-   | `BootstrapInstanceType` | `ecs.g7.xlarge` |
    | `SystemDiskCategory` | `cloud_essd` |
    | `SystemDiskSize` | `120` |
    | `InstallationMethod` | `Assisted` 或 `Agent-based`（与 Phase A 一致）|

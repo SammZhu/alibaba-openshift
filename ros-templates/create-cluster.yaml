@@ -75,9 +75,8 @@ Parameters:
     Type: String
     Default: ecs.c6.xlarge
 
-  BootstrapInstanceType:
-    Type: String
-    Default: ecs.c6.xlarge
+  # Removed: BootstrapInstanceType — Assisted/Agent-based dynamically elect
+  # bootstrap from the 3 control plane nodes; no separate bootstrap ECS needed.
 
   SystemDiskCategory:
     Type: String
@@ -480,26 +479,11 @@ Resources:
   # attached before the nodes try to call Alibaba Cloud APIs via instance principal.
 
   # Assisted only: separate bootstrap node. Agent-based uses rendezvous master instead.
-  BootstrapInstance:
-    Type: ALIYUN::ECS::Instance
-    Condition: IsAssisted
-    DependsOn:
-      - NatSNATEntry
-      - RolePolicyAttachment
-    Properties:
-      InstanceName: !Sub '${ClusterName}-bootstrap'
-      InstanceType: !Ref BootstrapInstanceType
-      ImageId: !Ref ImageId
-      SecurityGroupId: !Ref ControlPlaneSecurityGroup
-      VSwitchId: !Ref PrivateVSwitch
-      SystemDiskCategory: !Ref SystemDiskCategory
-      SystemDiskSize: !Ref SystemDiskSize
-      RamRoleName: !Ref NodeRamRole
-      Tags:
-        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
-          Value: owned
-        - Key: openshift-node-role
-          Value: bootstrap
+  # NOTE: No separate bootstrap ECS. Modern Assisted Installer (and Agent-based
+  # since 4.12) elects one of the 3 control-plane nodes as a temporary bootstrap
+  # at install time; after install completes, that node becomes a regular master.
+  # Provisioning a 4th dedicated bootstrap ECS wastes ~¥0.8/h and is vestigial
+  # from the UPI workflow.
 
   # First control plane node. In Agent-based mode gets a fixed private IP so
   # rendezvousIP in agent-config.yaml is known before ISO generation.

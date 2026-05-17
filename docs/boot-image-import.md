@@ -226,7 +226,6 @@ aliyun ros CreateStack \
 
 | 用途 | 引用位置 |
 |---|---|
-| Bootstrap 节点引导 | ROS 栈 `BootstrapInstance` |
 | Master 节点引导 | ROS 栈 `MasterInstance1/2/3` |
 | Worker 节点引导（初始）| ROS 栈 `WorkerInstance` |
 | **CAPI MachineDeployment 扩容 Worker** | `AlibabaCloudMachineTemplate.spec.imageID` |

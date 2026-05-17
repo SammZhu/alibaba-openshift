@@ -1,0 +1,45 @@
+# Test cluster configuration — copy to config.sh and edit.
+# config.sh is gitignored (per scripts/.gitignore).
+
+# ── Cluster identity ─────────────────────────────────────────────────────────
+CLUSTER_NAME=cluster1                  # OpenShift cluster name (lowercase, hyphens)
+BASE_DOMAIN=example.local              # Cluster DNS suffix (no public registration needed)
+OPENSHIFT_VERSION=4.20                 # e.g. 4.20 (latest 4.20.z) or 4.20.22
+
+# ── Alibaba Cloud ────────────────────────────────────────────────────────────
+REGION=cn-wulanchabu                   # Cheapest region in mainland China
+ZONE=cn-wulanchabu-a                   # Primary VSwitch zone
+ZONE2=cn-wulanchabu-b                  # Secondary VSwitch zone (for redundancy)
+OSS_BUCKET=openshift-iso-samzhu-test   # Must be globally unique; create-on-first-run
+ALIBABA_CLOUD_PROFILE=openshift-test   # aliyun-cli profile (run `aliyun configure --profile ...`)
+
+# ── Compute sizing (compact 3-node, no separate workers) ─────────────────────
+CONTROL_PLANE_COUNT=3
+CONTROL_PLANE_INSTANCE_TYPE=ecs.g7.xlarge
+COMPUTE_COUNT=0                         # 0 = master nodes are schedulable (compact)
+COMPUTE_INSTANCE_TYPE=ecs.g7.xlarge
+SYSTEM_DISK_CATEGORY=cloud_essd
+SYSTEM_DISK_SIZE=120                    # GiB; ≥120 for OpenShift workers
+
+# ── Network ──────────────────────────────────────────────────────────────────
+VPC_CIDR=10.0.0.0/16
+PRIVATE_SUBNET_CIDR=10.0.16.0/20
+PRIVATE_SUBNET_CIDR_2=10.0.32.0/20
+PUBLIC_SUBNET_CIDR=10.0.0.0/20
+RENDEZVOUS_IP=10.0.16.5                 # Agent-based only; harmless for Assisted
+
+# ── Jump host (SSH into VPC from local) ──────────────────────────────────────
+ENABLE_JUMP_HOST=true                   # false = no remote SSH path into the VPC
+JUMP_HOST_INSTANCE_TYPE=ecs.t6-c1m1.large   # 1C/1G burst, cheapest
+
+# ── Files ────────────────────────────────────────────────────────────────────
+PULL_SECRET_FILE=$HOME/.openshift/pull-secret.json
+SSH_PUBLIC_KEY_FILE=$HOME/.ssh/openshift_ed25519.pub
+SSH_PRIVATE_KEY_FILE=$HOME/.ssh/openshift_ed25519
+OFFLINE_TOKEN_FILE=$HOME/.openshift/offline-token
+
+# ── Installation method ──────────────────────────────────────────────────────
+INSTALLATION_METHOD=Assisted            # Assisted | Agent-based (automation only covers Assisted today)
+
+# ── Where to write outputs ───────────────────────────────────────────────────
+OUTPUT_DIR=$HOME/openshift-install/cluster1

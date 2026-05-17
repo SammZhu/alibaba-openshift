@@ -1,0 +1,5 @@
+# Operator-specific configuration (contains paths/usernames)
+config.sh
+
+# Pipeline state — IDs, IPs, etc. from prior script runs
+.state

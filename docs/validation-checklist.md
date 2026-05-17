@@ -28,7 +28,7 @@
 | 1.8 | SLB 后端服务器已注册（3 台 master） | SLB → 后端服务器 | 3 台 ECS，权重 100 |
 | 1.9 | PrivateZone 已创建并绑定 VPC | PrivateZone 控制台 | Zone 名称 `<cluster>.<domain>`，已绑定 VPC |
 | 1.10 | DNS 记录正确 | PrivateZone → 解析记录 | `api` 和 `api-int` 各一条 A 记录，指向 SLB IP |
-| 1.11 | ECS 节点数量正确 | ECS 控制台 | 1 bootstrap（Assisted）+ 3 master + N worker |
+| 1.11 | ECS 节点数量正确 | ECS 控制台 | 3 master + N worker（bootstrap 由 master 动态承担，不单独建 ECS）|
 | 1.12 | master-1 IP 符合预期（Agent-based） | ECS 实例详情 | 私有 IP = `RendezvousIp` 参数值 |
 | 1.13 | 所有 ECS 节点已绑定 RAM Role | ECS 实例详情 → 实例 RAM 角色 | RAM Role 名称正确 |
 | 1.14 | Outputs 包含所有预期输出 | ROS 栈 → 输出 | `InstallConfig` / `AgentConfig` / `DynamicCustomManifest` / `ApiSLBIp` / `VpcId` / `VSwitchId` |
