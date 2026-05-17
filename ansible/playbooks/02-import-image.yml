@@ -251,6 +251,24 @@
         new_state:
           ecs_image_id: "{{ ecs_image_id }}"
 
+    # ── Clean up OSS (ISO is no longer needed after image import) ──────────
+    # Local copy at iso_path is retained; OSS object only existed to feed ImportImage.
+    - name: Delete ISO from OSS (image imported; local copy retained)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - oss
+          - rm
+          - "oss://{{ oss_bucket }}/{{ oss_object }}"
+          - "--endpoint={{ _oss_endpoint }}"
+          - "--access-key-id={{ _oss_ak }}"
+          - "--access-key-secret={{ _oss_sk }}"
+          - -f
+      register: oss_rm
+      changed_when: oss_rm.rc == 0
+      failed_when: false   # non-fatal: object may already be gone
+      no_log: true
+
     - name: Phase 02 done
       ansible.builtin.debug:
-        msg: "ECS image {{ ecs_image_id }} ready — next: 03-create-stack.yml"
+        msg: "ECS image {{ ecs_image_id }} ready — OSS ISO deleted — next: 03-create-stack.yml"
