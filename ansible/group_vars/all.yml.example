@@ -28,8 +28,13 @@ private_subnet_cidr2: 10.0.32.0/20
 public_subnet_cidr:   10.0.0.0/20
 rendezvous_ip:        10.0.16.5
 
+# ── NAT EIP (pre-create manually if EIP API not supported for RAM sub-users) ──
+# Go to VPC console → Elastic IP Addresses → Allocate EIP, then fill in:
+nat_eip_allocation_id: eip-bp1xxxxxxxxxxxxxxxxx   # e.g. eip-bp1abc123
+nat_eip_address:       1.2.3.4                     # public IP shown in console
+
 # ── Jump host (SSH into VPC) ─────────────────────────────────────────────────
-enable_jump_host:     true
+enable_jump_host:     false
 jump_host_type:       ecs.t6-c1m1.large
 
 # ── Files (resolved at runtime) ──────────────────────────────────────────────
