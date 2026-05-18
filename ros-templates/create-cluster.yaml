@@ -477,11 +477,8 @@ Resources:
       BackendServerPort: 6443
       Protocol: tcp
       Bandwidth: -1
-      HealthCheck:
-        HealthCheckType: tcp
-        HealthCheckConnectPort: 6443
-        HealthyThreshold: 3
-        UnhealthyThreshold: 3
+      # HealthCheck sub-properties are not supported by ROS ALIYUN::SLB::Listener;
+      # SLB uses default TCP health check on the backend port automatically.
 
   McsListener:
     Type: ALIYUN::SLB::Listener
@@ -491,11 +488,7 @@ Resources:
       BackendServerPort: 22623
       Protocol: tcp
       Bandwidth: -1
-      HealthCheck:
-        HealthCheckType: tcp
-        HealthCheckConnectPort: 22623
-        HealthyThreshold: 3
-        UnhealthyThreshold: 3
+      # HealthCheck sub-properties are not supported by ROS ALIYUN::SLB::Listener.
 
   # ── Private DNS ──────────────────────────────────────────────────────────────
 
