@@ -304,6 +304,7 @@
           - {ParameterKey: InstallationMethod,       ParameterValue: "{{ installation_method }}"}
           - {ParameterKey: ImageId,                  ParameterValue: "{{ ecs_image_id }}"}
           - {ParameterKey: RendezvousIp,             ParameterValue: "{{ rendezvous_ip }}"}
+          - {ParameterKey: IngressVip,              ParameterValue: "{{ ingress_vip | default('10.0.16.6') }}"}
           - {ParameterKey: EnableJumpHost,           ParameterValue: "{{ enable_jump_host | string | lower }}"}
           - {ParameterKey: JumpHostInstanceType,     ParameterValue: "{{ jump_host_type }}"}
           - {ParameterKey: SshPublicKey,             ParameterValue: "{{ ssh_pub_slurp.content | b64decode | trim }}"}

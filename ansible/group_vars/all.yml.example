@@ -27,6 +27,7 @@ private_subnet_cidr:  10.0.16.0/20
 private_subnet_cidr2: 10.0.32.0/20
 public_subnet_cidr:   10.0.0.0/20
 rendezvous_ip:        10.0.16.5
+ingress_vip:          10.0.16.6
 
 # ── Jump host (SSH into VPC) ─────────────────────────────────────────────────
 enable_jump_host:     false

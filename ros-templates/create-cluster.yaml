@@ -108,6 +108,15 @@ Parameters:
     Default: 10.0.16.5
     Description: |
       Agent-based only. Fixed private IP for the rendezvous (first control plane) node.
+
+  IngressVip:
+    Type: String
+    Default: 10.0.16.6
+    Description: |
+      Placeholder IP for the *.apps wildcard PrivateZone record required by the
+      Assisted Installer host DNS validation. Must be an unused IP in the private
+      subnet. After install, the ingress operator creates a real SLB via CCM —
+      update the *.apps PrivateZone record to that SLB IP.
       Must be within PrivateSubnetCidr (default 10.0.16.0/20). Ignored for Assisted installs.
       This IP must be set in agent-config.yaml BEFORE generating the agent ISO.
 
@@ -511,6 +520,15 @@ Resources:
       Rr: api-int
       Type: A
       Value: !GetAtt ApiSLB.IpAddress
+      Ttl: 60
+
+  AppsRecord:
+    Type: ALIYUN::PVTZ::ZoneRecord
+    Properties:
+      ZoneId: !Ref PrivateZone
+      Rr: '*.apps'
+      Type: A
+      Value: !Ref IngressVip
       Ttl: 60
 
   # ── ECS Instances ────────────────────────────────────────────────────────────
