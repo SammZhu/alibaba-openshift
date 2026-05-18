@@ -172,6 +172,110 @@
                 ['CREATE_COMPLETE', 'CREATE_IN_PROGRESS', 'UPDATE_COMPLETE'])
             | list | length > 0
 
+    # ── If still no stack ID, check if a failed stack exists by name ──────
+    # Handles the case where state.yml was lost/reset but the cloud stack is
+    # still stuck in a failed state (StackExists would block CreateStack).
+    - name: Find failed stack by name (to clean up before recreating)
+      ansible.builtin.set_fact:
+        failed_stack_by_name: "{{ (stack_list.stdout | from_json).Stacks
+                                   | selectattr('Status', 'in',
+                                       ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE',
+                                        'DELETE_FAILED', 'UPDATE_FAILED'])
+                                   | list | first }}"
+      when:
+        - ros_stack_id is not defined or ros_stack_id | length == 0
+        - stack_list is defined and stack_list.rc == 0
+        - (stack_list.stdout | from_json).Stacks
+            | selectattr('Status', 'in',
+                ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE',
+                 'DELETE_FAILED', 'UPDATE_FAILED'])
+            | list | length > 0
+
+    - name: Pre-detach RAM policy from role (clean up failed stack found by name)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ram
+          - DetachPolicyFromRole
+          - --PolicyName
+          - "{{ cluster_name }}-node-policy"
+          - --PolicyType
+          - Custom
+          - --RoleName
+          - "{{ ram_role_name | default('openshift-node-role') }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      failed_when: false
+      changed_when: false
+      when:
+        - failed_stack_by_name is defined
+        - failed_stack_by_name.StackId is defined
+
+    - name: Pre-delete RAM policy (clean up failed stack found by name)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ram
+          - DeletePolicy
+          - --PolicyName
+          - "{{ cluster_name }}-node-policy"
+          - --profile
+          - "{{ aliyun_profile }}"
+      failed_when: false
+      changed_when: false
+      when:
+        - failed_stack_by_name is defined
+        - failed_stack_by_name.StackId is defined
+
+    - name: Delete failed stack found by name
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - DeleteStack
+          - --StackId
+          - "{{ failed_stack_by_name.StackId }}"
+          - --RegionId
+          - "{{ region }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: delete_named_failed
+      when:
+        - failed_stack_by_name is defined
+        - failed_stack_by_name.StackId is defined
+
+    - name: Wait for named failed stack deletion to complete
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - GetStack
+          - --StackId
+          - "{{ failed_stack_by_name.StackId }}"
+          - --RegionId
+          - "{{ region }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: named_stack_delete_wait
+      changed_when: false
+      failed_when: false
+      retries: 40
+      delay: 15
+      until: >-
+        named_stack_delete_wait.rc != 0 or
+        (named_stack_delete_wait.stdout | from_json).Status == 'DELETE_COMPLETE'
+      when: delete_named_failed is not skipped
+
+    - name: Fail if named stack is still stuck in DELETE_FAILED after cleanup
+      ansible.builtin.fail:
+        msg: |
+          Stack {{ failed_stack_by_name.StackId }} is stuck in DELETE_FAILED.
+          Check the ROS console for blocking resources and delete them manually.
+      when:
+        - named_stack_delete_wait is not skipped
+        - named_stack_delete_wait.rc == 0
+        - (named_stack_delete_wait.stdout | from_json).Status == 'DELETE_FAILED'
+
     # ── Create stack if still missing ──────────────────────────────────────
     - name: Build ROS Parameters JSON
       ansible.builtin.set_fact:
