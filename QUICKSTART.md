@@ -62,15 +62,16 @@ Phase 5  Day-2 操作示例                             按需
 |---|---|---|
 | `AliyunOSSFullAccess` | OSS | ISO 上传、存储桶管理 |
 | `AliyunECSFullAccess` | ECS | 镜像导入、实例管理 |
-| `AliyunVPCFullAccess` | VPC / VSwitch / NAT / SNAT | |
+| `AliyunVPCFullAccess` | VPC / VSwitch / Route Table | |
 | **`AliyunEIPFullAccess`** | **弹性公网 IP** | **单独授权，VPCFullAccess 不包含；缺少时报 `Forbidden.RAM`** |
+| **`AliyunNATGatewayFullAccess`** | **NAT 网关 / SNAT** | **单独授权，VPCFullAccess 不包含；缺少时报 `Forbidden.RAM`** |
 | `AliyunSLBFullAccess` | SLB / Listener | |
 | `AliyunPvtzFullAccess` | PrivateZone DNS | 缺少时报 `NoPermission.Operator` |
 | `AliyunROSFullAccess` | ROS 资源栈 | |
 | `AliyunRAMFullAccess` | RAM Role / Policy | 节点实例角色的创建与删除 |
 | `AliyunNASFullAccess` | NAS | ReadWriteMany PV（可选）|
 
-> **重要**：`AliyunEIPFullAccess` 需要**单独授权**，仅有 `AliyunVPCFullAccess` 不够，RAM 子账号调用 `AllocateEipAddress` 会报 `Forbidden.RAM`。如果账号有权限边界（Permission Boundary）或资源组级别管控，还需要确认这些策略在**资源组层面**也已授权。
+> **重要**：`AliyunEIPFullAccess` 和 `AliyunNATGatewayFullAccess` 均需**单独授权**，`AliyunVPCFullAccess` 不包含这两项。缺少时均报 `Forbidden.RAM`。如果账号有权限边界（Permission Boundary）或资源组级别管控，还需要确认这些策略在**资源组层面**也已授权。
 
 ### 本地工具
 
