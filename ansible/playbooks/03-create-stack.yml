@@ -14,7 +14,78 @@
         src: "{{ ssh_pub_key_file }}"
       register: ssh_pub_slurp
 
-    # ── Adopt existing stack by name if state was lost ─────────────────────
+    # ── If we already have a stack ID in state, verify it's still viable ─────
+    - name: Check existing stack status (if ID already saved)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - GetStack
+          - --StackId
+          - "{{ ros_stack_id }}"
+          - --RegionId
+          - "{{ region }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: existing_stack_check
+      changed_when: false
+      failed_when: false
+      when: ros_stack_id is defined and ros_stack_id | length > 0
+
+    - name: Reset ros_stack_id if existing stack is in a failed state
+      ansible.builtin.set_fact:
+        ros_stack_id: ""
+      when:
+        - ros_stack_id is defined and ros_stack_id | length > 0
+        - existing_stack_check is not skipped
+        - existing_stack_check.rc == 0
+        - (existing_stack_check.stdout | from_json).Status in
+            ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE',
+             'DELETE_FAILED', 'UPDATE_FAILED']
+
+    - name: Delete failed stack so we can recreate with same name
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - DeleteStack
+          - --StackId
+          - "{{ (existing_stack_check.stdout | from_json).StackId }}"
+          - --RegionId
+          - "{{ region }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: delete_existing_failed
+      when:
+        - existing_stack_check is defined and existing_stack_check is not skipped
+        - existing_stack_check.rc == 0
+        - (existing_stack_check.stdout | from_json).Status in
+            ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE',
+             'DELETE_FAILED', 'UPDATE_FAILED']
+
+    - name: Wait for failed stack deletion to complete
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - GetStack
+          - --StackId
+          - "{{ (existing_stack_check.stdout | from_json).StackId }}"
+          - --RegionId
+          - "{{ region }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: stack_delete_wait
+      changed_when: false
+      failed_when: false
+      retries: 30
+      delay: 15
+      until: >-
+        stack_delete_wait.rc != 0 or
+        (stack_delete_wait.stdout | from_json).Status in ['DELETE_COMPLETE']
+      when: delete_existing_failed is not skipped
+
+    # ── Adopt existing stack by name if state.yml was lost ────────────────
     - name: List stacks by name
       ansible.builtin.command:
         argv:
@@ -31,52 +102,6 @@
       changed_when: false
       failed_when: false
       when: ros_stack_id is not defined or ros_stack_id | length == 0
-
-    - name: Delete failed stack so we can recreate with same name
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - ros
-          - DeleteStack
-          - --StackId
-          - "{{ ((stack_list.stdout | from_json).Stacks
-                  | selectattr('Status', 'in', ['CREATE_FAILED', 'ROLLBACK_COMPLETE', 'ROLLBACK_FAILED'])
-                  | list | first).StackId }}"
-          - --RegionId
-          - "{{ region }}"
-          - --profile
-          - "{{ aliyun_profile }}"
-      register: delete_failed
-      when:
-        - ros_stack_id is not defined or ros_stack_id | length == 0
-        - stack_list is defined and stack_list.rc == 0
-        - (stack_list.stdout | from_json).Stacks
-            | selectattr('Status', 'in', ['CREATE_FAILED', 'ROLLBACK_COMPLETE', 'ROLLBACK_FAILED'])
-            | list | length > 0
-
-    - name: Wait for failed stack deletion to complete
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - ros
-          - ListStacks
-          - --RegionId
-          - "{{ region }}"
-          - --StackName.1
-          - "{{ stack_name }}"
-          - --profile
-          - "{{ aliyun_profile }}"
-      register: stack_gone
-      changed_when: false
-      failed_when: false
-      retries: 20
-      delay: 15
-      until: >-
-        (stack_gone.stdout | from_json).Stacks | length == 0 or
-        (stack_gone.stdout | from_json).Stacks
-          | rejectattr('Status', 'in', ['DELETE_IN_PROGRESS', 'DELETE_COMPLETE'])
-          | list | length == 0
-      when: delete_failed is not skipped
 
     - name: Adopt existing stack (only if in a viable state)
       ansible.builtin.set_fact:
