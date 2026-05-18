@@ -14,11 +14,6 @@
         src: "{{ ssh_pub_key_file }}"
       register: ssh_pub_slurp
 
-    - name: Read ROS template body
-      ansible.builtin.slurp:
-        src: "{{ template_file }}"
-      register: tpl_slurp
-
     # ── Adopt existing stack by name if state was lost ─────────────────────
     - name: List stacks by name
       ansible.builtin.command:
@@ -37,13 +32,65 @@
       failed_when: false
       when: ros_stack_id is not defined or ros_stack_id | length == 0
 
-    - name: Adopt existing stack
-      ansible.builtin.set_fact:
-        ros_stack_id: "{{ ((stack_list.stdout | from_json).Stacks | first).StackId }}"
+    - name: Delete failed stack so we can recreate with same name
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - DeleteStack
+          - --StackId
+          - "{{ ((stack_list.stdout | from_json).Stacks
+                  | selectattr('Status', 'in', ['CREATE_FAILED', 'ROLLBACK_COMPLETE', 'ROLLBACK_FAILED'])
+                  | list | first).StackId }}"
+          - --RegionId
+          - "{{ region }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: delete_failed
       when:
         - ros_stack_id is not defined or ros_stack_id | length == 0
         - stack_list is defined and stack_list.rc == 0
-        - ((stack_list.stdout | from_json).Stacks | length) > 0
+        - (stack_list.stdout | from_json).Stacks
+            | selectattr('Status', 'in', ['CREATE_FAILED', 'ROLLBACK_COMPLETE', 'ROLLBACK_FAILED'])
+            | list | length > 0
+
+    - name: Wait for failed stack deletion to complete
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - ListStacks
+          - --RegionId
+          - "{{ region }}"
+          - --StackName.1
+          - "{{ stack_name }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: stack_gone
+      changed_when: false
+      failed_when: false
+      retries: 20
+      delay: 15
+      until: >-
+        (stack_gone.stdout | from_json).Stacks | length == 0 or
+        (stack_gone.stdout | from_json).Stacks
+          | rejectattr('Status', 'in', ['DELETE_IN_PROGRESS', 'DELETE_COMPLETE'])
+          | list | length == 0
+      when: delete_failed is not skipped
+
+    - name: Adopt existing stack (only if in a viable state)
+      ansible.builtin.set_fact:
+        ros_stack_id: "{{ ((stack_list.stdout | from_json).Stacks
+                           | selectattr('Status', 'in',
+                               ['CREATE_COMPLETE', 'CREATE_IN_PROGRESS', 'UPDATE_COMPLETE'])
+                           | list | first).StackId }}"
+      when:
+        - ros_stack_id is not defined or ros_stack_id | length == 0
+        - stack_list is defined and stack_list.rc == 0
+        - (stack_list.stdout | from_json).Stacks
+            | selectattr('Status', 'in',
+                ['CREATE_COMPLETE', 'CREATE_IN_PROGRESS', 'UPDATE_COMPLETE'])
+            | list | length > 0
 
     # ── Create stack if still missing ──────────────────────────────────────
     - name: Build ROS Parameters JSON
@@ -71,26 +118,24 @@
           - {ParameterKey: JumpHostInstanceType,     ParameterValue: "{{ jump_host_type }}"}
           - {ParameterKey: SshPublicKey,             ParameterValue: "{{ ssh_pub_slurp.content | b64decode | trim }}"}
 
+    - name: Write ROS parameters to temp file
+      ansible.builtin.copy:
+        dest: "/tmp/ros-params-{{ cluster_name }}.json"
+        content: "{{ ros_params | to_json }}"
+        mode: "0600"
+      when: ros_stack_id is not defined or ros_stack_id | length == 0
+
     - name: Submit ROS CreateStack
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - ros
-          - CreateStack
-          - --RegionId
-          - "{{ region }}"
-          - --StackName
-          - "{{ stack_name }}"
-          - --DisableRollback
-          - "true"
-          - --TimeoutInMinutes
-          - "60"
-          - --TemplateBody
-          - "{{ tpl_slurp.content | b64decode }}"
-          - --Parameters
-          - "{{ ros_params | to_json }}"
-          - --profile
-          - "{{ aliyun_profile }}"
+      ansible.builtin.shell:
+        cmd: |
+          aliyun ros CreateStack \
+            --RegionId "{{ region }}" \
+            --StackName "{{ stack_name }}" \
+            --DisableRollback true \
+            --TimeoutInMinutes 60 \
+            --TemplateBody "$(cat '{{ template_file }}')" \
+            --Parameters "$(cat '/tmp/ros-params-{{ cluster_name }}.json')" \
+            --profile "{{ aliyun_profile }}"
       register: create_result
       when: ros_stack_id is not defined or ros_stack_id | length == 0
 
