@@ -452,6 +452,43 @@
         jump_host_ip: "{{ (outputs | selectattr('OutputKey', 'equalto', 'JumpHostPublicIp') | list | first).OutputValue }}"
       when: (outputs | selectattr('OutputKey', 'equalto', 'JumpHostPublicIp') | list | length) > 0
 
+    # ── PTR records — written after instances exist so IPs are known ──────
+    - name: Pick master IPs and reverse zone IDs from outputs
+      ansible.builtin.set_fact:
+        master_ip1:       "{{ (outputs | selectattr('OutputKey', 'equalto', 'MasterIp1')      | list | first | default({})).OutputValue | default('') }}"
+        master_ip2:       "{{ (outputs | selectattr('OutputKey', 'equalto', 'MasterIp2')      | list | first | default({})).OutputValue | default('') }}"
+        master_ip3:       "{{ (outputs | selectattr('OutputKey', 'equalto', 'MasterIp3')      | list | first | default({})).OutputValue | default('') }}"
+        reverse_zone_id1: "{{ (outputs | selectattr('OutputKey', 'equalto', 'ReverseZoneId1') | list | first | default({})).OutputValue | default('') }}"
+        reverse_zone_id2: "{{ (outputs | selectattr('OutputKey', 'equalto', 'ReverseZoneId2') | list | first | default({})).OutputValue | default('') }}"
+
+    - name: Add PTR records for control plane nodes
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - pvtz
+          - AddZoneRecord
+          - --ZoneId
+          - "{{ item.zone_id }}"
+          - --Rr
+          - "{{ item.ip.split('.')[-1] }}"
+          - --Type
+          - PTR
+          - --Value
+          - "{{ item.name }}.{{ cluster_name }}.{{ base_domain }}."
+          - --Ttl
+          - "60"
+          - --profile
+          - "{{ aliyun_profile }}"
+      loop:
+        - { ip: "{{ master_ip1 }}", zone_id: "{{ reverse_zone_id1 }}", name: "{{ cluster_name }}-master-1" }
+        - { ip: "{{ master_ip2 }}", zone_id: "{{ reverse_zone_id1 }}", name: "{{ cluster_name }}-master-2" }
+        - { ip: "{{ master_ip3 }}", zone_id: "{{ reverse_zone_id2 }}", name: "{{ cluster_name }}-master-3" }
+      failed_when: false
+      changed_when: true
+      when:
+        - item.ip | length > 0
+        - item.zone_id | length > 0
+
     # ── Save ROS-generated CCM ConfigMap to disk for Phase 04 ──────────────
     - name: Save alibaba-ccm-config.yaml
       ansible.builtin.copy:
@@ -478,6 +515,9 @@
           node_ram_role: "{{ node_ram_role }}"
           dynamic_manifest_file: "{{ output_dir }}/alibaba-ccm-config.yaml"
           jump_host_ip: "{{ jump_host_ip | default('') }}"
+          master_ip1: "{{ master_ip1 | default('') }}"
+          master_ip2: "{{ master_ip2 | default('') }}"
+          master_ip3: "{{ master_ip3 | default('') }}"
 
     - name: Phase 03 done
       ansible.builtin.debug:

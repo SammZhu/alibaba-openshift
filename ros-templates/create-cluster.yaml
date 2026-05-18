@@ -531,6 +531,69 @@ Resources:
       Value: !Ref IngressVip
       Ttl: 60
 
+  # etcd-N A records — added after instances exist so GetAtt can resolve their IPs.
+  # etcd uses these for peer-to-peer communication between control plane nodes.
+  EtcdRecord0:
+    Type: ALIYUN::PVTZ::ZoneRecord
+    DependsOn: [RendezvousInstance, PrivateZone]
+    Properties:
+      ZoneId: !Ref PrivateZone
+      Rr: etcd-0
+      Type: A
+      Value: !GetAtt RendezvousInstance.PrivateIp
+      Ttl: 60
+
+  EtcdRecord1:
+    Type: ALIYUN::PVTZ::ZoneRecord
+    DependsOn: [ControlPlaneInstance2, PrivateZone]
+    Properties:
+      ZoneId: !Ref PrivateZone
+      Rr: etcd-1
+      Type: A
+      Value: !GetAtt ControlPlaneInstance2.PrivateIp
+      Ttl: 60
+
+  EtcdRecord2:
+    Type: ALIYUN::PVTZ::ZoneRecord
+    DependsOn: [ControlPlaneInstance3, PrivateZone]
+    Properties:
+      ZoneId: !Ref PrivateZone
+      Rr: etcd-2
+      Type: A
+      Value: !GetAtt ControlPlaneInstance3.PrivateIp
+      Ttl: 60
+
+  # ── Reverse DNS zones (PTR records added by Phase 03 after IPs are known) ────
+  # PrivateVSwitch  → 10.0.16.0/20 → reverse zone: 16.0.10.in-addr.arpa
+  # PrivateVSwitch2 → 10.0.32.0/20 → reverse zone: 32.0.10.in-addr.arpa
+  ReverseZone1:
+    Type: ALIYUN::PVTZ::Zone
+    Properties:
+      ZoneName: 16.0.10.in-addr.arpa
+
+  ReverseZone1VpcBinding:
+    Type: ALIYUN::PVTZ::ZoneVpcBinder
+    DependsOn: ReverseZone1
+    Properties:
+      ZoneId: !Ref ReverseZone1
+      Vpcs:
+        - VpcId: !Ref Vpc
+          RegionId: !Ref Region
+
+  ReverseZone2:
+    Type: ALIYUN::PVTZ::Zone
+    Properties:
+      ZoneName: 32.0.10.in-addr.arpa
+
+  ReverseZone2VpcBinding:
+    Type: ALIYUN::PVTZ::ZoneVpcBinder
+    DependsOn: ReverseZone2
+    Properties:
+      ZoneId: !Ref ReverseZone2
+      Vpcs:
+        - VpcId: !Ref Vpc
+          RegionId: !Ref Region
+
   # ── ECS Instances ────────────────────────────────────────────────────────────
   # All instances DependsOn RolePolicyAttachment to ensure RAM role policy is
   # attached before the nodes try to call Alibaba Cloud APIs via instance principal.
@@ -883,6 +946,26 @@ Outputs:
   NodeRamRoleName:
     Value: !Ref NodeRamRole
     Description: RAM role name attached to all nodes — needed by Phase 04
+
+  MasterIp1:
+    Value: !GetAtt RendezvousInstance.PrivateIp
+    Description: master-1 private IP (etcd-0, PTR record target)
+
+  MasterIp2:
+    Value: !GetAtt ControlPlaneInstance2.PrivateIp
+    Description: master-2 private IP (etcd-1, PTR record target)
+
+  MasterIp3:
+    Value: !GetAtt ControlPlaneInstance3.PrivateIp
+    Description: master-3 private IP (etcd-2, PTR record target)
+
+  ReverseZoneId1:
+    Value: !Ref ReverseZone1
+    Description: PrivateZone ID for 16.0.10.in-addr.arpa (PTR records for PrivateVSwitch nodes)
+
+  ReverseZoneId2:
+    Value: !Ref ReverseZone2
+    Description: PrivateZone ID for 32.0.10.in-addr.arpa (PTR records for PrivateVSwitch2 nodes)
 
   DynamicCustomManifest:
     Description: |
