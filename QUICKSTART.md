@@ -69,6 +69,7 @@ Phase 5  Day-2 操作示例                             按需
 | `AliyunPvtzFullAccess` | PrivateZone DNS | 缺少时报 `NoPermission.Operator` |
 | `AliyunROSFullAccess` | ROS 资源栈 | |
 | `AliyunRAMFullAccess` | RAM Role / Policy | 节点实例角色的创建与删除 |
+| `AliyunTagAdministratorAccess` | 资源标签 | ROS 栈给 VPC/ECS/SLB 等资源打 `kubernetes.io/cluster/` 标签时必须 |
 | `AliyunNASFullAccess` | NAS | ReadWriteMany PV（可选）|
 
 > **重要**：`AliyunEIPFullAccess` 和 `AliyunNATGatewayFullAccess` 均需**单独授权**，`AliyunVPCFullAccess` 不包含这两项。缺少时均报 `Forbidden.RAM`。如果账号有权限边界（Permission Boundary）或资源组级别管控，还需要确认这些策略在**资源组层面**也已授权。
