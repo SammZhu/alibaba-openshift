@@ -43,6 +43,51 @@
             ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE',
              'DELETE_FAILED', 'UPDATE_FAILED']
 
+    # ── Pre-clean resources known to block stack deletion ─────────────────
+    # RAM policies cannot be deleted while still attached to a role.
+    # Detach first, then delete — both steps are no-ops if resources don't exist.
+    - name: Pre-detach RAM policy from role (unblocks stack deletion)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ram
+          - DetachPolicyFromRole
+          - --PolicyName
+          - "{{ cluster_name }}-node-policy"
+          - --PolicyType
+          - Custom
+          - --RoleName
+          - "{{ ram_role_name | default('openshift-node-role') }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      failed_when: false
+      changed_when: false
+      when:
+        - existing_stack_check is defined and existing_stack_check is not skipped
+        - existing_stack_check.rc == 0
+        - (existing_stack_check.stdout | from_json).Status in
+            ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE',
+             'DELETE_FAILED', 'UPDATE_FAILED']
+
+    - name: Pre-delete RAM policy (unblocks stack deletion)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ram
+          - DeletePolicy
+          - --PolicyName
+          - "{{ cluster_name }}-node-policy"
+          - --profile
+          - "{{ aliyun_profile }}"
+      failed_when: false
+      changed_when: false
+      when:
+        - existing_stack_check is defined and existing_stack_check is not skipped
+        - existing_stack_check.rc == 0
+        - (existing_stack_check.stdout | from_json).Status in
+            ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE',
+             'DELETE_FAILED', 'UPDATE_FAILED']
+
     - name: Delete failed stack so we can recreate with same name
       ansible.builtin.command:
         argv:
@@ -63,7 +108,7 @@
             ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE',
              'DELETE_FAILED', 'UPDATE_FAILED']
 
-    - name: Wait for failed stack deletion to complete
+    - name: Wait for stack deletion to complete (or confirm already gone)
       ansible.builtin.command:
         argv:
           - aliyun
@@ -78,12 +123,22 @@
       register: stack_delete_wait
       changed_when: false
       failed_when: false
-      retries: 30
+      retries: 40
       delay: 15
       until: >-
         stack_delete_wait.rc != 0 or
-        (stack_delete_wait.stdout | from_json).Status in ['DELETE_COMPLETE']
+        (stack_delete_wait.stdout | from_json).Status == 'DELETE_COMPLETE'
       when: delete_existing_failed is not skipped
+
+    - name: Fail if stack is still stuck in DELETE_FAILED after cleanup
+      ansible.builtin.fail:
+        msg: |
+          Stack {{ (existing_stack_check.stdout | from_json).StackId }} is stuck in DELETE_FAILED.
+          Check the ROS console for blocking resources and delete them manually.
+      when:
+        - stack_delete_wait is not skipped
+        - stack_delete_wait.rc == 0
+        - (stack_delete_wait.stdout | from_json).Status == 'DELETE_FAILED'
 
     # ── Adopt existing stack by name if state.yml was lost ────────────────
     - name: List stacks by name
