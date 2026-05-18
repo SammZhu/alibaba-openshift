@@ -32,20 +32,20 @@
       failed_when: false
       when: ros_stack_id is defined and ros_stack_id | length > 0
 
-    - name: Reset ros_stack_id if existing stack is in a failed state
+    # Stack is gone (DELETE_COMPLETE or 404) — just reset ID and recreate
+    - name: Reset ros_stack_id if stack is gone or already deleted
       ansible.builtin.set_fact:
         ros_stack_id: ""
       when:
         - ros_stack_id is defined and ros_stack_id | length > 0
         - existing_stack_check is not skipped
-        - existing_stack_check.rc == 0
-        - (existing_stack_check.stdout | from_json).Status in
-            ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE',
-             'DELETE_FAILED', 'UPDATE_FAILED']
+        - existing_stack_check.rc != 0 or
+          (existing_stack_check.stdout | from_json).Status in
+            ['DELETE_COMPLETE', 'CREATE_FAILED', 'ROLLBACK_FAILED',
+             'ROLLBACK_COMPLETE', 'DELETE_FAILED', 'UPDATE_FAILED']
 
     # ── Pre-clean resources known to block stack deletion ─────────────────
-    # RAM policies cannot be deleted while still attached to a role.
-    # Detach first, then delete — both steps are no-ops if resources don't exist.
+    # Only needed for stacks still alive in a failed state (not DELETE_COMPLETE/404)
     - name: Pre-detach RAM policy from role (unblocks stack deletion)
       ansible.builtin.command:
         argv:
@@ -108,7 +108,7 @@
             ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE',
              'DELETE_FAILED', 'UPDATE_FAILED']
 
-    - name: Wait for stack deletion to complete (or confirm already gone)
+    - name: Wait for stack deletion to complete
       ansible.builtin.command:
         argv:
           - aliyun
