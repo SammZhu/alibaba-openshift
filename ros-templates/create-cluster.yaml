@@ -696,7 +696,11 @@ Resources:
       VSwitchId: !Ref PublicVSwitch
       SystemDiskCategory: cloud_essd
       SystemDiskSize: 20
-      # Use image preset password (SSH key injected via UserData; root login via key only)
+      # Direct public IP via RunInstances (avoids AllocateEipAddress RAM sub-user restriction)
+      AllocatePublicIP: true
+      InternetMaxBandwidthOut: 1       # 1 Mbps — sufficient for SSH
+      InternetChargeType: PayByTraffic
+      # SSH key injected via UserData; password login disabled in sshd_config
       PasswordInherit: true
       UserData:
         Fn::Base64:
@@ -771,32 +775,17 @@ Resources:
         - Key: role
           Value: jumphost
 
-  JumpHostEip:
-    Type: ALIYUN::VPC::EIP
-    Condition: HasJumpHost
-    Properties:
-      Bandwidth: 1                        # 1 Mbps — sufficient for SSH
-      InternetChargeType: PayByTraffic    # Cheapest for low-traffic SSH usage
-      Tags:
-        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
-          Value: owned
-
-  JumpHostEipAssociation:
-    Type: ALIYUN::VPC::EIPAssociation
-    Condition: HasJumpHost
-    Properties:
-      AllocationId: !Ref JumpHostEip
-      InstanceId: !Ref JumpHostInstance
-
 Outputs:
   JumpHostPublicIp:
     Condition: HasJumpHost
-    Value: !GetAtt JumpHostEip.EipAddress
-    Description: Jump host public EIP — SSH target for operator access
+    Value: !GetAtt JumpHostInstance.PublicIp
+    Description: Jump host public IP — SSH target for operator access
 
   JumpHostSshCommand:
     Condition: HasJumpHost
-    Value: !Sub 'ssh root@${JumpHostEip.EipAddress}'
+    Value: !Sub
+      - 'ssh root@${Ip}'
+      - Ip: !GetAtt JumpHostInstance.PublicIp
     Description: Ready-to-run SSH command (uses the key passed in SshPublicKey)
 
   VpcId:
