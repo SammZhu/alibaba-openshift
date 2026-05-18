@@ -5,7 +5,7 @@
   gather_facts: false
   vars:
     stack_name: "openshift-{{ cluster_name }}"
-    template_file: "{{ repo_root }}/alibaba-openshift/ros-templates/create-cluster.yaml"
+    template_file: "{{ repo_root }}/ros-templates/create-cluster.yaml"
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
 

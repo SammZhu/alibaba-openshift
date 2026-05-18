@@ -8,16 +8,16 @@
     manifests_to_upload:
       - folder: manifests
         name: 00-ovn-mtu.yaml
-        src: "{{ repo_root }}/alibaba-openshift/custom_manifests/00-ovn-mtu.yaml"
+        src: "{{ repo_root }}/custom_manifests/00-ovn-mtu.yaml"
       - folder: manifests
         name: 01-alibaba-ccm.yaml
-        src: "{{ repo_root }}/alibaba-openshift/custom_manifests/01-alibaba-ccm.yaml"
+        src: "{{ repo_root }}/custom_manifests/01-alibaba-ccm.yaml"
       - folder: manifests
         name: alibaba-ccm-config.yaml
         src: "{{ dynamic_manifest_file }}"
       - folder: openshift
         name: 03-machineconfig-providerid.yaml
-        src: "{{ repo_root }}/alibaba-openshift/custom_manifests/03-machineconfig-providerid.yaml"
+        src: "{{ repo_root }}/custom_manifests/03-machineconfig-providerid.yaml"
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
     - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
