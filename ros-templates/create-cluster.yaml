@@ -225,7 +225,7 @@ Resources:
     DependsOn: EIPAssociation
     Properties:
       SnatTableId: !GetAtt NatGateway.SNatTableId
-      SourceVSwitchId: !Ref PrivateVSwitch
+      SourceCIDR: !Ref PrivateSubnetCidr
       SnatIp: !GetAtt EIP.EipAddress
 
   NatSNATEntry2:
@@ -233,7 +233,7 @@ Resources:
     DependsOn: EIPAssociation
     Properties:
       SnatTableId: !GetAtt NatGateway.SNatTableId
-      SourceVSwitchId: !Ref PrivateVSwitch2
+      SourceCIDR: !Ref PrivateSubnetCidr2
       SnatIp: !GetAtt EIP.EipAddress
 
   # ── Security Groups ──────────────────────────────────────────────────────────
@@ -298,6 +298,7 @@ Resources:
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
       IpProtocol: all
       PortRange: -1/-1
+      NicType: intranet
       SourceGroupId: !Ref ControlPlaneSecurityGroup
       Description: Intra-master (all traffic between control-plane nodes)
 
@@ -310,6 +311,7 @@ Resources:
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
       IpProtocol: all
       PortRange: -1/-1
+      NicType: intranet
       SourceGroupId: !Ref WorkerSecurityGroup
       Description: From workers (kubelet → API, OVN Geneve overlay)
 
@@ -322,6 +324,7 @@ Resources:
       SecurityGroupId: !Ref WorkerSecurityGroup
       IpProtocol: all
       PortRange: -1/-1
+      NicType: intranet
       SourceGroupId: !Ref ControlPlaneSecurityGroup
       Description: From masters (covers Geneve UDP 6081 OVN overlay + kubelet)
 
@@ -334,6 +337,7 @@ Resources:
       SecurityGroupId: !Ref WorkerSecurityGroup
       IpProtocol: all
       PortRange: -1/-1
+      NicType: intranet
       SourceGroupId: !Ref WorkerSecurityGroup
       Description: Intra-worker (pod-to-pod, OVN Geneve overlay)
 
@@ -374,7 +378,7 @@ Resources:
               - ecs:StartInstance
               - ecs:TagResources
               - ecs:ListTagResources
-            Resource: '*'
+            Resource: ['*']
           # ── SLB (CCM LoadBalancer service) ──────────────────────────────────
           - Effect: Allow
             Action:
@@ -388,20 +392,20 @@ Resources:
               - slb:StopLoadBalancerListener
               - slb:DescribeLoadBalancerAttribute
               - slb:SetLoadBalancerDeleteProtection
-            Resource: '*'
+            Resource: ['*']
           # ── VPC / VSwitch (CCM + CAPA network) ──────────────────────────────
           - Effect: Allow
             Action:
               - vpc:DescribeVpcs
               - vpc:DescribeVSwitches
               - vpc:DescribeRouteTableList
-            Resource: '*'
+            Resource: ['*']
           # ── Private Zone DNS (CCM) ───────────────────────────────────────────
           - Effect: Allow
             Action:
               - pvtz:DescribeZones
               - pvtz:DescribeZoneRecords
-            Resource: '*'
+            Resource: ['*']
           # ── ECS Disk (Alibaba Cloud CSI Driver — Phase 1) ────────────────────
           # Required for dynamic PersistentVolume provisioning, attachment,
           # expansion, and snapshot operations via the disk CSI driver.
@@ -421,7 +425,7 @@ Resources:
               - ecs:ApplyAutoSnapshotPolicy
               - ecs:DeleteAutoSnapshotPolicy
               - ecs:DescribeAutoSnapshotPolicyEx
-            Resource: '*'
+            Resource: ['*']
           # ── NAS (Alibaba Cloud CSI Driver — Phase 2) ─────────────────────────
           # Required for dynamic NAS PV provisioning (file-system and mount-target
           # lifecycle) used by ReadWriteMany volumes and VM live migration support.
@@ -442,7 +446,7 @@ Resources:
               - nas:CreateAccessRule
               - nas:DeleteAccessRule
               - nas:DescribeZones
-            Resource: '*'
+            Resource: ['*']
 
   RolePolicyAttachment:
     Type: ALIYUN::RAM::AttachPolicyToRole
@@ -461,11 +465,9 @@ Resources:
       VpcId: !Ref Vpc
       VSwitchId: !Ref PrivateVSwitch
       LoadBalancerSpec: slb.s2.small
-      # SLB uses TagKey/TagValue in the underlying API; ROS supports both forms
-      # but TagKey/TagValue is the documented one for ALIYUN::SLB::LoadBalancer.
       Tags:
-        - TagKey: !Sub 'kubernetes.io/cluster/${ClusterName}'
-          TagValue: owned
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
 
   ApiSLBListener:
     Type: ALIYUN::SLB::Listener
@@ -480,7 +482,6 @@ Resources:
         HealthCheckConnectPort: 6443
         HealthyThreshold: 3
         UnhealthyThreshold: 3
-        HealthCheckInterval: 5
 
   McsListener:
     Type: ALIYUN::SLB::Listener
@@ -495,7 +496,6 @@ Resources:
         HealthCheckConnectPort: 22623
         HealthyThreshold: 3
         UnhealthyThreshold: 3
-        HealthCheckInterval: 5
 
   # ── Private DNS ──────────────────────────────────────────────────────────────
 
@@ -663,7 +663,6 @@ Resources:
     Type: DATASOURCE::ECS::Images
     Condition: HasJumpHost
     Properties:
-      OwnerAlias: system
       OSType: linux
       Architecture: x86_64
       ImageName: aliyun_3_x64_20G_alibase_*
@@ -697,8 +696,8 @@ Resources:
       VSwitchId: !Ref PublicVSwitch
       SystemDiskCategory: cloud_essd
       SystemDiskSize: 20
-      # Password disabled — SSH key auth only via UserData below.
-      Password: ''
+      # Use image preset password (SSH key injected via UserData; root login via key only)
+      PasswordInherit: true
       UserData:
         Fn::Base64:
           Fn::Sub: |
