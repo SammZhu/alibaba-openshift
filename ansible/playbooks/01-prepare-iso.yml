@@ -119,7 +119,7 @@
         _infra_body: "{{ {
           'name': cluster_name + '-infra',
           'cluster_id': cluster_id,
-          'image_type': 'minimal-iso',
+          'image_type': 'full-iso',
           'pull_secret': pull_slurp.content | b64decode,
           'ssh_authorized_key': ssh_pub_slurp.content | b64decode | trim,
           'openshift_version': openshift_version | string,
