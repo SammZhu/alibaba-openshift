@@ -141,6 +141,15 @@ Parameters:
       Required only when EnableJumpHost=true. RHCOS nodes get SSH keys via ignition,
       not from this parameter.
 
+  SshPrivateKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: |
+      SSH private key written to /root/.ssh/openshift_ed25519 on the jump host.
+      Enables passwordless SSH from the jump host to cluster nodes (core@<node-ip>).
+      Required only when EnableJumpHost=true.
+
 Conditions:
   IsAgentBased: !Equals [!Ref InstallationMethod, Agent-based]
   IsAssisted:   !Equals [!Ref InstallationMethod, Assisted]
@@ -683,10 +692,24 @@ Resources:
             set -euxo pipefail
             exec > /var/log/userdata.log 2>&1
 
-            # 1. Authorise operator SSH key for root
+            # 1. Authorise operator SSH key for root + write private key for node access
             mkdir -p /root/.ssh && chmod 700 /root/.ssh
             echo "${SshPublicKey}" >> /root/.ssh/authorized_keys
             chmod 600 /root/.ssh/authorized_keys
+            # Private key — lets jump host SSH into cluster nodes (core@<node-ip>)
+            cat > /root/.ssh/openshift_ed25519 <<'SSHKEY'
+            ${SshPrivateKey}
+            SSHKEY
+            chmod 600 /root/.ssh/openshift_ed25519
+            # SSH config: use this key automatically for all private subnet hosts
+            cat > /root/.ssh/config <<'SSHCONF'
+            Host 10.0.*.*
+              User core
+              IdentityFile /root/.ssh/openshift_ed25519
+              StrictHostKeyChecking no
+              UserKnownHostsFile /dev/null
+            SSHCONF
+            chmod 600 /root/.ssh/config
 
             # 2. OS packages
             yum install -y --setopt=tsflags=nodocs git tar gzip jq curl bash-completion
@@ -725,19 +748,20 @@ Resources:
 
             ──────────────────────────────────────────────────────────
             OpenShift on Alibaba Cloud — Jump Host
-            Cluster: ${ClusterName}.${BaseDomain}
-            API SLB: api.${ClusterName}.${BaseDomain}:6443 (PrivateZone)
+            Cluster : ${ClusterName}.${BaseDomain}
+            API SLB : api.${ClusterName}.${BaseDomain}:6443 (PrivateZone)
 
-            Tools installed:
-              oc / kubectl / openshift-install / kustomize / aliyun
-            Project repos: /root/openshift-alibaba/
+            Tools   : oc / kubectl / openshift-install / kustomize / aliyun
+            Repos   : /root/openshift-alibaba/
+
+            SSH to nodes (key pre-installed):
+              ssh core@<node-private-ip>      # 10.0.x.x
 
             Typical workflow:
-              1. scp kubeconfig core@<this-host>:/root/kubeconfig
-              2. export KUBECONFIG=/root/kubeconfig
-              3. oc get nodes
-              4. cd /root/openshift-alibaba/alibaba-openshift
-              5. ./scripts/deploy-post-install.sh
+              1. export KUBECONFIG=/root/kubeconfig
+              2. oc get nodes
+              3. cd /root/openshift-alibaba/alibaba-openshift
+              4. ansible-playbook ansible/playbooks/05-deploy-post-install.yml
             ──────────────────────────────────────────────────────────
             MOTD
 

@@ -14,6 +14,12 @@
         src: "{{ ssh_pub_key_file }}"
       register: ssh_pub_slurp
 
+    - name: Read SSH private key (for jump host node access)
+      ansible.builtin.slurp:
+        src: "{{ ssh_priv_key_file }}"
+      register: ssh_priv_slurp
+      when: enable_jump_host | bool
+
     # ── If we already have a stack ID in state, verify it's still viable ─────
     - name: Check existing stack status (if ID already saved)
       ansible.builtin.command:
@@ -301,6 +307,7 @@
           - {ParameterKey: EnableJumpHost,           ParameterValue: "{{ enable_jump_host | string | lower }}"}
           - {ParameterKey: JumpHostInstanceType,     ParameterValue: "{{ jump_host_type }}"}
           - {ParameterKey: SshPublicKey,             ParameterValue: "{{ ssh_pub_slurp.content | b64decode | trim }}"}
+          - {ParameterKey: SshPrivateKey,            ParameterValue: "{{ ssh_priv_slurp.content | b64decode | trim if enable_jump_host | bool else '' }}"}
 
     - name: Write ROS parameters to temp file
       ansible.builtin.copy:
