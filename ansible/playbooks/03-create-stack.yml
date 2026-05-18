@@ -196,6 +196,7 @@
           - {ParameterKey: RendezvousIp,             ParameterValue: "{{ rendezvous_ip }}"}
           - {ParameterKey: EnableJumpHost,           ParameterValue: "{{ enable_jump_host | string | lower }}"}
           - {ParameterKey: JumpHostInstanceType,     ParameterValue: "{{ jump_host_type }}"}
+          - {ParameterKey: NatEipAllocationId,       ParameterValue: "{{ nat_eip_allocation_id }}"}
           - {ParameterKey: SshPublicKey,             ParameterValue: "{{ ssh_pub_slurp.content | b64decode | trim }}"}
 
     - name: Write ROS parameters to temp file
