@@ -34,9 +34,25 @@ Phase 5  Day-2 操作示例                             按需
 
 ### 阿里云账号
 
-- 已开通：**OSS**、**ECS**、**VPC**、**SLB**、**PrivateZone**、**ROS**、**NAS**（可选）、**RAM**
 - RAM 用户权限：`AdministratorAccess` 最简单（生产环境再精细化）
 - 决定 **Region**（如 `cn-wulanchabu`）— 整个流程都在同一个 Region
+
+#### 必须提前开通的云服务
+
+以下服务默认未激活，**Phase 03 建栈前必须全部开通**，否则 ROS 会报 `Service.Status.Illegal` 错误：
+
+| 服务 | 用途 | 开通链接 |
+|---|---|---|
+| **OSS** 对象存储 | 上传 Discovery ISO | https://oss.console.aliyun.com |
+| **ECS** 弹性计算 | 节点实例 | https://ecs.console.aliyun.com |
+| **VPC** 专有网络 | 网络基础设施 | https://vpc.console.aliyun.com |
+| **SLB** 负载均衡 | API/MCS/Ingress 入口 | https://slb.console.aliyun.com |
+| **PrivateZone** 私有 DNS | 集群内部域名解析（api.* / api-int.*）| https://pvtz.console.aliyun.com |
+| **ROS** 资源编排 | 一键建栈 | https://ros.console.aliyun.com |
+| **RAM** 访问控制 | 节点 IAM 角色 | https://ram.console.aliyun.com |
+| **NAS** 文件存储 | ReadWriteMany PV（可选）| https://nas.console.aliyun.com |
+
+> **注意**：PrivateZone 是最容易被遗漏的一个。进入控制台时若看到"服务未开通"提示，点击**立即开通**并同意协议即可，按量计费、费用可忽略不计。
 
 ### 本地工具
 

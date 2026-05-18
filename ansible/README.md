@@ -34,6 +34,15 @@ ansible/
 └── README.md
 ```
 
+## 阿里云服务开通（Phase 03 前必做）
+
+以下服务默认未激活，ROS 建栈时若未开通会报 `Service.Status.Illegal` 错误：
+
+| 服务 | 开通链接 |
+|---|---|
+| OSS / ECS / VPC / SLB / ROS / RAM | 各自控制台首页点击开通 |
+| **PrivateZone**（最易遗漏）| https://pvtz.console.aliyun.com — 进入后点"立即开通" |
+
 ## 一次性准备
 
 ```sh
