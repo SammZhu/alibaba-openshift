@@ -834,6 +834,14 @@ Outputs:
       rendezvousIP: ${RendezvousIp}
       hosts: []
 
+  WorkerSecurityGroup:
+    Value: !Ref WorkerSecurityGroup
+    Description: Worker security group ID — needed by Phase 04 to register nodes
+
+  NodeRamRoleName:
+    Value: !Ref NodeRamRole
+    Description: RAM role name attached to all nodes — needed by Phase 04
+
   DynamicCustomManifest:
     Description: |
       Assisted: save as alibaba-ccm-config.yaml and upload to Assisted Installer

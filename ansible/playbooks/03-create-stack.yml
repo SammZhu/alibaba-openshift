@@ -386,15 +386,58 @@
       ansible.builtin.set_fact:
         outputs: "{{ (stack_poll.stdout | from_json).Outputs }}"
 
-    - name: Pick required outputs
+    - name: Pick outputs available directly (always present since template v2+)
       ansible.builtin.set_fact:
-        vpc_id:           "{{ (outputs | selectattr('OutputKey', 'equalto', 'VpcId')              | first).OutputValue }}"
-        private_vswitch: "{{ (outputs | selectattr('OutputKey', 'equalto', 'VSwitchId')          | first).OutputValue }}"
-        api_slb_ip:       "{{ (outputs | selectattr('OutputKey', 'equalto', 'ApiSLBIp')           | first).OutputValue }}"
-        worker_sg:        "{{ (outputs | selectattr('OutputKey', 'equalto', 'WorkerSecurityGroup')| first).OutputValue }}"
-        node_ram_role:    "{{ (outputs | selectattr('OutputKey', 'equalto', 'NodeRamRoleName')    | first).OutputValue }}"
-        install_config:   "{{ (outputs | selectattr('OutputKey', 'equalto', 'InstallConfig')      | first).OutputValue }}"
-        dynamic_manifest: "{{ (outputs | selectattr('OutputKey', 'equalto', 'DynamicCustomManifest')| first).OutputValue }}"
+        vpc_id:           "{{ (outputs | selectattr('OutputKey', 'equalto', 'VpcId')              | list | first).OutputValue }}"
+        private_vswitch:  "{{ (outputs | selectattr('OutputKey', 'equalto', 'VSwitchId')          | list | first).OutputValue }}"
+        api_slb_ip:       "{{ (outputs | selectattr('OutputKey', 'equalto', 'ApiSLBIp')           | list | first).OutputValue }}"
+        install_config:   "{{ (outputs | selectattr('OutputKey', 'equalto', 'InstallConfig')      | list | first).OutputValue }}"
+        dynamic_manifest: "{{ (outputs | selectattr('OutputKey', 'equalto', 'DynamicCustomManifest')| list | first).OutputValue }}"
+        _worker_sg_from_output:   "{{ (outputs | selectattr('OutputKey', 'equalto', 'WorkerSecurityGroup') | list | map(attribute='OutputValue') | list | first | default('')) }}"
+        _node_role_from_output:   "{{ (outputs | selectattr('OutputKey', 'equalto', 'NodeRamRoleName')     | list | map(attribute='OutputValue') | list | first | default('')) }}"
+
+    # Fallback: query the physical resource ID directly when the output is absent
+    # (stacks created before WorkerSecurityGroup/NodeRamRoleName outputs were added)
+    - name: Query WorkerSecurityGroup physical ID from stack resources (fallback)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - GetStackResource
+          - --StackId
+          - "{{ ros_stack_id }}"
+          - --RegionId
+          - "{{ region }}"
+          - --LogicalResourceId
+          - WorkerSecurityGroup
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: worker_sg_resource
+      changed_when: false
+      when: _worker_sg_from_output == ''
+
+    - name: Query NodeRamRole physical ID from stack resources (fallback)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - GetStackResource
+          - --StackId
+          - "{{ ros_stack_id }}"
+          - --RegionId
+          - "{{ region }}"
+          - --LogicalResourceId
+          - NodeRamRole
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: node_role_resource
+      changed_when: false
+      when: _node_role_from_output == ''
+
+    - name: Resolve worker_sg and node_ram_role
+      ansible.builtin.set_fact:
+        worker_sg:     "{{ _worker_sg_from_output if _worker_sg_from_output != '' else (worker_sg_resource.stdout | from_json).PhysicalResourceId }}"
+        node_ram_role: "{{ _node_role_from_output if _node_role_from_output != '' else (node_role_resource.stdout | from_json).PhysicalResourceId }}"
 
     - name: Pick jump host IP (optional)
       ansible.builtin.set_fact:
