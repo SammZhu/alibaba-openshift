@@ -243,6 +243,7 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       SecurityGroupName: !Sub '${ClusterName}-master-sg'
+      # Only CIDR-based rules here; cross-SG rules added below to avoid CircularDependency
       SecurityGroupIngress:
         - IpProtocol: tcp
           PortRange: 6443/6443
@@ -256,14 +257,6 @@ Resources:
           PortRange: 2379/2380
           SourceCidrIp: !Ref VpcCidr
           Description: etcd
-        - IpProtocol: all
-          PortRange: -1/-1
-          SourceGroupId: !Ref ControlPlaneSecurityGroup
-          Description: Intra-master
-        - IpProtocol: all
-          PortRange: -1/-1
-          SourceGroupId: !Ref WorkerSecurityGroup
-          Description: From workers
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
           Value: owned
@@ -273,15 +266,8 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       SecurityGroupName: !Sub '${ClusterName}-worker-sg'
+      # Only CIDR-based rules here; cross-SG rules added below to avoid CircularDependency
       SecurityGroupIngress:
-        - IpProtocol: all
-          PortRange: -1/-1
-          SourceGroupId: !Ref ControlPlaneSecurityGroup
-          Description: From masters (covers Geneve UDP 6081 OVN overlay + kubelet)
-        - IpProtocol: all
-          PortRange: -1/-1
-          SourceGroupId: !Ref WorkerSecurityGroup
-          Description: Intra-worker (pod-to-pod, OVN Geneve overlay)
         - IpProtocol: tcp
           PortRange: 80/80
           SourceCidrIp: 0.0.0.0/0
@@ -300,6 +286,56 @@ Resources:
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
           Value: owned
+
+  # ── Cross-SG ingress rules (added AFTER both SGs exist to avoid CircularDependency) ──
+
+  CPSGIntraMaster:
+    Type: ALIYUN::ECS::SecurityGroupIngress
+    DependsOn:
+      - ControlPlaneSecurityGroup
+      - WorkerSecurityGroup
+    Properties:
+      SecurityGroupId: !Ref ControlPlaneSecurityGroup
+      IpProtocol: all
+      PortRange: -1/-1
+      SourceGroupId: !Ref ControlPlaneSecurityGroup
+      Description: Intra-master (all traffic between control-plane nodes)
+
+  CPSGFromWorkers:
+    Type: ALIYUN::ECS::SecurityGroupIngress
+    DependsOn:
+      - ControlPlaneSecurityGroup
+      - WorkerSecurityGroup
+    Properties:
+      SecurityGroupId: !Ref ControlPlaneSecurityGroup
+      IpProtocol: all
+      PortRange: -1/-1
+      SourceGroupId: !Ref WorkerSecurityGroup
+      Description: From workers (kubelet → API, OVN Geneve overlay)
+
+  WorkerSGFromMasters:
+    Type: ALIYUN::ECS::SecurityGroupIngress
+    DependsOn:
+      - ControlPlaneSecurityGroup
+      - WorkerSecurityGroup
+    Properties:
+      SecurityGroupId: !Ref WorkerSecurityGroup
+      IpProtocol: all
+      PortRange: -1/-1
+      SourceGroupId: !Ref ControlPlaneSecurityGroup
+      Description: From masters (covers Geneve UDP 6081 OVN overlay + kubelet)
+
+  WorkerSGIntraWorker:
+    Type: ALIYUN::ECS::SecurityGroupIngress
+    DependsOn:
+      - ControlPlaneSecurityGroup
+      - WorkerSecurityGroup
+    Properties:
+      SecurityGroupId: !Ref WorkerSecurityGroup
+      IpProtocol: all
+      PortRange: -1/-1
+      SourceGroupId: !Ref WorkerSecurityGroup
+      Description: Intra-worker (pod-to-pod, OVN Geneve overlay)
 
   # ── RAM Role (Instance Principal) ───────────────────────────────────────────
 
