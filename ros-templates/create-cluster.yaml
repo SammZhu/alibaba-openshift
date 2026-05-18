@@ -288,19 +288,9 @@ Resources:
           Value: owned
 
   # ── Cross-SG ingress rules (added AFTER both SGs exist to avoid CircularDependency) ──
-
-  CPSGIntraMaster:
-    Type: ALIYUN::ECS::SecurityGroupIngress
-    DependsOn:
-      - ControlPlaneSecurityGroup
-      - WorkerSecurityGroup
-    Properties:
-      SecurityGroupId: !Ref ControlPlaneSecurityGroup
-      IpProtocol: all
-      PortRange: -1/-1
-      NicType: intranet
-      SourceGroupId: !Ref ControlPlaneSecurityGroup
-      Description: Intra-master (all traffic between control-plane nodes)
+  # Note: intra-group rules (SG → same SG) are NOT needed and NOT allowed by Alibaba Cloud
+  # VPC API (InvalidParamter.Conflict). Instances in the same security group can communicate
+  # freely by default — no explicit self-referential rule required.
 
   CPSGFromWorkers:
     Type: ALIYUN::ECS::SecurityGroupIngress
@@ -327,19 +317,6 @@ Resources:
       NicType: intranet
       SourceGroupId: !Ref ControlPlaneSecurityGroup
       Description: From masters (covers Geneve UDP 6081 OVN overlay + kubelet)
-
-  WorkerSGIntraWorker:
-    Type: ALIYUN::ECS::SecurityGroupIngress
-    DependsOn:
-      - ControlPlaneSecurityGroup
-      - WorkerSecurityGroup
-    Properties:
-      SecurityGroupId: !Ref WorkerSecurityGroup
-      IpProtocol: all
-      PortRange: -1/-1
-      NicType: intranet
-      SourceGroupId: !Ref WorkerSecurityGroup
-      Description: Intra-worker (pod-to-pod, OVN Geneve overlay)
 
   # ── RAM Role (Instance Principal) ───────────────────────────────────────────
 
