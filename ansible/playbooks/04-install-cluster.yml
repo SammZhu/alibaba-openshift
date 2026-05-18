@@ -38,9 +38,9 @@
       register: hosts_resp
       retries: 90
       delay: 20
-      until: |
+      until: >-
         (hosts_resp.json | selectattr('status', 'in', ['known', 'known-unbound', 'insufficient']) | list | length)
-          >= (expected_hosts | int)
+        >= (expected_hosts | int)
 
     # ── Refresh token (poll may have taken >15min) ────────────────────────
     - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
