@@ -129,6 +129,43 @@
       failed_when: false
 
     # ── Step 3: Delete ROS stack (Phase 03+) ──────────────────────────────
+    # Pre-clean RAM resources that block stack deletion
+    - name: Pre-detach RAM policy from role (unblocks stack deletion)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ram
+          - DetachPolicyFromRole
+          - --PolicyName
+          - "{{ cluster_name }}-node-policy"
+          - --PolicyType
+          - Custom
+          - --RoleName
+          - "{{ node_ram_role | default('openshift-node-role') }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      failed_when: false
+      changed_when: false
+      when:
+        - teardown_from | int >= 3
+        - ros_stack_id is defined and ros_stack_id | length > 0
+
+    - name: Pre-delete RAM policy (unblocks stack deletion)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ram
+          - DeletePolicy
+          - --PolicyName
+          - "{{ cluster_name }}-node-policy"
+          - --profile
+          - "{{ aliyun_profile }}"
+      failed_when: false
+      changed_when: false
+      when:
+        - teardown_from | int >= 3
+        - ros_stack_id is defined and ros_stack_id | length > 0
+
     - name: Delete ROS stack
       ansible.builtin.command:
         argv:
@@ -146,7 +183,7 @@
         - ros_stack_id is defined and ros_stack_id | length > 0
       failed_when: false
 
-    - name: Wait for ROS stack to disappear
+    - name: Wait for ROS stack deletion (DELETE_COMPLETE or 404)
       ansible.builtin.command:
         argv:
           - aliyun
@@ -164,11 +201,22 @@
       retries: 40
       delay: 30
       until: >-
-        stack_check.rc != 0 and
-        ('StackNotFound' in stack_check.stderr or 'does not exist' in stack_check.stderr)
+        stack_check.rc != 0 or
+        (stack_check.stdout | from_json).Status in ['DELETE_COMPLETE', 'DELETE_FAILED']
       when:
         - teardown_from | int >= 3
         - ros_stack_id is defined and ros_stack_id | length > 0
+
+    - name: Warn if stack stuck in DELETE_FAILED
+      ansible.builtin.debug:
+        msg: |
+          WARNING: Stack {{ ros_stack_id }} is stuck in DELETE_FAILED.
+          Check the ROS console for remaining blocking resources and delete manually.
+      when:
+        - teardown_from | int >= 3
+        - stack_check is not skipped
+        - stack_check.rc == 0
+        - (stack_check.stdout | from_json).Status == 'DELETE_FAILED'
 
     # ── Step 4: Orphan scan (always) ──────────────────────────────────────
     - name: Scan for orphan resources tagged with cluster name
