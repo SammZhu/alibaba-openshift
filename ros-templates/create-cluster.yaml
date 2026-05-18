@@ -530,6 +530,7 @@ Resources:
       VSwitchId: !Ref PrivateVSwitch
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
+      AllocatePublicIP: false
       PrivateIpAddress: !If [IsAgentBased, !Ref RendezvousIp, !Ref 'ALIYUN::NoValue']
       RamRoleName: !Ref NodeRamRole
       Tags:
@@ -553,6 +554,7 @@ Resources:
       VSwitchId: !Ref PrivateVSwitch
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
+      AllocatePublicIP: false
       RamRoleName: !Ref NodeRamRole
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
@@ -574,6 +576,7 @@ Resources:
       VSwitchId: !Ref PrivateVSwitch2
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
+      AllocatePublicIP: false
       RamRoleName: !Ref NodeRamRole
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
@@ -617,6 +620,7 @@ Resources:
       VSwitchId: !Ref PrivateVSwitch
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: 100
+      AllocatePublicIP: false
       MaxAmount: !Ref ComputeCount
       MinAmount: !Ref ComputeCount
       RamRoleName: !Ref NodeRamRole
