@@ -108,7 +108,7 @@
       when: infra_env_id is defined and infra_env_id | length > 0
       failed_when: false
 
-    # ── Step 2: Delete ECS custom image (Phase 02+) ────────────────────────
+    # ── Step 2: Delete ECS custom image + local ISO (Phase 02+) ───────────
     - name: Delete ECS custom image
       ansible.builtin.command:
         argv:
@@ -127,6 +127,14 @@
         - teardown_from | int >= 2
         - ecs_image_id is defined and ecs_image_id | length > 0
       failed_when: false
+
+    - name: Delete local ISO file (forces fresh download on next Phase 01 run)
+      ansible.builtin.file:
+        path: "{{ iso_path }}"
+        state: absent
+      when:
+        - teardown_from | int >= 2
+        - iso_path is defined and iso_path | length > 0
 
     # ── Step 3: Delete ROS stack (Phase 03+) ──────────────────────────────
     # Pre-clean RAM resources that block stack deletion

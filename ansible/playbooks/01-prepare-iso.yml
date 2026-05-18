@@ -162,7 +162,10 @@
         - iso_url_resp.json.url is defined
         - iso_url_resp.json.url | length > 0
 
-    # ── Download (idempotent: skip if file already same size) ──────────────
+    # ── Download (idempotent: skip if file already looks like a full-iso) ───
+    # full-iso ≥ 900 MB; minimal-iso ~100-150 MB.
+    # Re-download whenever the on-disk file is absent or smaller than 900 MB
+    # so a leftover minimal ISO never gets reused after switching to full-iso.
     - name: Stat existing ISO on disk
       ansible.builtin.stat:
         path: "{{ iso_path }}"
@@ -174,13 +177,13 @@
         dest: "{{ iso_path }}"
         mode: "0644"
         force: true
-      when: not iso_stat.stat.exists or iso_stat.stat.size < (50 * 1024 * 1024)
+      when: not iso_stat.stat.exists or iso_stat.stat.size < (900 * 1024 * 1024)
 
-    - name: Confirm ISO size sanity-checks (≥ 50 MB)
+    - name: Confirm ISO size sanity-checks (≥ 900 MB for full-iso)
       ansible.builtin.stat:
         path: "{{ iso_path }}"
       register: iso_stat_final
-      failed_when: iso_stat_final.stat.size < (50 * 1024 * 1024)
+      failed_when: iso_stat_final.stat.size < (900 * 1024 * 1024)
 
     # ── Persist state ──────────────────────────────────────────────────────
     - name: Save state
