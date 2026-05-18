@@ -133,14 +133,6 @@ Parameters:
     Default: ecs.t6-c1m1.large
     Description: ECS type for the jump host. Burst-class (t6) is cheapest for occasional SSH use.
 
-  NatEipAllocationId:
-    Type: String
-    Description: |
-      Allocation ID of a pre-created EIP for NAT Gateway SNAT (e.g. eip-bp1xxxxxxxxxx).
-      AllocateEipAddress API is restricted for RAM sub-users in some regions — create the
-      EIP manually in the VPC console (Elastic IP Addresses → Allocate EIP) and paste the
-      Allocation ID here. The template will look up the public IP automatically.
-
   SshPublicKey:
     Type: String
     Default: ""
@@ -213,17 +205,19 @@ Resources:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
           Value: owned
 
-  # EIP is pre-created in the console (AllocateEipAddress API restricted for RAM sub-users).
-  # DATASOURCE looks up the existing EIP to get its public IP for SNAT entries.
-  NatEipInfo:
-    Type: DATASOURCE::VPC::Eip
+  EIP:
+    Type: ALIYUN::VPC::EIP
     Properties:
-      AllocationId: !Ref NatEipAllocationId
+      Bandwidth: 100
+      InternetChargeType: PayByTraffic
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
 
   EIPAssociation:
     Type: ALIYUN::VPC::EIPAssociation
     Properties:
-      AllocationId: !Ref NatEipAllocationId
+      AllocationId: !Ref EIP
       InstanceId: !Ref NatGateway
 
   NatSNATEntry:
@@ -232,7 +226,7 @@ Resources:
     Properties:
       SnatTableId: !GetAtt NatGateway.SNatTableId
       SourceCIDR: !Ref PrivateSubnetCidr
-      SnatIp: !GetAtt NatEipInfo.EipAddress
+      SnatIp: !GetAtt EIP.EipAddress
 
   NatSNATEntry2:
     Type: ALIYUN::VPC::SnatEntry
@@ -240,7 +234,7 @@ Resources:
     Properties:
       SnatTableId: !GetAtt NatGateway.SNatTableId
       SourceCIDR: !Ref PrivateSubnetCidr2
-      SnatIp: !GetAtt NatEipInfo.EipAddress
+      SnatIp: !GetAtt EIP.EipAddress
 
   # ── Security Groups ──────────────────────────────────────────────────────────
 
