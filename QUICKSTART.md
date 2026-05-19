@@ -420,6 +420,120 @@ oc get backup -n openshift-adp -w
 
 ---
 
+## 参数速查
+
+所有参数集中在 `ansible/group_vars/all.yml`（从 `all.yml.example` 复制过来）。
+下面是完整的参数说明和典型取值。
+
+### 集群身份
+
+| 参数 | 示例值 | 说明 |
+|---|---|---|
+| `cluster_name` | `cluster1` | 集群短名，用于 DNS / 资源名 / 标签；一旦定下来不要改 |
+| `base_domain` | `example.local` | 集群基础域名；`api.<name>.<domain>` 会被 PrivateZone 解析 |
+| `openshift_version` | `"4.20"` | 主版本号（字符串）；用于 Assisted Installer API 筛选版本 |
+
+### 阿里云基础设施
+
+| 参数 | 示例值 | 说明 |
+|---|---|---|
+| `region` | `cn-wulanchabu` | 目标 Region；整个集群所有资源都在同一个 Region |
+| `zone` | `cn-wulanchabu-a` | 主可用区；Rendezvous（第一台 master）和 VSwitch1 在这里 |
+| `zone2` | `cn-wulanchabu-b` | 备可用区；master-2/3 和 VSwitch2 在这里 |
+| `oss_bucket` | `openshift-iso-my-test` | OSS 存储桶名（**全局唯一**）；存放 Discovery ISO |
+| `aliyun_profile` | `openshift-test` | `aliyun configure` 里的 profile 名；用于调用阿里云 API |
+
+### 计算规格
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `control_plane_count` | `3` | 控制平面节点数，必须是奇数（3 或 5）|
+| `control_plane_type` | `ecs.g7.xlarge` | 控制平面实例类型（4C/16G）；生产建议 `ecs.g7.4xlarge` |
+| `compute_count` | `0` | Worker 节点数；`0` = compact 模式，master 也跑工作负载 |
+| `compute_type` | `ecs.g7.xlarge` | Worker 实例类型 |
+| `system_disk_category` | `cloud_essd` | 系统盘类型；`cloud_essd` 性能最好 |
+| `system_disk_size` | `120` | 系统盘大小（GiB）；RHCOS 最小需要 100 |
+
+> **Compact 省钱配置**：`control_plane_count: 3`，`compute_count: 0`，`control_plane_type: ecs.g7.xlarge`
+> 约 ¥4/h，验证完即销毁。
+
+### 网络
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `vpc_cidr` | `10.0.0.0/16` | VPC 地址段 |
+| `private_subnet_cidr` | `10.0.16.0/20` | 私有子网 1（zone，master-1 在此）|
+| `private_subnet_cidr2` | `10.0.32.0/20` | 私有子网 2（zone2，master-2/3 在此）|
+| `public_subnet_cidr` | `10.0.0.0/20` | 公网子网（NAT / 跳板机 / EIP 在此）|
+| `rendezvous_ip` | `10.0.16.5` | Rendezvous 节点（master-1）固定 IP；必须在 `private_subnet_cidr` 内 |
+| `ingress_vip` | `10.0.16.6` | Ingress VIP；Assisted Installer 用于绑定 ingress SLB；必须在同一子网 |
+
+### 跳板机（可选）
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `enable_jump_host` | `false` | `true` = Phase 03 创建跳板机并预装 `aliyun` CLI + `oc` + kubeconfig |
+| `jump_host_type` | `ecs.t6-c1m1.large` | 跳板机实例类型；最低配即可（1C/1G）|
+
+> 跳板机用于：从公网 SSH 进 VPC、在 VPC 内运行 `oc` 命令、查看集群状态。
+> 不需要的话保持 `false`，节省费用（~¥0.1/h）。
+
+### 本地文件路径
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `pull_secret_file` | `~/.openshift/pull-secret.json` | Red Hat Pull Secret 文件路径 |
+| `ssh_pub_key_file` | `~/.ssh/openshift_ed25519.pub` | 注入到节点的 SSH 公钥 |
+| `ssh_priv_key_file` | `~/.ssh/openshift_ed25519` | 用于 SCP / 跳板机登录的私钥 |
+| `offline_token_file` | `~/.openshift/offline-token` | Red Hat Offline Token（Assisted API 认证）|
+| `output_dir` | `~/openshift-install/<cluster_name>` | kubeconfig / 密码 / ISO 的输出目录 |
+
+### 销毁行为（Teardown）
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `teardown_from` | `3` | 销毁范围（见下表）|
+| `keep_image` | `true` | `true` = 保留 ECS 自定义镜像（重建栈时省去 ~30 分钟重新上传）|
+| `teardown_confirmed` | `false` | `true` = 跳过"请输入 yes"确认提示，适合 CI/CD |
+
+**`teardown_from` 取值说明：**
+
+| 值 | 销毁范围 | 典型用途 |
+|---|---|---|
+| `1` | 仅删除 Assisted Installer 集群 + infra-env 记录 | 快速重跑 Phase 04 而不重建基础设施 |
+| `2` | 上面 + ECS 自定义镜像（受 `keep_image` 控制）| 节省镜像存储费但保留运行中的栈；需同时加 `-e keep_image=false` 才真正删镜像，否则与 `1` 等效 |
+| `3` | 上面 + ROS 栈（VPC / ECS / SLB / NAT / EIP）| **最常用**：重建整套基础设施 |
+| `4` | 上面 + 先清理应用层（LoadBalancer SVC + PVC）| 集群已安装且 CCM/CSI 创建了额外资源时 |
+
+### 常用命令组合
+
+```sh
+# 全自动端到端安装（所有参数从 all.yml 读取）
+cd ansible && ansible-playbook playbooks/site.yml
+
+# 只重跑 Phase 04（重置集群并重装，保留栈）
+ansible-playbook playbooks/04-install-cluster.yml
+
+# 重建栈 + 重装集群（保留 ECS 镜像，节省 30min）
+ansible-playbook playbooks/99-teardown.yml -e teardown_from=3
+ansible-playbook playbooks/03-create-stack.yml
+ansible-playbook playbooks/04-install-cluster.yml
+
+# 完整销毁（删镜像、删栈、清 AI 记录），用于彻底清理账单
+ansible-playbook playbooks/99-teardown.yml -e teardown_from=3 -e keep_image=false
+
+# CI/CD 无交互销毁
+ansible-playbook playbooks/99-teardown.yml -e teardown_confirmed=true -e teardown_from=3
+
+# 只删 AI 记录（最快，不动阿里云资源；栈和镜像保留，之后重跑 Phase 01 + 04 即可）
+ansible-playbook playbooks/99-teardown.yml -e teardown_from=1
+
+# 删 AI 记录 + ECS 镜像（但保留运行中的栈；节省镜像存储费，实际场景少见）
+ansible-playbook playbooks/99-teardown.yml -e teardown_from=2 -e keep_image=false
+```
+
+---
+
 ## 销毁集群
 
 **推荐**：用自动化（一条命令搞定应用层清理 + 删栈 + 9 类资源孤儿扫描）：

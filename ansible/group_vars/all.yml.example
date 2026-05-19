@@ -48,6 +48,19 @@ installation_method:  Assisted
 # ── Repo locations on the local machine ──────────────────────────────────────
 repo_root:            "{{ playbook_dir }}/../.."
 
+# ── Teardown defaults ────────────────────────────────────────────────────────
+# These become the defaults for 99-teardown.yml so you don't need -e flags.
+# Override on the command line: -e teardown_from=1 -e teardown_confirmed=true
+#
+# teardown_from:
+#   1 → AI cluster + infra-env records only (no Aliyun cost; fast)
+#   2 → + ECS custom image
+#   3 → + ROS stack (VPC / ECS / SLB / NAT / EIP / jump host)   ← typical rebuild
+#   4 → + app-layer cleanup (LoadBalancer SVCs + PVCs) first     ← full installed cluster
+teardown_from:      3        # default scope when you run 99-teardown.yml
+keep_image:         true     # true = preserve ECS image on stack rebuild (saves ~30 min re-upload)
+teardown_confirmed: false    # true = skip "Type yes to proceed" prompt (set true for CI/CD)
+
 # ── Internal: endpoints (don't change unless instructed) ─────────────────────
 assisted_api:  https://api.openshift.com/api/assisted-install/v2
 sso_url:       https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token

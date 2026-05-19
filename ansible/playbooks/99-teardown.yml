@@ -287,10 +287,30 @@
         label: "{{ item.item.label }}"
 
     # ── Step 5: Clear state ────────────────────────────────────────────────
-    - name: Remove state.yml
+    # Phase >= 3: stack is gone — delete the whole file.
+    # Phase 1–2: stack + image (possibly) still exist; only zero-out the IDs
+    #            that were actually deleted so the next Phase 01 / 04 can run
+    #            without stumbling on stale values.
+    - name: Remove state.yml (stack deleted — full reset)
       ansible.builtin.file:
         path: "{{ playbook_dir }}/../state.yml"
         state: absent
+      when: teardown_from | int >= 3
+
+    - name: Clear deleted-resource IDs from state (partial teardown, stack preserved)
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        # Always clear AI cluster + infra-env IDs (deleted in Step 1).
+        # Also clear image IDs when keep_image=false and teardown_from >= 2.
+        new_state: >-
+          {{ {'cluster_id': '', 'infra_env_id': ''}
+             | combine(
+                 {} if (keep_image | bool or teardown_from | int < 2)
+                 else {'ecs_image_id': '', 'iso_path': ''}
+               ) }}
+      when:
+        - teardown_from | int < 3
+        - state_stat.stat.exists   # load_state already ran; reuse the stat
 
     - name: Teardown done
       ansible.builtin.debug:
