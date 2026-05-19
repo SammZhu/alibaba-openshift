@@ -752,6 +752,9 @@ Resources:
     Condition: HasJumpHost
     DependsOn:
       - NatSNATEntry
+      - RendezvousInstance
+      - ControlPlaneInstance2
+      - ControlPlaneInstance3
     Properties:
       InstanceName: !Sub '${ClusterName}-jumphost'
       InstanceType: !Ref JumpHostInstanceType
@@ -834,8 +837,10 @@ Resources:
             Tools   : oc / kubectl / openshift-install / kustomize / aliyun
             Repos   : /root/openshift-alibaba/
 
-            SSH to nodes (key pre-installed):
-              ssh core@<node-private-ip>      # 10.0.x.x
+            SSH to cluster nodes (key pre-installed):
+              ssh core@${RendezvousInstance.PrivateIp}       # master-1
+              ssh core@${ControlPlaneInstance2.PrivateIp}    # master-2
+              ssh core@${ControlPlaneInstance3.PrivateIp}    # master-3
 
             Typical workflow:
               1. export KUBECONFIG=/root/kubeconfig
