@@ -323,6 +323,34 @@ Resources:
       SourceGroupId: !Ref WorkerSecurityGroup
       Description: From workers (kubelet → API, OVN Geneve overlay)
 
+  CPSGSSHFromJumpHost:
+    Type: ALIYUN::ECS::SecurityGroupIngress
+    Condition: HasJumpHost
+    DependsOn:
+      - ControlPlaneSecurityGroup
+      - JumpHostSecurityGroup
+    Properties:
+      SecurityGroupId: !Ref ControlPlaneSecurityGroup
+      IpProtocol: tcp
+      PortRange: 22/22
+      NicType: intranet
+      SourceGroupId: !Ref JumpHostSecurityGroup
+      Description: SSH from jump host to master nodes (core user)
+
+  WorkerSGSSHFromJumpHost:
+    Type: ALIYUN::ECS::SecurityGroupIngress
+    Condition: HasJumpHost
+    DependsOn:
+      - WorkerSecurityGroup
+      - JumpHostSecurityGroup
+    Properties:
+      SecurityGroupId: !Ref WorkerSecurityGroup
+      IpProtocol: tcp
+      PortRange: 22/22
+      NicType: intranet
+      SourceGroupId: !Ref JumpHostSecurityGroup
+      Description: SSH from jump host to worker nodes (core user)
+
   WorkerSGFromMasters:
     Type: ALIYUN::ECS::SecurityGroupIngress
     DependsOn:
