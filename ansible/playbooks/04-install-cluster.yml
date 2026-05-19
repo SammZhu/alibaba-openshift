@@ -29,10 +29,14 @@
           - dynamic_manifest_file is defined
         fail_msg: "Run Phases 01-03 first"
 
-    # ── Reset cluster if it is in a terminal error state ──────────────────
-    # Allows Phase 04 to be re-run against an existing stack without a full
-    # teardown.  cancel → reset returns the cluster to pre-install state so
-    # hosts can re-register and installation can be retried.
+    # ── Auto-reset: cancel → reset → reboot nodes ────────────────────────
+    # Re-running Phase 04 against the same ROS stack is fully supported.
+    # If the cluster is in any post-install-trigger state the playbook:
+    #   1. Cancels the in-progress / failed installation (AI side)
+    #   2. Resets the cluster back to pre-install state (AI side)
+    #   3. Reboots all cluster ECS nodes (not jump host) so they re-enter
+    #      the discovery agent and re-register with the AI infra-env.
+    # The existing host-poll loop then waits for them to come back as 'known'.
     - name: Get current cluster status
       ansible.builtin.uri:
         url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
@@ -40,21 +44,69 @@
         return_content: true
       register: cluster_pre
 
-    - name: Cancel failed/stuck installation
+    - name: Set needs_reset flag
+      ansible.builtin.set_fact:
+        needs_reset: >-
+          {{ cluster_pre.json.status in [
+               'error', 'cancelled', 'installed',
+               'installing', 'installing-pending-user-action', 'finalizing'
+             ] }}
+
+    - name: Cancel installation (AI)
       ansible.builtin.uri:
         url: "{{ assisted_api }}/clusters/{{ cluster_id }}/actions/cancel"
         method: POST
         headers: { Authorization: "Bearer {{ ai_access_token }}" }
         status_code: [202, 409]
-      when: cluster_pre.json.status in ['error', 'cancelled', 'installing', 'installing-pending-user-action']
+      when: needs_reset | bool
 
-    - name: Reset cluster to pre-install state
+    - name: Reset cluster to pre-install state (AI)
       ansible.builtin.uri:
         url: "{{ assisted_api }}/clusters/{{ cluster_id }}/actions/reset"
         method: POST
         headers: { Authorization: "Bearer {{ ai_access_token }}" }
         status_code: [202, 409]
-      when: cluster_pre.json.status in ['error', 'cancelled', 'installing', 'installing-pending-user-action']
+      when: needs_reset | bool
+
+    - name: List all ECS instances in cluster VPC
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeInstances
+          - --RegionId
+          - "{{ region }}"
+          - --VpcId
+          - "{{ vpc_id }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: vpc_instances_raw
+      changed_when: false
+      when: needs_reset | bool
+
+    - name: Reboot cluster nodes (master + worker, skip jump host)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - RebootInstance
+          - --RegionId
+          - "{{ region }}"
+          - --InstanceId
+          - "{{ item }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      loop: >-
+        {{ (vpc_instances_raw.stdout | from_json).Instances.Instance
+           | rejectattr('InstanceName', 'search', 'jumphost')
+           | map(attribute='InstanceId') | list }}
+      loop_control: { label: "{{ item }}" }
+      when: needs_reset | bool
+
+    - name: Wait 60 s for nodes to start rebooting before polling
+      ansible.builtin.pause:
+        seconds: 60
+      when: needs_reset | bool
 
     # ── Wait for hosts to register ─────────────────────────────────────────
     - name: Poll for {{ expected_hosts }} hosts to discover
