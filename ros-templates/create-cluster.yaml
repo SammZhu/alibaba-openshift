@@ -822,61 +822,72 @@ Resources:
             SSHCONF
             chmod 600 /root/.ssh/config
 
-            # 2. OS packages
+            # 2. Cluster info MOTD — written BEFORE tool downloads so it always appears
+            # even if a later curl/git step fails.
+            # Alibaba Linux 3 uses update-motd.d (dynamic MOTD): scripts in that
+            # directory are executed at login and their output is appended to the
+            # banner, so writing directly to /etc/motd is silently overwritten.
+            # Creating an executable script in update-motd.d is the correct fix.
+            # We also run it once immediately to seed a static /etc/motd as fallback
+            # for SSH clients that read the file directly.
+            mkdir -p /etc/update-motd.d
+            cat > /etc/update-motd.d/99-openshift-cluster <<'ENDSCRIPT'
+            #!/bin/bash
+            echo ""
+            echo "──────────────────────────────────────────────────────────"
+            echo " OpenShift on Alibaba Cloud — Jump Host"
+            echo " Cluster : ${ClusterName}.${BaseDomain}"
+            echo " API SLB : api.${ClusterName}.${BaseDomain}:6443 (PrivateZone)"
+            echo ""
+            echo " Tools   : oc / kubectl / openshift-install / kustomize / aliyun"
+            echo " Repos   : /root/openshift-alibaba/"
+            echo ""
+            echo " SSH to cluster nodes (key pre-installed):"
+            echo "   ssh core@${RendezvousInstance.PrivateIp}      # master-1"
+            echo "   ssh core@${ControlPlaneInstance2.PrivateIp}   # master-2"
+            echo "   ssh core@${ControlPlaneInstance3.PrivateIp}   # master-3"
+            echo ""
+            echo " Typical workflow:"
+            echo "   1. export KUBECONFIG=/root/kubeconfig"
+            echo "   2. oc get nodes"
+            echo "   3. cd /root/openshift-alibaba/alibaba-openshift"
+            echo "   4. ansible-playbook ansible/playbooks/05-deploy-post-install.yml"
+            echo "──────────────────────────────────────────────────────────"
+            ENDSCRIPT
+            chmod 0755 /etc/update-motd.d/99-openshift-cluster
+            /etc/update-motd.d/99-openshift-cluster > /etc/motd
+
+            # 3. OS packages
             yum install -y --setopt=tsflags=nodocs git tar gzip jq curl bash-completion
 
-            # 3. OpenShift CLI (RHEL 8 compat — works on Alibaba Linux 3)
+            # 4. OpenShift CLI (RHEL 8 compat — works on Alibaba Linux 3)
             cd /tmp
             curl -sL -O https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest-4.20/openshift-client-linux-amd64-rhel8.tar.gz
             tar -xzf openshift-client-linux-amd64-rhel8.tar.gz
             install -m 0755 oc kubectl /usr/local/bin/
             rm -f openshift-client-linux-amd64-rhel8.tar.gz oc kubectl README.md
 
-            # 4. openshift-install (generic linux)
+            # 5. openshift-install (generic linux)
             curl -sL -O https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest-4.20/openshift-install-linux.tar.gz
             tar -xzf openshift-install-linux.tar.gz
             install -m 0755 openshift-install /usr/local/bin/
             rm -f openshift-install-linux.tar.gz openshift-install README.md
 
-            # 5. kustomize
+            # 6. kustomize
             curl -sL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.5.0/kustomize_v5.5.0_linux_amd64.tar.gz" \
               | tar -xz -C /usr/local/bin/
             chmod 0755 /usr/local/bin/kustomize
 
-            # 6. aliyun CLI
+            # 7. aliyun CLI
             curl -sL -o /tmp/aliyun-cli.tgz https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz
             tar -xzf /tmp/aliyun-cli.tgz -C /usr/local/bin/
             rm /tmp/aliyun-cli.tgz
 
-            # 7. Clone project repos
+            # 8. Clone project repos
             mkdir -p /root/openshift-alibaba && cd /root/openshift-alibaba
             git clone https://github.com/SammZhu/alibaba-openshift.git || true
             git clone https://github.com/SammZhu/alibaba-cloud-csi-operator.git || true
             git clone https://github.com/SammZhu/openshift-capi-alicloud.git || true
-
-            # 8. Welcome message
-            cat > /etc/motd <<MOTD
-
-            ──────────────────────────────────────────────────────────
-            OpenShift on Alibaba Cloud — Jump Host
-            Cluster : ${ClusterName}.${BaseDomain}
-            API SLB : api.${ClusterName}.${BaseDomain}:6443 (PrivateZone)
-
-            Tools   : oc / kubectl / openshift-install / kustomize / aliyun
-            Repos   : /root/openshift-alibaba/
-
-            SSH to cluster nodes (key pre-installed):
-              ssh core@${RendezvousInstance.PrivateIp}       # master-1
-              ssh core@${ControlPlaneInstance2.PrivateIp}    # master-2
-              ssh core@${ControlPlaneInstance3.PrivateIp}    # master-3
-
-            Typical workflow:
-              1. export KUBECONFIG=/root/kubeconfig
-              2. oc get nodes
-              3. cd /root/openshift-alibaba/alibaba-openshift
-              4. ansible-playbook ansible/playbooks/05-deploy-post-install.yml
-            ──────────────────────────────────────────────────────────
-            MOTD
 
             # 9. Marker file so 'cloud-init status' shows readiness
             touch /var/log/userdata.done
