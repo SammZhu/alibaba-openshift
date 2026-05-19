@@ -498,12 +498,16 @@ oc get backup -n openshift-adp -w
 
 **`teardown_from` 取值说明：**
 
-| 值 | 销毁范围 | 典型用途 |
-|---|---|---|
-| `1` | 仅删除 Assisted Installer 集群 + infra-env 记录 | 快速重跑 Phase 04 而不重建基础设施 |
-| `2` | 上面 + ECS 自定义镜像（受 `keep_image` 控制）| 节省镜像存储费但保留运行中的栈；需同时加 `-e keep_image=false` 才真正删镜像，否则与 `1` 等效 |
-| `3` | 上面 + ROS 栈（VPC / ECS / SLB / NAT / EIP）| **最常用**：重建整套基础设施 |
-| `4` | 上面 + 先清理应用层（LoadBalancer SVC + PVC）| 集群已安装且 CCM/CSI 创建了额外资源时 |
+| 值 | 销毁范围 | `keep_image=true`（默认）后续步骤 | `keep_image=false` 后续步骤 |
+|---|---|---|---|
+| `1` | AI 集群 + infra-env 记录 | Phase 01 → 02 → 03 → 04（infra-env 已删，ECS image 凭证失效，必须完整重建）| 同左 |
+| `2` | 上面 + ECS 镜像（受 `keep_image` 控制）| 同 `1`（keep_image=true 时镜像未删，效果与 `1` 相同）| Phase 01 → 02 → 03 → 04 |
+| `3` | 上面 + ROS 栈（VPC / ECS / SLB / NAT / EIP）| **Phase 03 → 04**（AI 记录 + image 保留，直接重建栈，节省 ~30 min 重新导入）| Phase 01 → 02 → 03 → 04 |
+| `4` | 上面 + 先清理应用层（LB SVC + PVC）| Phase 03 → 04 | Phase 01 → 02 → 03 → 04 |
+
+> **`keep_image=true` 的正确含义**：ECS image 里 bake-in 了 infra-env 的注册 token。删 infra-env 而保留 image 会让 image 变废品（节点无法向新 infra-env 注册）。所以 `keep_image=true` 时 AI 记录（cluster + infra-env）也一起保留，下次 Phase 03 建新栈时节点用同一 image 和同一 infra-env 重新注册，Phase 04 auto-reset 处理集群状态。
+>
+> **Phase 04 auto-reset**：绝大多数安装失败（error/cancelled/installing 状态）直接重跑 Phase 04 即可，不需要 teardown。teardown 只在需要重建基础设施时才用。
 
 ### 常用命令组合
 
@@ -511,25 +515,37 @@ oc get backup -n openshift-adp -w
 # 全自动端到端安装（所有参数从 all.yml 读取）
 cd ansible && ansible-playbook playbooks/site.yml
 
-# 只重跑 Phase 04（重置集群并重装，保留栈）
+# ── 安装失败时的恢复（最常用）──────────────────────────────────────────
+# 安装中途失败（error/cancelled/installing-pending-user-action 等状态）
+# 直接重跑 Phase 04，auto-reset 自动处理，不需要 teardown
 ansible-playbook playbooks/04-install-cluster.yml
 
-# 重建栈 + 重装集群（保留 ECS 镜像，节省 30min）
+# ── 重建栈但保留 image（节省 ~30 min 重新导入，最常用的 teardown）────
+# keep_image=true（默认）：AI 记录 + image 同时保留（凭证配对，缺一不可）
+# 删栈 → 重建栈 → Phase 04 auto-reset 重装
 ansible-playbook playbooks/99-teardown.yml -e teardown_from=3
 ansible-playbook playbooks/03-create-stack.yml
 ansible-playbook playbooks/04-install-cluster.yml
 
-# 完整销毁（删镜像、删栈、清 AI 记录），用于彻底清理账单
+# ── 完整销毁（删 AI + image + 栈），需要全部重新跑 ────────────────────
 ansible-playbook playbooks/99-teardown.yml -e teardown_from=3 -e keep_image=false
+ansible-playbook playbooks/01-prepare-iso.yml
+ansible-playbook playbooks/02-import-image.yml
+ansible-playbook playbooks/03-create-stack.yml
+ansible-playbook playbooks/04-install-cluster.yml
 
-# CI/CD 无交互销毁
-ansible-playbook playbooks/99-teardown.yml -e teardown_confirmed=true -e teardown_from=3
+# ── 集群已安装，含应用层清理，然后完整重建 ──────────────────────────
+ansible-playbook playbooks/99-teardown.yml -e teardown_from=4 -e keep_image=false
+# （然后同上，Phase 01 → 04）
 
-# 只删 AI 记录（最快，不动阿里云资源；栈和镜像保留，之后重跑 Phase 01 + 04 即可）
+# ── CI/CD 无交互完整销毁 ─────────────────────────────────────────────
+ansible-playbook playbooks/99-teardown.yml -e teardown_confirmed=true -e teardown_from=3 -e keep_image=false
+
+# ── 仅清 AI 记录（teardown_from=1）──────────────────────────────────
+# 删掉 AI cluster + infra-env；ECS 镜像 + 栈不动
+# 注意：infra-env 已删，ECS image 凭证失效，必须完整重建
+# 用途：清理孤儿 AI 记录，之后跑完整流程 01 → 02 → 03 → 04
 ansible-playbook playbooks/99-teardown.yml -e teardown_from=1
-
-# 删 AI 记录 + ECS 镜像（但保留运行中的栈；节省镜像存储费，实际场景少见）
-ansible-playbook playbooks/99-teardown.yml -e teardown_from=2 -e keep_image=false
 ```
 
 ---

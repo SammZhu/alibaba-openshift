@@ -162,10 +162,13 @@
         - iso_url_resp.json.url is defined
         - iso_url_resp.json.url | length > 0
 
-    # ── Download (idempotent: skip if file already looks like a full-iso) ───
+    # ── Download (idempotent when infra-env is reused; forced when new) ──────
     # full-iso ≥ 900 MB; minimal-iso ~100-150 MB.
-    # Re-download whenever the on-disk file is absent or smaller than 900 MB
-    # so a leftover minimal ISO never gets reused after switching to full-iso.
+    # The ISO bakes in the infra-env registration token at generation time.
+    # If a NEW infra-env was just created (infra_create not skipped), the token
+    # has changed and any on-disk ISO from a previous run is stale — always
+    # re-download.  Only skip when the infra-env was ADOPTED (same ID, same token)
+    # and the on-disk file looks like a valid full-iso (≥ 900 MB).
     - name: Stat existing ISO on disk
       ansible.builtin.stat:
         path: "{{ iso_path }}"
@@ -177,7 +180,10 @@
         dest: "{{ iso_path }}"
         mode: "0644"
         force: true
-      when: not iso_stat.stat.exists or iso_stat.stat.size < (900 * 1024 * 1024)
+      when: >-
+        not iso_stat.stat.exists or
+        iso_stat.stat.size < (900 * 1024 * 1024) or
+        infra_create is not skipped
 
     - name: Confirm ISO size sanity-checks (≥ 900 MB for full-iso)
       ansible.builtin.stat:

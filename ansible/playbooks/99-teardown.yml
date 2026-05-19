@@ -17,9 +17,14 @@
 #        (use when OpenShift is installed and CCM/CSI may have created extra resources)
 #
 # keep_image (default: true):
-#   true  → skip ECS image + local ISO deletion even when teardown_from >= 2
-#           Useful when rebuilding the stack but reusing the same discovery ISO image.
-#   false → delete image and local ISO as normal
+#   true  → when teardown_from >= 3: SKIP deleting AI cluster + infra-env + ECS image + local ISO.
+#            Only the Aliyun stack is deleted.  Next step: Phase 03 → Phase 04 (auto-reset).
+#            The infra-env MUST be kept alongside the image — the discovery agent embedded in
+#            the ECS image calls back to its specific infra-env ID.  Deleting the infra-env
+#            while keeping the image leaves a broken image whose nodes can never register.
+#            when teardown_from < 3: has no effect (image not deleted at these levels anyway).
+#   false → delete AI records + ECS image + local ISO per teardown_from level (full rebuild).
+#            Next step: Phase 01 → 02 → 03 → 04.
 
 - name: Teardown
   hosts: local
@@ -34,13 +39,14 @@
     - name: Show teardown scope
       ansible.builtin.debug:
         msg: |
-          Teardown scope: phases 1–{{ teardown_from }}
+          Teardown scope: phases 1–{{ teardown_from }}{% if keep_image | bool and teardown_from | int >= 3 %}  [keep_image=true: AI records + image preserved]{% endif %}
+
           {% if teardown_from | int >= 4 %}  Step 0 : app-layer cleanup (SLBs / PVCs via jump host){% endif %}
-            Step 1 : Delete Assisted cluster record
-          {% if teardown_from | int >= 2 %}  Step 2 : Delete ECS custom image{% endif %}
+          {% if not (keep_image | bool and teardown_from | int >= 3) %}  Step 1 : Delete Assisted cluster + infra-env records{% else %}  Step 1 : SKIPPED — AI records preserved (keep_image=true; infra-env must match the ECS image){% endif %}
+          {% if teardown_from | int >= 2 and not keep_image | bool %}  Step 2 : Delete ECS custom image + local ISO{% elif teardown_from | int >= 2 %}  Step 2 : SKIPPED — ECS image preserved (keep_image=true){% endif %}
           {% if teardown_from | int >= 3 %}  Step 3 : Delete ROS stack (VPC / ECS / SLB / NAT / EIP){% endif %}
             Step 4 : Orphan scan
-            Step 5 : Clear state.yml
+          {% if keep_image | bool and teardown_from | int >= 3 %}  Step 5 : Partial state clear (stack IDs reset; AI + image IDs kept → Phase 03 → 04 next){% elif teardown_from | int >= 3 %}  Step 5 : Delete state.yml (full rebuild needed → Phase 01 → 02 → 03 → 04 next){% else %}  Step 5 : Partial state clear (stack preserved){% endif %}
 
     - name: Confirm teardown (skip with -e teardown_confirmed=true)
       ansible.builtin.pause:
@@ -93,9 +99,17 @@
           ansible.builtin.pause:
             seconds: 180
 
-    # ── Step 1: Delete Assisted cluster record (always) ────────────────────
+    # ── Step 1: Delete Assisted cluster + infra-env records ───────────────
+    # Skipped when keep_image=true AND teardown_from >= 3:
+    #   The ECS image bakes in the infra-env discovery token at import time.
+    #   Deleting the infra-env invalidates the image — nodes booting from it
+    #   can no longer register with the Assisted API.  Keeping both lets the
+    #   next Phase 03 create fresh ECS instances from the same image, and
+    #   Phase 04 auto-reset will re-trigger registration + install.
     - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
-      when: cluster_id is defined and cluster_id | length > 0
+      when:
+        - cluster_id is defined and cluster_id | length > 0
+        - not (keep_image | bool and teardown_from | int >= 3)
 
     - name: Delete Assisted cluster record
       ansible.builtin.uri:
@@ -103,7 +117,9 @@
         method: DELETE
         headers: { Authorization: "Bearer {{ ai_access_token }}" }
         status_code: [204, 404, 405]
-      when: cluster_id is defined and cluster_id | length > 0
+      when:
+        - cluster_id is defined and cluster_id | length > 0
+        - not (keep_image | bool and teardown_from | int >= 3)
       failed_when: false
 
     - name: Delete Assisted infra-env record
@@ -112,8 +128,20 @@
         method: DELETE
         headers: { Authorization: "Bearer {{ ai_access_token }}" }
         status_code: [204, 404, 405]
-      when: infra_env_id is defined and infra_env_id | length > 0
+      when:
+        - infra_env_id is defined and infra_env_id | length > 0
+        - not (keep_image | bool and teardown_from | int >= 3)
       failed_when: false
+
+    - name: Note — AI records preserved (keep_image=true)
+      ansible.builtin.debug:
+        msg: >-
+          AI cluster ({{ cluster_id | default('?') }}) + infra-env
+          ({{ infra_env_id | default('?') }}) preserved alongside ECS image.
+          Next step: Phase 03 (new stack) → Phase 04 (auto-reset + install).
+      when:
+        - teardown_from | int >= 3
+        - keep_image | bool
 
     # ── Step 2: Delete ECS custom image + local ISO (Phase 02+) ───────────
     # Skipped when keep_image=true (default) so the image can be reused
@@ -149,7 +177,10 @@
 
     - name: Note — ECS image preserved (keep_image=true)
       ansible.builtin.debug:
-        msg: "ECS image {{ ecs_image_id | default('(unknown)') }} kept. Re-run Phase 03 with the same image. Use -e keep_image=false to also delete it."
+        msg: >-
+          ECS image {{ ecs_image_id | default('(unknown)') }} + local ISO kept.
+          AI infra-env also preserved (see Step 1 note above) — image credentials remain valid.
+          Use -e keep_image=false to delete image + AI records and force a full rebuild.
       when:
         - teardown_from | int >= 2
         - keep_image | bool
@@ -287,20 +318,61 @@
         label: "{{ item.item.label }}"
 
     # ── Step 5: Clear state ────────────────────────────────────────────────
-    # Phase >= 3: stack is gone — delete the whole file.
-    # Phase 1–2: stack + image (possibly) still exist; only zero-out the IDs
-    #            that were actually deleted so the next Phase 01 / 04 can run
-    #            without stumbling on stale values.
-    - name: Remove state.yml (stack deleted — full reset)
+    # Three cases:
+    #
+    # Case A  teardown_from >= 3, keep_image=false  → full teardown
+    #         Everything deleted (AI + image + stack).  Wipe state.yml.
+    #         Next: Phase 01 → 02 → 03 → 04
+    #
+    # Case B  teardown_from >= 3, keep_image=true   → stack-only teardown
+    #         Only the Aliyun stack was deleted; AI records + image preserved.
+    #         Clear stack-derived IDs so Phase 03 creates a fresh stack,
+    #         but keep AI + image IDs so Phase 03/04 can reuse them.
+    #         Next: Phase 03 → Phase 04 (auto-reset handles cluster state)
+    #
+    # Case C  teardown_from < 3  → partial teardown (stack alive)
+    #         Clear only the IDs that were actually deleted (AI cluster + infra-env,
+    #         and optionally image IDs when keep_image=false + teardown_from >= 2).
+    #         Preserve all stack-derived IDs for Phase 03/04 reuse.
+    #         Next: Phase 01 → 02 → 03 → 04 (infra-env changed; new ECS image needed)
+
+    # Case A: full teardown
+    - name: Remove state.yml (full teardown — all resources deleted)
       ansible.builtin.file:
         path: "{{ playbook_dir }}/../state.yml"
         state: absent
-      when: teardown_from | int >= 3
+      when:
+        - teardown_from | int >= 3
+        - not keep_image | bool
 
+    # Case B: stack deleted, AI records + image preserved
+    - name: Clear stack IDs from state (stack rebuilt, AI records + image reused)
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        new_state:
+          ros_stack_id: ''
+          vpc_id: ''
+          private_vswitch: ''
+          api_slb_ip: ''
+          worker_sg: ''
+          node_ram_role: ''
+          jump_host_ip: ''
+          master_ip1: ''
+          master_ip2: ''
+          master_ip3: ''
+          dynamic_manifest_file: ''
+          kubeconfig_path: ''
+          kubeadmin_password_path: ''
+      when:
+        - teardown_from | int >= 3
+        - keep_image | bool
+        - state_stat.stat.exists
+
+    # Case C: partial teardown (teardown_from < 3, stack preserved)
     - name: Clear deleted-resource IDs from state (partial teardown, stack preserved)
       ansible.builtin.include_tasks: ../tasks/save_state.yml
       vars:
-        # Always clear AI cluster + infra-env IDs (deleted in Step 1).
+        # Always clear AI cluster + infra-env IDs (deleted in Step 1 for teardown_from < 3).
         # Also clear image IDs when keep_image=false and teardown_from >= 2.
         new_state: >-
           {{ {'cluster_id': '', 'infra_env_id': ''}
@@ -310,7 +382,7 @@
                ) }}
       when:
         - teardown_from | int < 3
-        - state_stat.stat.exists   # load_state already ran; reuse the stat
+        - state_stat.stat.exists
 
     - name: Teardown done
       ansible.builtin.debug:
