@@ -70,6 +70,26 @@
       loop_control: { label: "{{ item.id }} -> {{ item.role }}" }
 
     # ── Upload custom manifests ───────────────────────────────────────────
+    # The AI API does NOT return 409 for duplicate names — it appends a suffix
+    # (e.g. foo-00.yaml, foo-01.yaml) causing "multiple manifests" install errors.
+    # Fix: list all existing manifests, delete them, then upload fresh.
+    - name: List existing custom manifests
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}/manifests"
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        return_content: true
+      register: existing_manifests
+
+    - name: Delete existing custom manifests (idempotent cleanup)
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}/manifests?folder={{ item.folder }}&file_name={{ item.file_name }}"
+        method: DELETE
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        status_code: [200, 404]
+      loop: "{{ existing_manifests.json }}"
+      loop_control: { label: "{{ item.folder }}/{{ item.file_name }}" }
+      when: existing_manifests.json | length > 0
+
     - name: Slurp each manifest
       ansible.builtin.slurp:
         src: "{{ item.src }}"
@@ -87,7 +107,7 @@
         # Use to_json to prevent jinja2_native from misinterpreting content field
         body: "{{ {'folder': item.item.folder, 'file_name': item.item.name, 'content': item.content} | to_json }}"
         body_format: raw
-        status_code: [201, 409]      # 409 = already exists, idempotent
+        status_code: [201]
       loop: "{{ manifest_slurps.results }}"
       loop_control: { label: "{{ item.item.folder }}/{{ item.item.name }}" }
 

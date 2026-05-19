@@ -545,11 +545,22 @@
         - { ip: "{{ master_ip1 }}", zone_id: "{{ reverse_zone_id1 }}", idx: "1" }
         - { ip: "{{ master_ip2 }}", zone_id: "{{ reverse_zone_id1 }}", idx: "2" }
         - { ip: "{{ master_ip3 }}", zone_id: "{{ reverse_zone_id2 }}", idx: "3" }
+      register: ptr_results
       failed_when: false
       changed_when: true
       when:
         - item.ip | length > 0
         - item.zone_id | length > 0
+
+    - name: Warn on PTR record failures (non-fatal — record may already exist)
+      ansible.builtin.debug:
+        msg: "WARNING: PTR for master-{{ item.item.idx }} ({{ item.item.ip }}) rc={{ item.rc }} stderr={{ item.stderr | default('') }}"
+      loop: "{{ ptr_results.results }}"
+      loop_control: { label: "master-{{ item.item.idx }}" }
+      when:
+        - item is not skipped
+        - item.rc != 0
+        - '"Record already exists" not in (item.stderr | default(""))'
 
     # ── Save ROS-generated CCM ConfigMap to disk for Phase 04 ──────────────
     - name: Save alibaba-ccm-config.yaml
