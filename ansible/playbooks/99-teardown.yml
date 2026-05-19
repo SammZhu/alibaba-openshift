@@ -258,10 +258,15 @@
       failed_when: false
       retries: 40
       delay: 30
+      # rc != 0 alone is NOT sufficient — it also fires on transient network errors.
+      # Only treat rc != 0 as "deleted" when the API explicitly says StackNotFound.
+      # This prevents a flaky curl from fooling us into thinking the stack is gone.
       until: >-
-        stack_check.rc != 0 or
-        (stack_check.stdout | length > 0 and
-         (stack_check.stdout | from_json).Status in ['DELETE_COMPLETE', 'DELETE_FAILED'])
+        (stack_check.rc == 0 and
+         stack_check.stdout | length > 0 and
+         (stack_check.stdout | from_json).Status in ['DELETE_COMPLETE', 'DELETE_FAILED']) or
+        (stack_check.rc != 0 and
+         'StackNotFound' in (stack_check.stderr | default('')))
       when:
         - teardown_from | int >= 3
         - ros_stack_id is defined and ros_stack_id | length > 0
@@ -275,7 +280,39 @@
         - teardown_from | int >= 3
         - stack_check is not skipped
         - stack_check.rc == 0
+        - stack_check.stdout | length > 0
         - (stack_check.stdout | from_json).Status == 'DELETE_FAILED'
+
+    # Record deletion outcome so state-clear tasks can gate on confirmed success.
+    # stack_deleted=true only when:
+    #   (a) no stack ID in state (never created), OR
+    #   (b) API returned DELETE_COMPLETE, OR
+    #   (c) API returned 404 with StackNotFound (already gone).
+    # Anything else (DELETE_FAILED, poll timeout, transient error) leaves
+    # stack_deleted=false so we do NOT wipe state and the run is re-tryable.
+    - name: Record stack deletion outcome
+      ansible.builtin.set_fact:
+        stack_deleted: >-
+          {{ ros_stack_id is not defined or ros_stack_id | length == 0 or
+             (stack_check is not skipped and (
+               (stack_check.rc != 0 and 'StackNotFound' in (stack_check.stderr | default(''))) or
+               (stack_check.rc == 0 and stack_check.stdout | length > 0 and
+                (stack_check.stdout | from_json).Status == 'DELETE_COMPLETE')
+             )) }}
+      when: teardown_from | int >= 3
+
+    - name: Abort state clear — stack not confirmed deleted
+      ansible.builtin.fail:
+        msg: >-
+          Stack {{ ros_stack_id }} was NOT confirmed deleted
+          (status: {{ (stack_check.stdout | from_json).Status
+                      if (stack_check is not skipped and stack_check.rc == 0
+                          and stack_check.stdout | length > 0)
+                      else 'unknown / poll timed out' }}).
+          state.yml NOT modified — fix the stack manually and re-run teardown.
+      when:
+        - teardown_from | int >= 3
+        - not (stack_deleted | default(false) | bool)
 
     # ── Step 4: Orphan scan (always) ──────────────────────────────────────
     - name: Scan for orphan resources tagged with cluster name
@@ -345,6 +382,7 @@
       when:
         - teardown_from | int >= 3
         - not keep_image | bool
+        - stack_deleted | default(false) | bool
 
     # Case B: stack deleted, AI records + image preserved
     - name: Clear stack IDs from state (stack rebuilt, AI records + image reused)
@@ -367,6 +405,7 @@
       when:
         - teardown_from | int >= 3
         - keep_image | bool
+        - stack_deleted | default(false) | bool
         - state_stat.stat.exists
 
     # Case C: partial teardown (teardown_from < 3, stack preserved)
