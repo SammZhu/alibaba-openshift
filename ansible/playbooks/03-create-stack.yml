@@ -552,6 +552,9 @@
           a selectattr mismatch.  Check the ListStacks output and re-run.
       when: stack_ready | default(false) | bool
 
+    # CRITICAL: register to a different name (NOT stack_poll).  A skipped task
+    # with `register: stack_poll` overwrites the variable with a skip-marker
+    # dict, wiping the value we set above and breaking the downstream assert.
     - name: Fetch full stack detail for adopted-by-name CREATE_COMPLETE stack
       ansible.builtin.command:
         argv:
@@ -564,12 +567,23 @@
           - "{{ region }}"
           - --profile
           - "{{ aliyun_profile }}"
-      register: stack_poll
+      register: stack_refetch
       changed_when: false
       when:
         - stack_ready | default(false) | bool
         - ros_stack_id | length > 0
         - stack_poll is not defined or stack_poll.stdout | default('') | length == 0
+
+    - name: Update stack_poll with refetched detail (if refetch ran)
+      ansible.builtin.set_fact:
+        stack_poll:
+          stdout: "{{ stack_refetch.stdout }}"
+          stderr: "{{ stack_refetch.stderr | default('') }}"
+          rc: "{{ stack_refetch.rc }}"
+          changed: false
+      when:
+        - stack_refetch is defined
+        - stack_refetch is not skipped
 
     # Diagnostic — surface the actual stack_poll content so failures are debuggable.
     - name: Debug — stack_poll content before assert
