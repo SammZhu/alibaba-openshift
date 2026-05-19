@@ -16,8 +16,11 @@
         name: alibaba-ccm-config.yaml
         src: "{{ dynamic_manifest_file }}"
       - folder: openshift
-        name: 03-machineconfig-providerid.yaml
-        src: "{{ repo_root }}/custom_manifests/03-machineconfig-providerid.yaml"
+        name: 03-machineconfig-providerid-master.yaml
+        src: "{{ repo_root }}/custom_manifests/03-machineconfig-providerid-master.yaml"
+      - folder: openshift
+        name: 03-machineconfig-providerid-worker.yaml
+        src: "{{ repo_root }}/custom_manifests/03-machineconfig-providerid-worker.yaml"
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
     - ansible.builtin.include_tasks: ../tasks/assisted_token.yml

@@ -1,69 +1,11 @@
 ---
 # MachineConfig: inject kubelet ProviderID from Alibaba Cloud ECS metadata
+# Applied to worker nodes at first boot.
 # Format: alicloud://<region>.<instance-id>  (matches cloud-provider-alibaba-cloud CCM NodeFromProviderID)
-# Applied to both master and worker nodes at first boot.
 apiVersion: machineconfiguration.openshift.io/v1
 kind: MachineConfig
 metadata:
-  name: 10-alibaba-providerid
-  labels:
-    machineconfiguration.openshift.io/role: master
-spec:
-  config:
-    ignition:
-      version: 3.4.0
-    systemd:
-      units:
-        - name: alibaba-providerid.service
-          enabled: true
-          contents: |
-            [Unit]
-            Description=Set Alibaba Cloud ECS ProviderID for kubelet
-            Before=kubelet.service
-            After=network-online.target
-            ConditionPathExists=!/etc/kubernetes/node-providerid
-
-            [Service]
-            Type=oneshot
-            RemainAfterExit=yes
-            ExecStart=/usr/local/bin/alibaba-providerid.sh
-
-            [Install]
-            WantedBy=multi-user.target
-    storage:
-      files:
-        - path: /usr/local/bin/alibaba-providerid.sh
-          mode: 0755
-          contents:
-            inline: |
-              #!/bin/bash
-              set -euo pipefail
-
-              METADATA_URL="http://100.100.100.200/latest/meta-data"
-              REGION=$(curl -sf "${METADATA_URL}/region-id")
-              INSTANCE_ID=$(curl -sf "${METADATA_URL}/instance-id")
-
-              if [[ -z "${REGION}" || -z "${INSTANCE_ID}" ]]; then
-                echo "Failed to fetch Alibaba Cloud metadata" >&2
-                exit 1
-              fi
-
-              PROVIDER_ID="alicloud://${REGION}.${INSTANCE_ID}"
-              echo "Setting ProviderID: ${PROVIDER_ID}"
-
-              mkdir -p /etc/kubernetes
-              cat > /etc/systemd/system/kubelet.service.d/20-providerid.conf <<EOF
-              [Service]
-              Environment="KUBELET_PROVIDERID=${PROVIDER_ID}"
-              EOF
-
-              touch /etc/kubernetes/node-providerid
-              systemctl daemon-reload
----
-apiVersion: machineconfiguration.openshift.io/v1
-kind: MachineConfig
-metadata:
-  name: 10-alibaba-providerid
+  name: 10-alibaba-providerid-worker
   labels:
     machineconfiguration.openshift.io/role: worker
 spec:
