@@ -304,17 +304,19 @@
           - {ParameterKey: InstallationMethod,       ParameterValue: "{{ installation_method }}"}
           - {ParameterKey: ImageId,                  ParameterValue: "{{ ecs_image_id }}"}
           - {ParameterKey: RendezvousIp,             ParameterValue: "{{ rendezvous_ip }}"}
-          - {ParameterKey: IngressVip,              ParameterValue: "{{ ingress_vip | default('10.0.16.6') }}"}
+          - {ParameterKey: IngressVip,               ParameterValue: "{{ ingress_vip | default('10.0.16.6') }}"}
           - {ParameterKey: EnableJumpHost,           ParameterValue: "{{ enable_jump_host | string | lower }}"}
           - {ParameterKey: JumpHostInstanceType,     ParameterValue: "{{ jump_host_type }}"}
           - {ParameterKey: SshPublicKey,             ParameterValue: "{{ ssh_pub_slurp.content | b64decode | trim }}"}
           - {ParameterKey: SshPrivateKey,            ParameterValue: "{{ ssh_priv_slurp.content | trim if enable_jump_host | bool else '' }}"}
+      no_log: "{{ enable_jump_host | bool }}"   # suppress log when private key is present
 
     - name: Write ROS parameters to temp file
       ansible.builtin.copy:
         dest: "/tmp/ros-params-{{ cluster_name }}.json"
         content: "{{ ros_params | to_json }}"
         mode: "0600"
+      no_log: "{{ enable_jump_host | bool }}"   # file contains private key when jump host enabled
       when: ros_stack_id is not defined or ros_stack_id | length == 0
 
     - name: Submit ROS CreateStack (indexed params via Python subprocess — avoids CLI JSON parsing bugs)
@@ -354,12 +356,18 @@
           sys.exit(result.returncode)
           PYEOF
       register: create_result
+      no_log: "{{ enable_jump_host | bool }}"   # suppress: cmd args include private key when jump host enabled
       when: ros_stack_id is not defined or ros_stack_id | length == 0
 
     - name: Capture new stack ID
       ansible.builtin.set_fact:
         ros_stack_id: "{{ (create_result.stdout | from_json).StackId }}"
       when: create_result is not skipped
+
+    - name: Delete temp params file (contains private key)
+      ansible.builtin.file:
+        path: "/tmp/ros-params-{{ cluster_name }}.json"
+        state: absent
 
     - name: Persist stack ID before waiting (so a kill mid-wait doesn't lose it)
       ansible.builtin.include_tasks: ../tasks/save_state.yml
