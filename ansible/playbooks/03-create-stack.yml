@@ -442,12 +442,14 @@
 
     # When the stack was already ready at start, reuse existing_stack_check as
     # the poll result so downstream tasks (assert, parse outputs) work uniformly.
+    # NOTE: omit cannot be used as a set_fact value — gate with explicit when conditions.
     - name: Use existing stack check as poll result (already CREATE_COMPLETE)
       ansible.builtin.set_fact:
-        stack_poll: "{{ existing_stack_check
-                        if (existing_stack_check is defined and existing_stack_check is not skipped)
-                        else omit }}"
-      when: stack_ready | default(false) | bool
+        stack_poll: "{{ existing_stack_check }}"
+      when:
+        - stack_ready | default(false) | bool
+        - existing_stack_check is defined
+        - existing_stack_check is not skipped
 
     # For the adopted-by-name case, fetch the full stack detail (ListStacks only
     # returns summary — Outputs are absent until we call GetStack directly).
