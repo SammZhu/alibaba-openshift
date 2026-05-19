@@ -46,9 +46,9 @@
         - ros_stack_id is defined and ros_stack_id | length > 0
         - existing_stack_check is not skipped
         - existing_stack_check.rc != 0 or
-          (existing_stack_check.stdout | from_json).Status in
-            ['DELETE_COMPLETE', 'CREATE_FAILED', 'ROLLBACK_FAILED',
-             'ROLLBACK_COMPLETE', 'DELETE_FAILED', 'UPDATE_FAILED']
+          (existing_stack_check.stdout | length > 0 and
+           (existing_stack_check.stdout | from_json).Status is match(
+             '^(DELETE_COMPLETE|CREATE_FAILED|ROLLBACK_FAILED|ROLLBACK_COMPLETE|DELETE_FAILED|UPDATE_FAILED)$'))
 
     # ── Pre-clean resources known to block stack deletion ─────────────────
     # Only needed for stacks still alive in a failed state (not DELETE_COMPLETE/404)
@@ -71,9 +71,9 @@
       when:
         - existing_stack_check is defined and existing_stack_check is not skipped
         - existing_stack_check.rc == 0
-        - (existing_stack_check.stdout | from_json).Status in
-            ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE',
-             'DELETE_FAILED', 'UPDATE_FAILED']
+        - existing_stack_check.stdout | length > 0
+        - (existing_stack_check.stdout | from_json).Status is match(
+            '^(CREATE_FAILED|ROLLBACK_FAILED|ROLLBACK_COMPLETE|DELETE_FAILED|UPDATE_FAILED)$')
 
     - name: Pre-delete RAM policy (unblocks stack deletion)
       ansible.builtin.command:
@@ -90,9 +90,9 @@
       when:
         - existing_stack_check is defined and existing_stack_check is not skipped
         - existing_stack_check.rc == 0
-        - (existing_stack_check.stdout | from_json).Status in
-            ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE',
-             'DELETE_FAILED', 'UPDATE_FAILED']
+        - existing_stack_check.stdout | length > 0
+        - (existing_stack_check.stdout | from_json).Status is match(
+            '^(CREATE_FAILED|ROLLBACK_FAILED|ROLLBACK_COMPLETE|DELETE_FAILED|UPDATE_FAILED)$')
 
     - name: Delete failed stack so we can recreate with same name
       ansible.builtin.command:
@@ -110,9 +110,9 @@
       when:
         - existing_stack_check is defined and existing_stack_check is not skipped
         - existing_stack_check.rc == 0
-        - (existing_stack_check.stdout | from_json).Status in
-            ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE',
-             'DELETE_FAILED', 'UPDATE_FAILED']
+        - existing_stack_check.stdout | length > 0
+        - (existing_stack_check.stdout | from_json).Status is match(
+            '^(CREATE_FAILED|ROLLBACK_FAILED|ROLLBACK_COMPLETE|DELETE_FAILED|UPDATE_FAILED)$')
 
     - name: Wait for stack deletion to complete
       ansible.builtin.command:
@@ -169,15 +169,15 @@
     - name: Adopt existing stack (only if in a viable state)
       ansible.builtin.set_fact:
         ros_stack_id: "{{ ((stack_list.stdout | from_json).Stacks
-                           | selectattr('Status', 'in',
-                               ['CREATE_COMPLETE', 'CREATE_IN_PROGRESS', 'UPDATE_COMPLETE'])
+                           | selectattr('Status', 'match',
+                               '^(CREATE_COMPLETE|CREATE_IN_PROGRESS|UPDATE_COMPLETE)$')
                            | list | first).StackId }}"
       when:
         - ros_stack_id is not defined or ros_stack_id | length == 0
         - stack_list is defined and stack_list.rc == 0
         - (stack_list.stdout | from_json).Stacks
-            | selectattr('Status', 'in',
-                ['CREATE_COMPLETE', 'CREATE_IN_PROGRESS', 'UPDATE_COMPLETE'])
+            | selectattr('Status', 'match',
+                '^(CREATE_COMPLETE|CREATE_IN_PROGRESS|UPDATE_COMPLETE)$')
             | list | length > 0
 
     # ── If still no stack ID, check if a failed stack exists by name ──────
@@ -186,17 +186,15 @@
     - name: Find failed stack by name (to clean up before recreating)
       ansible.builtin.set_fact:
         failed_stack_by_name: "{{ (stack_list.stdout | from_json).Stacks
-                                   | selectattr('Status', 'in',
-                                       ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE',
-                                        'DELETE_FAILED', 'UPDATE_FAILED'])
+                                   | selectattr('Status', 'match',
+                                       '^(CREATE_FAILED|ROLLBACK_FAILED|ROLLBACK_COMPLETE|DELETE_FAILED|UPDATE_FAILED)$')
                                    | list | first }}"
       when:
         - ros_stack_id is not defined or ros_stack_id | length == 0
         - stack_list is defined and stack_list.rc == 0
         - (stack_list.stdout | from_json).Stacks
-            | selectattr('Status', 'in',
-                ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE',
-                 'DELETE_FAILED', 'UPDATE_FAILED'])
+            | selectattr('Status', 'match',
+                '^(CREATE_FAILED|ROLLBACK_FAILED|ROLLBACK_COMPLETE|DELETE_FAILED|UPDATE_FAILED)$')
             | list | length > 0
 
     - name: Pre-detach RAM policy from role (clean up failed stack found by name)
@@ -394,12 +392,17 @@
     # Case 2: stack was adopted by name from ListStacks (state.yml had no ID) and
     # it was already in CREATE_COMPLETE.  In this case existing_stack_check was
     # skipped, but we know status from the ListStacks adoption condition.
+    # IMPORTANT: also gate on ros_stack_id | length > 0 to ensure adoption actually
+    # ran and set the ID.  The 'in' test used by adoption and 'equalto' used here
+    # can behave differently across Jinja2 versions; gating on ros_stack_id prevents
+    # stack_ready=true with an empty StackId, which would crash the Fetch task below.
     - name: Mark stack already ready (adopted-by-name CREATE_COMPLETE)
       ansible.builtin.set_fact:
         stack_ready: true
       when:
         - create_result is skipped
         - stack_ready is not defined
+        - ros_stack_id | length > 0
         - stack_list is defined
         - stack_list is not skipped
         - stack_list.rc == 0
@@ -453,6 +456,15 @@
 
     # For the adopted-by-name case, fetch the full stack detail (ListStacks only
     # returns summary — Outputs are absent until we call GetStack directly).
+    - name: Assert ros_stack_id is set before fetching stack detail
+      ansible.builtin.assert:
+        that: ros_stack_id | length > 0
+        fail_msg: >-
+          stack_ready=true but ros_stack_id is empty — adoption did not set the
+          stack ID.  This usually means 'Adopt existing stack' was skipped due to
+          a selectattr mismatch.  Check the ListStacks output and re-run.
+      when: stack_ready | default(false) | bool
+
     - name: Fetch full stack detail for adopted-by-name CREATE_COMPLETE stack
       ansible.builtin.command:
         argv:
@@ -469,6 +481,7 @@
       changed_when: false
       when:
         - stack_ready | default(false) | bool
+        - ros_stack_id | length > 0
         - stack_poll is not defined or stack_poll.stdout | default('') | length == 0
 
     - name: Assert stack created successfully
