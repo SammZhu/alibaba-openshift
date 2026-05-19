@@ -29,6 +29,33 @@
           - dynamic_manifest_file is defined
         fail_msg: "Run Phases 01-03 first"
 
+    # ── Reset cluster if it is in a terminal error state ──────────────────
+    # Allows Phase 04 to be re-run against an existing stack without a full
+    # teardown.  cancel → reset returns the cluster to pre-install state so
+    # hosts can re-register and installation can be retried.
+    - name: Get current cluster status
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        return_content: true
+      register: cluster_pre
+
+    - name: Cancel failed/stuck installation
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}/actions/cancel"
+        method: POST
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        status_code: [202, 409]
+      when: cluster_pre.json.status in ['error', 'cancelled', 'installing', 'installing-pending-user-action']
+
+    - name: Reset cluster to pre-install state
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}/actions/reset"
+        method: POST
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        status_code: [202, 409]
+      when: cluster_pre.json.status in ['error', 'cancelled', 'installing', 'installing-pending-user-action']
+
     # ── Wait for hosts to register ─────────────────────────────────────────
     - name: Poll for {{ expected_hosts }} hosts to discover
       ansible.builtin.uri:
