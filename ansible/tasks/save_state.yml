@@ -6,6 +6,18 @@
 #       new_state:
 #         cluster_id: "{{ cluster_id }}"
 #         infra_env_id: "{{ infra_env_id }}"
+#
+# CRITICAL: `new_state`'s values are Jinja2 templates that reference caller
+# facts (e.g. "{{ ros_stack_id }}").  We MUST evaluate them BEFORE calling
+# load_state.yml — otherwise load_state's "Promote state values" set_fact
+# overwrites those caller facts with the old values from disk, and by the
+# time new_state is templated at the write step, the references resolve to
+# the stale values.  In the past this caused ros_stack_id to silently
+# revert to '' on every save_state call after a fresh CreateStack.
+- name: Materialize new_state BEFORE reload (avoid clobbering caller facts)
+  ansible.builtin.set_fact:
+    _new_state_resolved: "{{ new_state | default({}) }}"
+
 - name: Load existing state to merge
   ansible.builtin.include_tasks: load_state.yml
 
@@ -14,4 +26,4 @@
     dest: "{{ playbook_dir }}/../state.yml"
     mode: "0600"
     content: |
-      {{ (pipeline_state | default({})) | combine(new_state | default({})) | to_nice_yaml(indent=2) }}
+      {{ (pipeline_state | default({})) | combine(_new_state_resolved) | to_nice_yaml(indent=2) }}
