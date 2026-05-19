@@ -178,7 +178,15 @@
         headers:
           Authorization: "Bearer {{ ai_access_token }}"
           Content-Type: application/json
-        body: "{{ {'folder': item.item.folder, 'file_name': item.item.name, 'content': item.content} | to_json }}"
+        # PATCH uses updated_content / updated_folder / updated_file_name (not 'content')
+        body: >-
+          {{ {
+               'folder':           item.item.folder,
+               'file_name':        item.item.name,
+               'updated_content':  item.content,
+               'updated_folder':   item.item.folder,
+               'updated_file_name': item.item.name
+             } | to_json }}
         body_format: raw
         status_code: [200, 201]
       loop: "{{ manifest_slurps.results }}"
