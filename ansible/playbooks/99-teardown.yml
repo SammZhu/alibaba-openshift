@@ -187,6 +187,56 @@
         - ecs_image_id is defined and ecs_image_id | length > 0
 
     # ── Step 3: Delete ROS stack (Phase 03+) ──────────────────────────────
+    # Fallback adoption: state.yml may be missing or have an empty ros_stack_id
+    # (Case B partial teardown, manual deletion, etc.).  Without this, the
+    # entire delete path silently skips and stack_deleted=true is set, leaving
+    # the stack orphaned.  Look it up by name and adopt its ID.
+    - name: List stacks by name (fallback when state.yml has no ros_stack_id)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - ListStacks
+          - --RegionId
+          - "{{ region }}"
+          - --StackName.1
+          - "openshift-{{ cluster_name }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: teardown_stack_list
+      changed_when: false
+      failed_when: false
+      when:
+        - teardown_from | int >= 3
+        - ros_stack_id is not defined or ros_stack_id | length == 0
+
+    - name: Adopt stack ID by name (any non-DELETE_COMPLETE state)
+      ansible.builtin.set_fact:
+        ros_stack_id: "{{ ((teardown_stack_list.stdout | from_json).Stacks
+                           | rejectattr('Status', 'equalto', 'DELETE_COMPLETE')
+                           | list | first).StackId }}"
+      when:
+        - teardown_from | int >= 3
+        - ros_stack_id is not defined or ros_stack_id | length == 0
+        - teardown_stack_list is defined
+        - teardown_stack_list is not skipped
+        - teardown_stack_list.rc == 0
+        - teardown_stack_list.stdout | length > 0
+        - (teardown_stack_list.stdout | from_json).Stacks
+            | rejectattr('Status', 'equalto', 'DELETE_COMPLETE')
+            | list | length > 0
+
+    - name: Note — adopted stack ID from ListStacks
+      ansible.builtin.debug:
+        msg: >-
+          state.yml had no ros_stack_id; adopted {{ ros_stack_id }}
+          from ListStacks by name (openshift-{{ cluster_name }}).
+      when:
+        - teardown_from | int >= 3
+        - teardown_stack_list is defined
+        - teardown_stack_list is not skipped
+        - ros_stack_id is defined and ros_stack_id | length > 0
+
     # Pre-clean RAM resources that block stack deletion
     - name: Pre-detach RAM policy from role (unblocks stack deletion)
       ansible.builtin.command:
