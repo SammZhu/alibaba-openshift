@@ -495,6 +495,28 @@
                               | map(attribute='ZoneId') | list | first }}"
       when: master_ip1 | length > 0 and pvtz_list is not skipped
 
+    # Fallback: ReverseZoneId1/2 Outputs are absent on stacks created before the
+    # reverse-zone resources were added to the template.  Re-query pvtz (already
+    # fetched above) to look up zone IDs by name so PTR records never silently
+    # skip due to an empty zone_id.
+    - name: Resolve missing reverse_zone_id1 from pvtz list (fallback)
+      ansible.builtin.set_fact:
+        reverse_zone_id1: "{{ (pvtz_list.stdout | from_json).Zones.Zone
+                               | selectattr('ZoneName', 'equalto', '16.0.10.in-addr.arpa')
+                               | map(attribute='ZoneId') | list | first | default('') }}"
+      when:
+        - pvtz_list is not skipped
+        - reverse_zone_id1 | length == 0
+
+    - name: Resolve missing reverse_zone_id2 from pvtz list (fallback)
+      ansible.builtin.set_fact:
+        reverse_zone_id2: "{{ (pvtz_list.stdout | from_json).Zones.Zone
+                               | selectattr('ZoneName', 'equalto', '32.0.10.in-addr.arpa')
+                               | map(attribute='ZoneId') | list | first | default('') }}"
+      when:
+        - pvtz_list is not skipped
+        - reverse_zone_id2 | length == 0
+
     - name: Add node hostname A records to PrivateZone
       ansible.builtin.command:
         argv:

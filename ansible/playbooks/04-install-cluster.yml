@@ -124,6 +124,49 @@
     # ── Refresh token (poll may have taken >15min) ────────────────────────
     - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
 
+    # ── Set hostnames via AI API ──────────────────────────────────────────
+    # RHCOS falls back to MAC address when PTR lookup fails.  Setting the
+    # hostname explicitly via the AI API is more reliable than relying on
+    # reverse-DNS and works even when PTR records are missing.
+    # Matches hosts to FQDNs by IP address (from state.yml master_ip1/2/3).
+    - name: Build IP → FQDN map for hostname assignment
+      ansible.builtin.set_fact:
+        ip_to_fqdn:
+          "{{ master_ip1 | default('') }}": "{{ cluster_name }}-master-1.{{ cluster_name }}.{{ base_domain }}"
+          "{{ master_ip2 | default('') }}": "{{ cluster_name }}-master-2.{{ cluster_name }}.{{ base_domain }}"
+          "{{ master_ip3 | default('') }}": "{{ cluster_name }}-master-3.{{ cluster_name }}.{{ base_domain }}"
+      when: master_ip1 | default('') | length > 0
+
+    - name: Set hostname for each host via AI API (IP-based match)
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts/{{ item.id }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ ai_access_token }}"
+          Content-Type: application/json
+        body: >-
+          {{ {'hostname': ip_to_fqdn[
+                ((item.inventory | from_json).interfaces
+                 | map(attribute='ipv4_addresses') | flatten | first | default('')
+                ).split('/')[0]
+              ]} | to_json }}
+        body_format: raw
+        status_code: [200, 201]
+      loop: "{{ hosts_resp.json }}"
+      loop_control:
+        label: >-
+          {{ ((item.inventory | from_json).interfaces
+              | map(attribute='ipv4_addresses') | flatten | first | default('?')
+             ).split('/')[0] }}
+      when:
+        - ip_to_fqdn is defined
+        - item.inventory is defined
+        - item.inventory | length > 0
+        - >-
+          ((item.inventory | from_json).interfaces
+           | map(attribute='ipv4_addresses') | flatten | first | default('')
+          ).split('/')[0] in ip_to_fqdn
+
     # ── Assign roles (first N as master, rest worker) ─────────────────────
     - name: Compute role assignments
       ansible.builtin.set_fact:
