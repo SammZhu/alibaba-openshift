@@ -149,25 +149,20 @@
       loop_control: { label: "{{ item.id }} -> {{ item.role }}" }
 
     # ── Upload custom manifests ───────────────────────────────────────────
-    # The AI API does NOT return 409 for duplicate names — it appends a suffix
-    # (e.g. foo-00.yaml, foo-01.yaml) causing "multiple manifests" install errors.
-    # Fix: list all existing manifests, delete them, then upload fresh.
+    # Root cause: AI backend DELETE removes the logical record but NOT the
+    # physical file on disk.  Each POST creates a new physical file with an
+    # incrementing suffix (-00, -01, …).  When ignition-configs is generated
+    # it finds multiple physical files for the same MachineConfig → fatal.
+    #
+    # Fix: use PATCH (update-in-place) when a manifest already exists, and
+    # POST only when it is truly new.  PATCH rewrites the existing physical
+    # file instead of creating a new one, so no duplicates ever accumulate.
     - name: List existing custom manifests
       ansible.builtin.uri:
         url: "{{ assisted_api }}/clusters/{{ cluster_id }}/manifests"
         headers: { Authorization: "Bearer {{ ai_access_token }}" }
         return_content: true
       register: existing_manifests
-
-    - name: Delete existing custom manifests (idempotent cleanup)
-      ansible.builtin.uri:
-        url: "{{ assisted_api }}/clusters/{{ cluster_id }}/manifests?folder={{ item.folder }}&file_name={{ item.file_name }}"
-        method: DELETE
-        headers: { Authorization: "Bearer {{ ai_access_token }}" }
-        status_code: [200, 404]
-      loop: "{{ existing_manifests.json }}"
-      loop_control: { label: "{{ item.folder }}/{{ item.file_name }}" }
-      when: existing_manifests.json | length > 0
 
     - name: Slurp each manifest
       ansible.builtin.slurp:
@@ -176,19 +171,41 @@
       loop: "{{ manifests_to_upload }}"
       loop_control: { label: "{{ item.folder }}/{{ item.name }}" }
 
-    - name: POST each manifest to Assisted
+    - name: PATCH existing manifests (update in-place, avoids new physical file)
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}/manifests"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ ai_access_token }}"
+          Content-Type: application/json
+        body: "{{ {'folder': item.item.folder, 'file_name': item.item.name, 'content': item.content} | to_json }}"
+        body_format: raw
+        status_code: [200, 201]
+      loop: "{{ manifest_slurps.results }}"
+      loop_control: { label: "{{ item.item.folder }}/{{ item.item.name }}" }
+      when: >-
+        (existing_manifests.json
+         | selectattr('folder',    'equalto', item.item.folder)
+         | selectattr('file_name', 'equalto', item.item.name)
+         | list | length) > 0
+
+    - name: POST new manifests (first-time upload, not yet known to AI)
       ansible.builtin.uri:
         url: "{{ assisted_api }}/clusters/{{ cluster_id }}/manifests"
         method: POST
         headers:
           Authorization: "Bearer {{ ai_access_token }}"
           Content-Type: application/json
-        # Use to_json to prevent jinja2_native from misinterpreting content field
         body: "{{ {'folder': item.item.folder, 'file_name': item.item.name, 'content': item.content} | to_json }}"
         body_format: raw
         status_code: [201]
       loop: "{{ manifest_slurps.results }}"
       loop_control: { label: "{{ item.item.folder }}/{{ item.item.name }}" }
+      when: >-
+        (existing_manifests.json
+         | selectattr('folder',    'equalto', item.item.folder)
+         | selectattr('file_name', 'equalto', item.item.name)
+         | list | length) == 0
 
     # ── Wait cluster ready ────────────────────────────────────────────────
     - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
