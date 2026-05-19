@@ -7,23 +7,34 @@
 #         cluster_id: "{{ cluster_id }}"
 #         infra_env_id: "{{ infra_env_id }}"
 #
-# CRITICAL: `new_state`'s values are Jinja2 templates that reference caller
-# facts (e.g. "{{ ros_stack_id }}").  We MUST evaluate them BEFORE calling
-# load_state.yml — otherwise load_state's "Promote state values" set_fact
-# overwrites those caller facts with the old values from disk, and by the
-# time new_state is templated at the write step, the references resolve to
-# the stale values.  In the past this caused ros_stack_id to silently
-# revert to '' on every save_state call after a fresh CreateStack.
-- name: Materialize new_state BEFORE reload (avoid clobbering caller facts)
-  ansible.builtin.set_fact:
-    _new_state_resolved: "{{ new_state | default({}) }}"
+# IMPORTANT: this task MUST NOT call load_state.yml.  load_state.yml's
+# "Promote state values to top-level facts" uses set_fact to overwrite
+# caller facts (cluster_id, ros_stack_id, ...) with whatever is on
+# disk.  Since `new_state`'s values are Jinja2 templates like
+# "{{ ros_stack_id }}" that are evaluated lazily at the copy task,
+# the overwritten facts then resolve to stale on-disk values — silently
+# reverting the very change we are trying to persist.
+#
+# Read state.yml directly via slurp + from_yaml instead.  This keeps
+# caller facts untouched and lets the inline merge template see the
+# fresh in-memory values.
+- name: Check whether state file exists
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/../state.yml"
+  register: _save_state_stat
 
-- name: Load existing state to merge
-  ansible.builtin.include_tasks: load_state.yml
+- name: Read existing state file (raw)
+  ansible.builtin.slurp:
+    src: "{{ playbook_dir }}/../state.yml"
+  register: _save_state_slurp
+  when: _save_state_stat.stat.exists
 
 - name: Write merged state back to disk
   ansible.builtin.copy:
     dest: "{{ playbook_dir }}/../state.yml"
     mode: "0600"
     content: |
-      {{ (pipeline_state | default({})) | combine(_new_state_resolved) | to_nice_yaml(indent=2) }}
+      {{ ((_save_state_slurp.content | b64decode | from_yaml | default({}))
+           if _save_state_stat.stat.exists else {})
+         | combine(new_state | default({}))
+         | to_nice_yaml(indent=2) }}
