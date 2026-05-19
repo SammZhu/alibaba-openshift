@@ -571,6 +571,19 @@
         - ros_stack_id | length > 0
         - stack_poll is not defined or stack_poll.stdout | default('') | length == 0
 
+    # Diagnostic — surface the actual stack_poll content so failures are debuggable.
+    - name: Debug — stack_poll content before assert
+      ansible.builtin.debug:
+        msg: |
+          stack_ready:               {{ stack_ready | default('(undefined)') }}
+          existing_stack_check ran:  {{ (existing_stack_check is defined and existing_stack_check is not skipped) | string }}
+          existing_stack_check rc:   {{ existing_stack_check.rc | default('(n/a)') }}
+          existing_stack_check stdout length: {{ existing_stack_check.stdout | default('') | length }}
+          stack_poll defined:        {{ stack_poll is defined | string }}
+          stack_poll keys:           {{ (stack_poll | default({})).keys() | list }}
+          stack_poll.stdout length:  {{ stack_poll.stdout | default('') | length }}
+          stack_poll.stdout (head):  {{ (stack_poll.stdout | default(''))[:200] }}
+
     - name: Assert stack created successfully
       ansible.builtin.assert:
         that:
