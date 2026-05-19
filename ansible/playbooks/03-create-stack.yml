@@ -289,6 +289,24 @@
     # they are skipped entirely when adopting an existing stack.  This avoids
     # referencing variables like ecs_image_id that may be absent in the
     # adoption case (e.g. state.yml was wiped but the cloud stack survives).
+    - name: Pre-flight — ensure ecs_image_id is set before creating a new stack
+      ansible.builtin.assert:
+        that:
+          - ecs_image_id is defined
+          - ecs_image_id | length > 0
+        fail_msg: |
+          ecs_image_id is empty — Phase 02 must run first to import the
+          RHCOS-based ECS image.  ROS will reject CreateStack with
+          "Specified ImageId cannot be empty" otherwise.
+
+          If you previously kept an image (keep_image=true) but lost state.yml,
+          look it up and restore manually:
+            aliyun ecs DescribeImages --RegionId {{ region }} \
+              --ImageOwnerAlias self --profile {{ aliyun_profile }} \
+              | jq '.Images.Image[] | {ImageId, ImageName, Status}'
+            echo "ecs_image_id: '<ImageId>'" >> ansible/state.yml
+      when: ros_stack_id is not defined or ros_stack_id | length == 0
+
     - name: Build ROS Parameters JSON
       ansible.builtin.set_fact:
         ros_params:
