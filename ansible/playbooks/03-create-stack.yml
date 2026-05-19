@@ -452,7 +452,11 @@
         jump_host_ip: "{{ (outputs | selectattr('OutputKey', 'equalto', 'JumpHostPublicIp') | list | first).OutputValue }}"
       when: (outputs | selectattr('OutputKey', 'equalto', 'JumpHostPublicIp') | list | length) > 0
 
-    # ── PTR records — written after instances exist so IPs are known ──────
+    # ── Node hostname A records + PTR records ─────────────────────────────
+    # Written after instances exist (IPs only known post-stack-creation).
+    # Node FQDN: <cluster>-master-N.<cluster>.<domain>
+    # RHCOS resolves its own hostname via PTR on boot; forward A record is
+    # needed for kubelet registration and general cluster DNS.
     - name: Pick master IPs and reverse zone IDs from outputs
       ansible.builtin.set_fact:
         master_ip1:       "{{ (outputs | selectattr('OutputKey', 'equalto', 'MasterIp1')      | list | first | default({})).OutputValue | default('') }}"
@@ -460,6 +464,56 @@
         master_ip3:       "{{ (outputs | selectattr('OutputKey', 'equalto', 'MasterIp3')      | list | first | default({})).OutputValue | default('') }}"
         reverse_zone_id1: "{{ (outputs | selectattr('OutputKey', 'equalto', 'ReverseZoneId1') | list | first | default({})).OutputValue | default('') }}"
         reverse_zone_id2: "{{ (outputs | selectattr('OutputKey', 'equalto', 'ReverseZoneId2') | list | first | default({})).OutputValue | default('') }}"
+        private_zone_id:  "{{ (outputs | selectattr('OutputKey', 'equalto', 'PrivateZoneName') | list | first | default({})).OutputValue | default('') }}"
+
+    # Fetch the PrivateZone ID (needed for AddZoneRecord; PrivateZoneName output
+    # gives the zone name, not the zone ID — look it up by name)
+    - name: Fetch PrivateZone ID by name
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - pvtz
+          - DescribeZones
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: pvtz_list
+      changed_when: false
+      when: master_ip1 | length > 0
+
+    - name: Set forward_zone_id fact
+      ansible.builtin.set_fact:
+        forward_zone_id: "{{ (pvtz_list.stdout | from_json).Zones.Zone
+                              | selectattr('ZoneName', 'equalto', cluster_name + '.' + base_domain)
+                              | map(attribute='ZoneId') | list | first }}"
+      when: master_ip1 | length > 0 and pvtz_list is not skipped
+
+    - name: Add node hostname A records to PrivateZone
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - pvtz
+          - AddZoneRecord
+          - --ZoneId
+          - "{{ forward_zone_id }}"
+          - --Rr
+          - "{{ item.name }}"
+          - --Type
+          - A
+          - --Value
+          - "{{ item.ip }}"
+          - --Ttl
+          - "60"
+          - --profile
+          - "{{ aliyun_profile }}"
+      loop:
+        - { ip: "{{ master_ip1 }}", name: "{{ cluster_name }}-master-1" }
+        - { ip: "{{ master_ip2 }}", name: "{{ cluster_name }}-master-2" }
+        - { ip: "{{ master_ip3 }}", name: "{{ cluster_name }}-master-3" }
+      failed_when: false
+      changed_when: true
+      when:
+        - item.ip | length > 0
+        - forward_zone_id is defined
 
     - name: Add PTR records for control plane nodes
       ansible.builtin.command:
@@ -474,15 +528,15 @@
           - --Type
           - PTR
           - --Value
-          - "{{ item.name }}.{{ cluster_name }}.{{ base_domain }}."
+          - "{{ cluster_name }}-master-{{ item.idx }}.{{ cluster_name }}.{{ base_domain }}."
           - --Ttl
           - "60"
           - --profile
           - "{{ aliyun_profile }}"
       loop:
-        - { ip: "{{ master_ip1 }}", zone_id: "{{ reverse_zone_id1 }}", name: "{{ cluster_name }}-master-1" }
-        - { ip: "{{ master_ip2 }}", zone_id: "{{ reverse_zone_id1 }}", name: "{{ cluster_name }}-master-2" }
-        - { ip: "{{ master_ip3 }}", zone_id: "{{ reverse_zone_id2 }}", name: "{{ cluster_name }}-master-3" }
+        - { ip: "{{ master_ip1 }}", zone_id: "{{ reverse_zone_id1 }}", idx: "1" }
+        - { ip: "{{ master_ip2 }}", zone_id: "{{ reverse_zone_id1 }}", idx: "2" }
+        - { ip: "{{ master_ip3 }}", zone_id: "{{ reverse_zone_id2 }}", idx: "3" }
       failed_when: false
       changed_when: true
       when:
