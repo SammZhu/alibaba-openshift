@@ -133,7 +133,8 @@
       delay: 15
       until: >-
         stack_delete_wait.rc != 0 or
-        (stack_delete_wait.stdout | from_json).Status == 'DELETE_COMPLETE'
+        (stack_delete_wait.stdout | length > 0 and
+         (stack_delete_wait.stdout | from_json).Status == 'DELETE_COMPLETE')
       when: delete_existing_failed is not skipped
 
     - name: Fail if stack is still stuck in DELETE_FAILED after cleanup
@@ -144,6 +145,7 @@
       when:
         - stack_delete_wait is not skipped
         - stack_delete_wait.rc == 0
+        - stack_delete_wait.stdout | length > 0
         - (stack_delete_wait.stdout | from_json).Status == 'DELETE_FAILED'
 
     # ── Adopt existing stack by name if state.yml was lost ────────────────
@@ -269,7 +271,8 @@
       delay: 15
       until: >-
         named_stack_delete_wait.rc != 0 or
-        (named_stack_delete_wait.stdout | from_json).Status == 'DELETE_COMPLETE'
+        (named_stack_delete_wait.stdout | length > 0 and
+         (named_stack_delete_wait.stdout | from_json).Status == 'DELETE_COMPLETE')
       when: delete_named_failed is not skipped
 
     - name: Fail if named stack is still stuck in DELETE_FAILED after cleanup
@@ -280,6 +283,7 @@
       when:
         - named_stack_delete_wait is not skipped
         - named_stack_delete_wait.rc == 0
+        - named_stack_delete_wait.stdout | length > 0
         - (named_stack_delete_wait.stdout | from_json).Status == 'DELETE_FAILED'
 
     # ── Create stack if still missing ──────────────────────────────────────
@@ -389,13 +393,26 @@
           - "{{ aliyun_profile }}"
       register: stack_poll
       changed_when: false
+      failed_when: false   # never abort mid-poll; status checked in until/post-assert
       retries: 60
       delay: 20
-      until:
-        - (stack_poll.stdout | from_json).Status == 'CREATE_COMPLETE'
-      failed_when:
-        - (stack_poll.stdout | from_json).Status is defined
-        - (stack_poll.stdout | from_json).Status in ['CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE', 'DELETE_IN_PROGRESS', 'DELETE_FAILED']
+      # Guard all from_json calls with a length check: empty stdout (transient
+      # API error / rate-limit) must result in a retry, not a JSONDecodeError.
+      until: >-
+        stack_poll.stdout | length > 0 and
+        (stack_poll.stdout | from_json).Status in
+          ['CREATE_COMPLETE', 'CREATE_FAILED', 'ROLLBACK_FAILED',
+           'ROLLBACK_COMPLETE', 'DELETE_IN_PROGRESS', 'DELETE_FAILED']
+
+    - name: Assert stack created successfully
+      ansible.builtin.assert:
+        that:
+          - stack_poll.stdout | length > 0
+          - (stack_poll.stdout | from_json).Status == 'CREATE_COMPLETE'
+        fail_msg: >-
+          Stack {{ ros_stack_id }} ended in status
+          {{ (stack_poll.stdout | from_json).Status | default('(empty response)') }}.
+          Check the ROS console for details.
 
     # ── Capture outputs ────────────────────────────────────────────────────
     - name: Parse stack outputs

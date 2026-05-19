@@ -260,7 +260,8 @@
       delay: 30
       until: >-
         stack_check.rc != 0 or
-        (stack_check.stdout | from_json).Status in ['DELETE_COMPLETE', 'DELETE_FAILED']
+        (stack_check.stdout | length > 0 and
+         (stack_check.stdout | from_json).Status in ['DELETE_COMPLETE', 'DELETE_FAILED'])
       when:
         - teardown_from | int >= 3
         - ros_stack_id is defined and ros_stack_id | length > 0
