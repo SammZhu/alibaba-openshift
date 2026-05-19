@@ -285,6 +285,10 @@
         - (named_stack_delete_wait.stdout | from_json).Status == 'DELETE_FAILED'
 
     # ── Create stack if still missing ──────────────────────────────────────
+    # All stack-creation tasks below are gated on "ros_stack_id is empty" so
+    # they are skipped entirely when adopting an existing stack.  This avoids
+    # referencing variables like ecs_image_id that may be absent in the
+    # adoption case (e.g. state.yml was wiped but the cloud stack survives).
     - name: Build ROS Parameters JSON
       ansible.builtin.set_fact:
         ros_params:
@@ -304,7 +308,7 @@
           - {ParameterKey: SystemDiskCategory,       ParameterValue: "{{ system_disk_category }}"}
           - {ParameterKey: SystemDiskSize,           ParameterValue: "{{ system_disk_size | string }}"}
           - {ParameterKey: InstallationMethod,       ParameterValue: "{{ installation_method }}"}
-          - {ParameterKey: ImageId,                  ParameterValue: "{{ ecs_image_id }}"}
+          - {ParameterKey: ImageId,                  ParameterValue: "{{ ecs_image_id | default('') }}"}
           - {ParameterKey: RendezvousIp,             ParameterValue: "{{ rendezvous_ip }}"}
           - {ParameterKey: IngressVip,               ParameterValue: "{{ ingress_vip | default('10.0.16.6') }}"}
           - {ParameterKey: EnableJumpHost,           ParameterValue: "{{ enable_jump_host | string | lower }}"}
@@ -312,6 +316,7 @@
           - {ParameterKey: SshPublicKey,             ParameterValue: "{{ ssh_pub_slurp.content | b64decode | trim }}"}
           - {ParameterKey: SshPrivateKey,            ParameterValue: "{{ ssh_priv_slurp.content | trim if enable_jump_host | bool else '' }}"}
       no_log: "{{ enable_jump_host | bool }}"   # suppress log when private key is present
+      when: ros_stack_id is not defined or ros_stack_id | length == 0
 
     - name: Write ROS parameters to temp file
       ansible.builtin.copy:
