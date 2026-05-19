@@ -617,6 +617,22 @@
     - name: Phase 03 done
       ansible.builtin.debug:
         msg: |
-          API SLB: {{ api_slb_ip }}
-          Jump host: {{ jump_host_ip | default('(disabled)') }}
-          Next: ansible-playbook playbooks/04-install-cluster.yml
+          ✓ Stack ready.
+
+          API SLB IP : {{ api_slb_ip }}
+          {% if jump_host_ip | default('') | length > 0 %}
+          Jump host  : {{ jump_host_ip }}
+
+          SSH into jump host:
+            ssh -i {{ ssh_priv_key_file }} root@{{ jump_host_ip }}
+
+          From jump host → cluster nodes:
+            ssh core@{{ master_ip1 | default('10.0.16.x') }}
+            ssh core@{{ master_ip2 | default('10.0.16.y') }}
+            ssh core@{{ master_ip3 | default('10.0.32.z') }}
+          {% else %}
+          Jump host  : (disabled — set enable_jump_host: true to provision one)
+          {% endif %}
+
+          Next step:
+            ansible-playbook ansible/playbooks/04-install-cluster.yml
