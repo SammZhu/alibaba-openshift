@@ -526,16 +526,19 @@
 
     # When the stack was already ready at start, reuse existing_stack_check as
     # the poll result so downstream tasks (assert, parse outputs) work uniformly.
-    # NOTE: explicitly construct the dict — `set_fact: stack_poll: "{{ dict }}"`
-    # can lose the dict structure across Ansible versions (becomes a string repr
-    # or AnsibleUndefined), making stack_poll.stdout unreachable downstream.
+    # IMPORTANT: build the entire dict inside ONE Jinja2 expression.  Writing
+    # it field-by-field causes Ansible to re-parse each rendered value as
+    # YAML/JSON, which silently turns the JSON-text stdout into a dict and
+    # breaks downstream string operations (slicing, from_json).
     - name: Use existing stack check as poll result (already CREATE_COMPLETE)
       ansible.builtin.set_fact:
-        stack_poll:
-          stdout: "{{ existing_stack_check.stdout }}"
-          stderr: "{{ existing_stack_check.stderr | default('') }}"
-          rc: "{{ existing_stack_check.rc }}"
-          changed: false
+        stack_poll: >-
+          {{ {
+            'stdout': existing_stack_check.stdout,
+            'stderr': existing_stack_check.stderr | default(''),
+            'rc':     existing_stack_check.rc,
+            'changed': false
+          } }}
       when:
         - stack_ready | default(false) | bool
         - existing_stack_check is defined
@@ -576,11 +579,13 @@
 
     - name: Update stack_poll with refetched detail (if refetch ran)
       ansible.builtin.set_fact:
-        stack_poll:
-          stdout: "{{ stack_refetch.stdout }}"
-          stderr: "{{ stack_refetch.stderr | default('') }}"
-          rc: "{{ stack_refetch.rc }}"
-          changed: false
+        stack_poll: >-
+          {{ {
+            'stdout': stack_refetch.stdout,
+            'stderr': stack_refetch.stderr | default(''),
+            'rc':     stack_refetch.rc,
+            'changed': false
+          } }}
       when:
         - stack_refetch is defined
         - stack_refetch is not skipped
