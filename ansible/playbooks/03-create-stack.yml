@@ -526,10 +526,16 @@
 
     # When the stack was already ready at start, reuse existing_stack_check as
     # the poll result so downstream tasks (assert, parse outputs) work uniformly.
-    # NOTE: omit cannot be used as a set_fact value — gate with explicit when conditions.
+    # NOTE: explicitly construct the dict — `set_fact: stack_poll: "{{ dict }}"`
+    # can lose the dict structure across Ansible versions (becomes a string repr
+    # or AnsibleUndefined), making stack_poll.stdout unreachable downstream.
     - name: Use existing stack check as poll result (already CREATE_COMPLETE)
       ansible.builtin.set_fact:
-        stack_poll: "{{ existing_stack_check }}"
+        stack_poll:
+          stdout: "{{ existing_stack_check.stdout }}"
+          stderr: "{{ existing_stack_check.stderr | default('') }}"
+          rc: "{{ existing_stack_check.rc }}"
+          changed: false
       when:
         - stack_ready | default(false) | bool
         - existing_stack_check is defined
@@ -568,12 +574,13 @@
     - name: Assert stack created successfully
       ansible.builtin.assert:
         that:
-          - stack_poll.stdout | length > 0
+          - stack_poll is defined
+          - stack_poll.stdout | default('') | length > 0
           - (stack_poll.stdout | from_json).Status == 'CREATE_COMPLETE'
         fail_msg: >-
-          Stack {{ ros_stack_id }} ended in status
-          {{ (stack_poll.stdout | from_json).Status | default('(empty response)') }}.
-          Check the ROS console for details.
+          Stack {{ ros_stack_id }} did not reach CREATE_COMPLETE.
+          Check the ROS console for details — and inspect stack_poll
+          (rc / stdout / stderr) in -vv output.
 
     # ── Capture outputs ────────────────────────────────────────────────────
     - name: Parse stack outputs
