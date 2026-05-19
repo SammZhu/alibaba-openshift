@@ -625,10 +625,13 @@
           existing_stack_check ran:  {{ (existing_stack_check is defined and existing_stack_check is not skipped) | string }}
           existing_stack_check rc:   {{ existing_stack_check.rc | default('(n/a)') }}
           existing_stack_check stdout length: {{ existing_stack_check.stdout | default('') | length }}
+          existing_stack_check Status: {{ (existing_stack_check.stdout | default('{}') | from_json).get('Status', '(no Status key)') }}
           stack_poll defined:        {{ stack_poll is defined | string }}
           stack_poll keys:           {{ (stack_poll | default({})).keys() | list }}
           stack_poll.stdout length:  {{ stack_poll.stdout | default('') | length }}
           stack_poll.stdout (head):  {{ (stack_poll.stdout | default(''))[:200] }}
+          stack_poll.stdout Status:  {{ (stack_poll.stdout | default('{}') | from_json).get('Status', '(no Status key)') }}
+          stack_poll.stdout type:    {{ stack_poll.stdout | type_debug }}
 
     - name: Assert stack created successfully
       ansible.builtin.assert:
