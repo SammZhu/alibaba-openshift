@@ -2,11 +2,12 @@
 # Phase 99 — clean up resources to zero billing at any phase boundary.
 #
 # Usage:
-#   ansible-playbook playbooks/99-teardown.yml                    # full teardown
-#   ansible-playbook playbooks/99-teardown.yml -e teardown_from=3 # stopped at Phase 03
-#   ansible-playbook playbooks/99-teardown.yml -e teardown_from=2 # stopped at Phase 02
-#   ansible-playbook playbooks/99-teardown.yml -e teardown_from=1 # stopped at Phase 01
-#   ansible-playbook playbooks/99-teardown.yml -e teardown_confirmed=true  # no prompt
+#   ansible-playbook playbooks/99-teardown.yml                              # full teardown
+#   ansible-playbook playbooks/99-teardown.yml -e teardown_from=3           # stack + AI records (keeps image)
+#   ansible-playbook playbooks/99-teardown.yml -e teardown_from=3 -e keep_image=false  # also delete image
+#   ansible-playbook playbooks/99-teardown.yml -e teardown_from=2           # + image
+#   ansible-playbook playbooks/99-teardown.yml -e teardown_from=1           # AI records only
+#   ansible-playbook playbooks/99-teardown.yml -e teardown_confirmed=true   # no prompt
 #
 # teardown_from levels — cleans resources created UP TO that phase:
 #   1 → Assisted cluster + infra-env records (Red Hat API only, no Aliyun cost)
@@ -14,6 +15,11 @@
 #   3 → + ROS stack (VPC / ECS nodes / SLB / NAT / EIP / jump host)
 #   4 → + app-layer cleanup first (LoadBalancer SVCs + PVCs), then everything above
 #        (use when OpenShift is installed and CCM/CSI may have created extra resources)
+#
+# keep_image (default: true):
+#   true  → skip ECS image + local ISO deletion even when teardown_from >= 2
+#           Useful when rebuilding the stack but reusing the same discovery ISO image.
+#   false → delete image and local ISO as normal
 
 - name: Teardown
   hosts: local
@@ -21,6 +27,7 @@
   vars:
     teardown_from: 4        # default: full teardown
     teardown_confirmed: false
+    keep_image: true        # default: preserve ECS image across stack rebuilds
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
 
@@ -109,6 +116,8 @@
       failed_when: false
 
     # ── Step 2: Delete ECS custom image + local ISO (Phase 02+) ───────────
+    # Skipped when keep_image=true (default) so the image can be reused
+    # after rebuilding the stack without re-running the slow Phase 02 upload.
     - name: Delete ECS custom image
       ansible.builtin.command:
         argv:
@@ -125,6 +134,7 @@
           - "{{ aliyun_profile }}"
       when:
         - teardown_from | int >= 2
+        - not keep_image | bool
         - ecs_image_id is defined and ecs_image_id | length > 0
       failed_when: false
 
@@ -134,7 +144,16 @@
         state: absent
       when:
         - teardown_from | int >= 2
+        - not keep_image | bool
         - iso_path is defined and iso_path | length > 0
+
+    - name: Note — ECS image preserved (keep_image=true)
+      ansible.builtin.debug:
+        msg: "ECS image {{ ecs_image_id | default('(unknown)') }} kept. Re-run Phase 03 with the same image. Use -e keep_image=false to also delete it."
+      when:
+        - teardown_from | int >= 2
+        - keep_image | bool
+        - ecs_image_id is defined and ecs_image_id | length > 0
 
     # ── Step 3: Delete ROS stack (Phase 03+) ──────────────────────────────
     # Pre-clean RAM resources that block stack deletion
