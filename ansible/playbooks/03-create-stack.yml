@@ -383,12 +383,19 @@
               f.write(f"=== RC: {result.returncode} ===\n")
               f.write(f"=== STDOUT ===\n{result.stdout}\n")
               f.write(f"=== STDERR ===\n{result.stderr}\n")
-          # On success, also write JUST the JSON response to a separate file.
-          # This is read by the Capture task instead of create_result.stdout,
-          # which is unreliable when no_log: true is set on this task.
+          # On success, extract StackId and write to a plain-text file.
+          # Plain text is dead-simple to read back (slurp + decode + strip)
+          # and avoids the slurp -> b64decode -> from_json -> .StackId chain
+          # which has multiple failure modes (JSON parsing, dict access, etc).
           if result.returncode == 0:
-              with open("/tmp/ros-create-{{ cluster_name }}-response.json", "w") as f:
-                  f.write(result.stdout)
+              try:
+                  stack_id = json.loads(result.stdout).get("StackId", "")
+                  with open("/tmp/ros-create-{{ cluster_name }}-stackid.txt", "w") as f:
+                      f.write(stack_id)
+              except (json.JSONDecodeError, AttributeError) as e:
+                  # Surface parse errors via the log file
+                  with open(log_file, "a") as f:
+                      f.write(f"=== PARSE ERROR: {e} ===\n")
           sys.stdout.write(result.stdout)
           sys.stderr.write(result.stderr)
           sys.exit(result.returncode)
@@ -418,30 +425,50 @@
         - create_result is not skipped
         - create_result.rc | default(0) != 0
 
-    # Read StackId from the response file written by the Python heredoc above,
-    # NOT from create_result.stdout — no_log: true on the Submit task can make
-    # create_result.stdout unreliable across Ansible versions, leaving
-    # ros_stack_id empty even when CreateStack succeeded.
-    - name: Read CreateStack response file
+    # Read StackId from a plain-text file written by the Python heredoc above.
+    # Plain text bypasses both Ansible's no_log censoring AND the unreliable
+    # slurp -> b64decode -> from_json -> .StackId chain.
+    - name: Read CreateStack StackId file
       ansible.builtin.slurp:
-        src: "/tmp/ros-create-{{ cluster_name }}-response.json"
-      register: create_response_slurp
+        src: "/tmp/ros-create-{{ cluster_name }}-stackid.txt"
+      register: stackid_slurp
       when:
         - create_result is not skipped
         - create_result.rc | default(0) == 0
 
-    - name: Capture new stack ID (from response file, bypasses no_log)
+    - name: Capture new stack ID (from plain-text file)
       ansible.builtin.set_fact:
-        ros_stack_id: "{{ (create_response_slurp.content | b64decode | from_json).StackId }}"
+        ros_stack_id: "{{ stackid_slurp.content | b64decode | trim }}"
       when:
         - create_result is not skipped
         - create_result.rc | default(0) == 0
-        - create_response_slurp is defined
-        - create_response_slurp is not skipped
+        - stackid_slurp is defined
+        - stackid_slurp is not skipped
+        - (stackid_slurp.content | b64decode | trim) | length > 0
 
-    - name: Delete CreateStack response file (no longer needed)
+    - name: Assert ros_stack_id was captured
+      ansible.builtin.assert:
+        that:
+          - ros_stack_id is defined
+          - ros_stack_id | length > 0
+        fail_msg: |
+          CreateStack appeared to succeed but ros_stack_id is empty.
+          Diagnostic dump:
+            create_result.rc       = {{ create_result.rc | default('(unset)') }}
+            stackid_slurp defined  = {{ stackid_slurp is defined }}
+            stackid_slurp skipped  = {{ (stackid_slurp | default({})).get('skipped', 'no') }}
+            stackid file content   = {{ (stackid_slurp.content | default('') | b64decode | trim)
+                                         if stackid_slurp is defined
+                                            and stackid_slurp is not skipped
+                                         else '(no slurp result)' }}
+          See /tmp/ros-create-{{ cluster_name }}.log for the full API response.
+      when:
+        - create_result is not skipped
+        - create_result.rc | default(0) == 0
+
+    - name: Delete CreateStack StackId file (no longer needed)
       ansible.builtin.file:
-        path: "/tmp/ros-create-{{ cluster_name }}-response.json"
+        path: "/tmp/ros-create-{{ cluster_name }}-stackid.txt"
         state: absent
       when:
         - create_result is not skipped
