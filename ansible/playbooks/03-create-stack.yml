@@ -378,7 +378,38 @@
       vars:
         new_state: { ros_stack_id: "{{ ros_stack_id }}" }
 
+    # Mark stack as already ready so we can skip the poll when possible.
+    # Case 1: state.yml had a stack ID and it was already CREATE_COMPLETE.
+    - name: Mark stack already ready (existing stack in CREATE_COMPLETE state)
+      ansible.builtin.set_fact:
+        stack_ready: true
+      when:
+        - create_result is skipped
+        - existing_stack_check is defined
+        - existing_stack_check is not skipped
+        - existing_stack_check.rc == 0
+        - existing_stack_check.stdout | length > 0
+        - (existing_stack_check.stdout | from_json).Status == 'CREATE_COMPLETE'
+
+    # Case 2: stack was adopted by name from ListStacks (state.yml had no ID) and
+    # it was already in CREATE_COMPLETE.  In this case existing_stack_check was
+    # skipped, but we know status from the ListStacks adoption condition.
+    - name: Mark stack already ready (adopted-by-name CREATE_COMPLETE)
+      ansible.builtin.set_fact:
+        stack_ready: true
+      when:
+        - create_result is skipped
+        - stack_ready is not defined
+        - stack_list is defined
+        - stack_list is not skipped
+        - stack_list.rc == 0
+        - (stack_list.stdout | from_json).Stacks
+            | selectattr('Status', 'equalto', 'CREATE_COMPLETE')
+            | list | length > 0
+
     # ── Wait for CREATE_COMPLETE ───────────────────────────────────────────
+    # Skip entirely when we already know the stack is ready (avoids confusing
+    # FAILED-RETRYING output and API throttling on re-runs).
     - name: Poll stack until CREATE_COMPLETE (10-15 min)
       ansible.builtin.command:
         argv:
@@ -398,11 +429,45 @@
       delay: 20
       # Guard all from_json calls with a length check: empty stdout (transient
       # API error / rate-limit) must result in a retry, not a JSONDecodeError.
+      # rc != 0 alone is NOT a terminal condition — it fires on transient errors too.
       until: >-
-        stack_poll.stdout | length > 0 and
-        (stack_poll.stdout | from_json).Status in
-          ['CREATE_COMPLETE', 'CREATE_FAILED', 'ROLLBACK_FAILED',
-           'ROLLBACK_COMPLETE', 'DELETE_IN_PROGRESS', 'DELETE_FAILED']
+        (stack_poll.rc == 0 and
+         stack_poll.stdout | length > 0 and
+         (stack_poll.stdout | from_json).Status in
+           ['CREATE_COMPLETE', 'CREATE_FAILED', 'ROLLBACK_FAILED',
+            'ROLLBACK_COMPLETE', 'DELETE_IN_PROGRESS', 'DELETE_FAILED']) or
+        (stack_poll.rc != 0 and
+         'StackNotFound' in (stack_poll.stderr | default('')))
+      when: not (stack_ready | default(false) | bool)
+
+    # When the stack was already ready at start, reuse existing_stack_check as
+    # the poll result so downstream tasks (assert, parse outputs) work uniformly.
+    - name: Use existing stack check as poll result (already CREATE_COMPLETE)
+      ansible.builtin.set_fact:
+        stack_poll: "{{ existing_stack_check
+                        if (existing_stack_check is defined and existing_stack_check is not skipped)
+                        else omit }}"
+      when: stack_ready | default(false) | bool
+
+    # For the adopted-by-name case, fetch the full stack detail (ListStacks only
+    # returns summary — Outputs are absent until we call GetStack directly).
+    - name: Fetch full stack detail for adopted-by-name CREATE_COMPLETE stack
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - GetStack
+          - --StackId
+          - "{{ ros_stack_id }}"
+          - --RegionId
+          - "{{ region }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: stack_poll
+      changed_when: false
+      when:
+        - stack_ready | default(false) | bool
+        - stack_poll is not defined or stack_poll.stdout | default('') | length == 0
 
     - name: Assert stack created successfully
       ansible.builtin.assert:
