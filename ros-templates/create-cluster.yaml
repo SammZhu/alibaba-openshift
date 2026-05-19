@@ -155,9 +155,9 @@ Parameters:
     Default: ""
     NoEcho: true
     Description: |
-      SSH private key written to /root/.ssh/openshift_ed25519 on the jump host.
-      Enables passwordless SSH from the jump host to cluster nodes (core@<node-ip>).
-      Required only when EnableJumpHost=true.
+      SSH private key (base64-encoded) written to /root/.ssh/openshift_ed25519 on the jump host.
+      Pass the raw base64 output of `base64 < ~/.ssh/openshift_ed25519` (no line wraps).
+      The UserData script decodes it with `base64 -d`. Required only when EnableJumpHost=true.
 
 Conditions:
   IsAgentBased: !Equals [!Ref InstallationMethod, Agent-based]
@@ -778,9 +778,8 @@ Resources:
             echo "${SshPublicKey}" >> /root/.ssh/authorized_keys
             chmod 600 /root/.ssh/authorized_keys
             # Private key — lets jump host SSH into cluster nodes (core@<node-ip>)
-            cat > /root/.ssh/openshift_ed25519 <<'SSHKEY'
-            ${SshPrivateKey}
-            SSHKEY
+            # Value is base64-encoded (no newlines) so it survives CLI argument passing
+            echo "${SshPrivateKey}" | base64 -d > /root/.ssh/openshift_ed25519
             chmod 600 /root/.ssh/openshift_ed25519
             # SSH config: use this key automatically for all private subnet hosts
             cat > /root/.ssh/config <<'SSHCONF'

@@ -308,7 +308,7 @@
           - {ParameterKey: EnableJumpHost,           ParameterValue: "{{ enable_jump_host | string | lower }}"}
           - {ParameterKey: JumpHostInstanceType,     ParameterValue: "{{ jump_host_type }}"}
           - {ParameterKey: SshPublicKey,             ParameterValue: "{{ ssh_pub_slurp.content | b64decode | trim }}"}
-          - {ParameterKey: SshPrivateKey,            ParameterValue: "{{ ssh_priv_slurp.content | b64decode | trim if enable_jump_host | bool else '' }}"}
+          - {ParameterKey: SshPrivateKey,            ParameterValue: "{{ ssh_priv_slurp.content | trim if enable_jump_host | bool else '' }}"}
 
     - name: Write ROS parameters to temp file
       ansible.builtin.copy:
