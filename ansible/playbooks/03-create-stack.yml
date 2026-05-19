@@ -334,6 +334,7 @@
 
           template_file = "{{ template_file }}"
           params_file   = "/tmp/ros-params-{{ cluster_name }}.json"
+          log_file      = "/tmp/ros-create-{{ cluster_name }}.log"
 
           with open(template_file) as f:
               template_body = f.read()
@@ -358,18 +359,47 @@
               ]
 
           result = subprocess.run(cmd, capture_output=True, text=True)
+          # Persist outcome to a log file so a follow-up task can show the
+          # error even when no_log censors this task's stdout.
+          with open(log_file, "w") as f:
+              f.write(f"=== RC: {result.returncode} ===\n")
+              f.write(f"=== STDOUT ===\n{result.stdout}\n")
+              f.write(f"=== STDERR ===\n{result.stderr}\n")
           sys.stdout.write(result.stdout)
           sys.stderr.write(result.stderr)
           sys.exit(result.returncode)
           PYEOF
       register: create_result
       no_log: "{{ enable_jump_host | bool }}"   # suppress: cmd args include private key when jump host enabled
+      failed_when: false                         # check rc in dedicated task below so errors stay visible
       when: ros_stack_id is not defined or ros_stack_id | length == 0
+
+    - name: Show CreateStack log on failure (bypasses no_log via separate task)
+      ansible.builtin.command: cat /tmp/ros-create-{{ cluster_name }}.log
+      register: create_log
+      changed_when: false
+      failed_when: false
+      when:
+        - create_result is defined
+        - create_result is not skipped
+        - create_result.rc | default(0) != 0
+
+    - name: Fail with visible CreateStack error
+      ansible.builtin.fail:
+        msg: |
+          CreateStack failed (rc={{ create_result.rc }}). Log contents:
+          {{ create_log.stdout | default('(no log captured)') }}
+      when:
+        - create_result is defined
+        - create_result is not skipped
+        - create_result.rc | default(0) != 0
 
     - name: Capture new stack ID
       ansible.builtin.set_fact:
         ros_stack_id: "{{ (create_result.stdout | from_json).StackId }}"
-      when: create_result is not skipped
+      when:
+        - create_result is not skipped
+        - create_result.rc | default(0) == 0
 
     - name: Delete temp params file (contains private key)
       ansible.builtin.file:
