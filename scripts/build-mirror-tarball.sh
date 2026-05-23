@@ -20,9 +20,30 @@
 #   OSS_BUCKET=openshift-iso-samzhu-test \
 #   REGION=cn-wulanchabu \
 #   CLUSTER_NAME=aliocp1 \
-#   OPENSHIFT_VERSION=4.17 \
-#   AGENT_IMAGE_DIGEST=008935c33fb03bb246c22f8873da7599ec30aa2c \
+#   OPENSHIFT_VERSION=4.20 \
+#   AGENT_IMAGE_DIGEST=<digest from previous infra-env discovery ISO> \
 #       ./build-mirror-tarball.sh
+#
+# Finding AGENT_IMAGE_DIGEST:
+#   The Assisted Installer assigns a specific assisted-installer-agent
+#   digest per OpenShift version.  Two ways to discover it:
+#
+#   (a) From a master node's journalctl after Phase 03 (look for
+#       'Trying to pull registry.redhat.io/rhai/assisted-installer-agent-rhel9:<DIGEST>')
+#
+#   (b) From the AI API directly:
+#       TOKEN=$(curl -s --data-urlencode 'grant_type=refresh_token' \
+#         --data-urlencode 'client_id=cloud-services' \
+#         --data-urlencode "refresh_token=$(cat ~/.openshift/offline-token)" \
+#         https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token \
+#         | jq -r .access_token)
+#       curl -sH "Authorization: Bearer $TOKEN" \
+#         https://api.openshift.com/api/assisted-install/v2/component-versions \
+#         | jq -r '.versions["assisted-installer-agent"]'
+#
+#   If you omit AGENT_IMAGE_DIGEST, the agent image is NOT mirrored — masters
+#   will still need to pull it from registry.redhat.io directly (which is the
+#   exact problem this script is supposed to solve).  Set it.
 
 set -euo pipefail
 
@@ -30,8 +51,8 @@ set -euo pipefail
 OSS_BUCKET="${OSS_BUCKET:?OSS_BUCKET is required}"
 REGION="${REGION:-cn-wulanchabu}"
 CLUSTER_NAME="${CLUSTER_NAME:?CLUSTER_NAME is required}"
-OPENSHIFT_VERSION="${OPENSHIFT_VERSION:-4.17}"
-AGENT_IMAGE_DIGEST="${AGENT_IMAGE_DIGEST:-}"   # optional: pin a specific agent image
+OPENSHIFT_VERSION="${OPENSHIFT_VERSION:-4.20}"
+AGENT_IMAGE_DIGEST="${AGENT_IMAGE_DIGEST:-}"   # see header — strongly recommended
 PULL_SECRET="${PULL_SECRET:-$HOME/.docker/config.json}"
 WORK_DIR="${WORK_DIR:-$(pwd)/mirror-build}"
 TARBALL_NAME="${CLUSTER_NAME}-${OPENSHIFT_VERSION}.tar"
