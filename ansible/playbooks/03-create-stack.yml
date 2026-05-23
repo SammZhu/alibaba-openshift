@@ -920,11 +920,17 @@
       when: mirror_enabled | default(false) | bool
       no_log: true
 
-    # ── PATCH AI cluster with mirror CA bundle so install-config trusts mirror ─
-    # Phase 01 created cluster body without additional_trust_bundle (mirror CA
-    # didn't exist yet).  Now that mirror is up and we have the cert, PATCH
-    # the cluster so install-config's TLS verification passes when bootstrap
-    # pulls release images from the in-VPC mirror.
+    # ── Build install-config overrides + PATCH via dedicated subresource ──────
+    # AI v2 does NOT accept install_config_overrides as a field on POST /clusters
+    # or PATCH /clusters/{id}.  The dedicated endpoint is:
+    #   PATCH /v2/clusters/{id}/install-config
+    # whose body is a JSON STRING (the JSON-encoded overrides document).
+    #
+    # additional_trust_bundle also does NOT exist on V2ClusterUpdateParams —
+    # the canonical way to ship the mirror CA to install-config is to embed
+    # additionalTrustBundle directly in the overrides JSON.  (For the discovery
+    # ISO we use the separate /infra-envs/{id} PATCH below — additional_trust_bundle
+    # IS on infra-env-update-params.)
     - name: Load mirror CA cert content (for PATCH)
       ansible.builtin.slurp:
         src: "{{ output_dir }}/mirror-ca.crt"
@@ -934,17 +940,39 @@
     - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
       when: mirror_enabled | default(false) | bool
 
-    - name: PATCH cluster with mirror additional_trust_bundle
+    - name: Build install_config_overrides JSON (imageDigestSources + CA)
+      ansible.builtin.set_fact:
+        _install_config_overrides_json: >-
+          {{ {
+            'imageDigestSources': [
+              {'source': 'registry.redhat.io/rhai/assisted-installer-agent-rhel9',
+               'mirrors': [mirror_private_ip + ':8443/rhai/assisted-installer-agent-rhel9']},
+              {'source': 'registry.redhat.io/rhai/assisted-installer-rhel9',
+               'mirrors': [mirror_private_ip + ':8443/rhai/assisted-installer-rhel9']},
+              {'source': 'registry.redhat.io/rhai/assisted-installer-controller-rhel9',
+               'mirrors': [mirror_private_ip + ':8443/rhai/assisted-installer-controller-rhel9']},
+              {'source': 'quay.io/openshift-release-dev/ocp-release',
+               'mirrors': [mirror_private_ip + ':8443/openshift-release-dev/ocp-release']},
+              {'source': 'quay.io/openshift-release-dev/ocp-v4.0-art-dev',
+               'mirrors': [mirror_private_ip + ':8443/openshift-release-dev/ocp-v4.0-art-dev']}
+            ],
+            'additionalTrustBundle': mirror_ca_slurp.content | b64decode,
+            'additionalTrustBundlePolicy': 'Always'
+          } | to_json }}
+      when: mirror_enabled | default(false) | bool
+      no_log: true
+
+    - name: PATCH cluster install-config (imageDigestSources + additionalTrustBundle)
       ansible.builtin.uri:
-        url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}/install-config"
         method: PATCH
         headers:
           Authorization: "Bearer {{ ai_access_token }}"
           Content-Type: application/json
-        body:
-          additional_trust_bundle: "{{ mirror_ca_slurp.content | b64decode }}"
-        body_format: json
+        body: "{{ _install_config_overrides_json }}"
+        body_format: json   # ansible JSON-encodes the string into outer quotes
         status_code: 201
+      no_log: true
       when:
         - mirror_enabled | default(false) | bool
         - cluster_id is defined and cluster_id | length > 0

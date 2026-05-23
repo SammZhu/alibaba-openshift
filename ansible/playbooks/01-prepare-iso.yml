@@ -121,64 +121,36 @@
       when: mirror_enabled | default(false) | bool
       no_log: true
 
-    # ── Mirror-registry: build install_config_overrides ────────────────────────
-    # Discovery ISO's registries.conf only affects the discovery agent.
-    # During the actual install, bootstrap + masters use install-config's
-    # imageDigestSources to know where to find release images.  Without this,
-    # bootstrap pulls quay.io/openshift-release-dev/... directly and stalls
-    # on the same cross-border connectivity problem the mirror is solving.
-    - name: Build install_config_overrides with mirror image sources
-      ansible.builtin.set_fact:
-        _install_config_overrides: >-
-          {{ {
-            'imageDigestSources': [
-              {'source': 'registry.redhat.io/rhai/assisted-installer-agent-rhel9',
-               'mirrors': [mirror_private_ip + ':8443/rhai/assisted-installer-agent-rhel9']},
-              {'source': 'registry.redhat.io/rhai/assisted-installer-rhel9',
-               'mirrors': [mirror_private_ip + ':8443/rhai/assisted-installer-rhel9']},
-              {'source': 'registry.redhat.io/rhai/assisted-installer-controller-rhel9',
-               'mirrors': [mirror_private_ip + ':8443/rhai/assisted-installer-controller-rhel9']},
-              {'source': 'quay.io/openshift-release-dev/ocp-release',
-               'mirrors': [mirror_private_ip + ':8443/openshift-release-dev/ocp-release']},
-              {'source': 'quay.io/openshift-release-dev/ocp-v4.0-art-dev',
-               'mirrors': [mirror_private_ip + ':8443/openshift-release-dev/ocp-v4.0-art-dev']}
-            ]
-          } | to_json }}
-      when: mirror_enabled | default(false) | bool
-
     # Build body as a JSON string so integer fields are serialized correctly.
     # In Ansible's uri module, body_format=json with a dict converts values via
     # Python's json.dumps — but only if the Python types are already correct.
     # Using to_json inside Jinja2 guarantees control_plane_count is an int, not "3".
-    - name: Build base cluster create payload
+    #
+    # Mirror notes:
+    # - pull_secret gets the mirror auth entry merged in (so discovery agent +
+    #   bootstrap installer can both auth to the in-VPC registry).
+    # - install-config overrides (imageDigestSources + additionalTrustBundle)
+    #   are NOT applied here — they go via PATCH /v2/clusters/{id}/install-config
+    #   in Phase 03 once the mirror CA cert exists.
+    - name: Build cluster create payload
       ansible.builtin.set_fact:
-        _cluster_body_base: >-
-          {{ {
-            'name': cluster_name,
-            'openshift_version': openshift_version | string,
-            'cpu_architecture': 'x86_64',
-            'base_dns_domain': base_domain,
-            'high_availability_mode': 'Full',
-            'control_plane_count': control_plane_count | int,
-            'pull_secret': _pull_secret_with_mirror if (mirror_enabled | default(false) | bool) else (pull_slurp.content | b64decode),
-            'ssh_public_key': ssh_pub_slurp.content | b64decode | trim,
-            'platform': {
-              'type': 'external',
-              'external': {
-                'platform_name': 'AlibabaCloud',
-                'cloud_controller_manager': 'External'
-              }
+        _cluster_body: "{{ {
+          'name': cluster_name,
+          'openshift_version': openshift_version | string,
+          'cpu_architecture': 'x86_64',
+          'base_dns_domain': base_domain,
+          'high_availability_mode': 'Full',
+          'control_plane_count': control_plane_count | int,
+          'pull_secret': _pull_secret_with_mirror if (mirror_enabled | default(false) | bool) else (pull_slurp.content | b64decode),
+          'ssh_public_key': ssh_pub_slurp.content | b64decode | trim,
+          'platform': {
+            'type': 'external',
+            'external': {
+              'platform_name': 'AlibabaCloud',
+              'cloud_controller_manager': 'External'
             }
-          } }}
-      no_log: true
-
-    # NOTE: install_config_overrides is NOT accepted on POST /v2/clusters
-    # (AI returns 400 "unknown field"). It must be applied via PATCH after
-    # cluster creation. See the "PATCH cluster with install_config_overrides"
-    # task below.
-    - name: Build cluster payload
-      ansible.builtin.set_fact:
-        _cluster_body: "{{ _cluster_body_base | to_json }}"
+          }
+        } | to_json }}"
       no_log: true
 
     - name: Create Assisted cluster object
@@ -206,44 +178,6 @@
         fail_msg: >-
           cluster_id is not set. Cluster creation or adoption failed.
           Check Assisted API response above.
-
-    # ── Mirror: apply install_config_overrides via PATCH ─────────────────────
-    # AI's POST /v2/clusters rejects install_config_overrides as an unknown
-    # field — it must be set via PATCH /v2/clusters/{id} after creation
-    # (works on both freshly-created AND adopted clusters).
-    - name: PATCH cluster with install_config_overrides (mirror config)
-      ansible.builtin.uri:
-        url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
-        method: PATCH
-        headers:
-          Authorization: "Bearer {{ ai_access_token }}"
-          Content-Type: application/json
-        body:
-          install_config_overrides: "{{ _install_config_overrides }}"
-        body_format: json
-        status_code: [200, 201]
-      register: cluster_patch
-      no_log: false   # TEMP: surface API errors
-      failed_when: false
-      when:
-        - mirror_enabled | default(false) | bool
-        - cluster_id is defined and cluster_id | length > 0
-
-    - name: Show PATCH cluster error if non-2xx
-      ansible.builtin.debug:
-        var: cluster_patch
-      when:
-        - cluster_patch is defined
-        - cluster_patch is not skipped
-        - cluster_patch.status | default(0) not in [200, 201]
-
-    - name: Fail if PATCH cluster did not succeed
-      ansible.builtin.fail:
-        msg: "PATCH /clusters/{{ cluster_id }} failed (see Show PATCH cluster error above)."
-      when:
-        - cluster_patch is defined
-        - cluster_patch is not skipped
-        - cluster_patch.status | default(0) not in [200, 201]
 
     # ── Create infra-env (this is what generates the ISO) ──────────────────
     - name: Look up infra-env for the cluster
