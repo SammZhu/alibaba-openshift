@@ -172,14 +172,13 @@
           } }}
       no_log: true
 
-    - name: Build cluster payload (with mirror install-config overrides if enabled)
+    # NOTE: install_config_overrides is NOT accepted on POST /v2/clusters
+    # (AI returns 400 "unknown field"). It must be applied via PATCH after
+    # cluster creation. See the "PATCH cluster with install_config_overrides"
+    # task below.
+    - name: Build cluster payload
       ansible.builtin.set_fact:
-        _cluster_body: >-
-          {{ (_cluster_body_base
-                | combine({'install_config_overrides': _install_config_overrides})
-              if (mirror_enabled | default(false) | bool)
-              else _cluster_body_base)
-             | to_json }}
+        _cluster_body: "{{ _cluster_body_base | to_json }}"
       no_log: true
 
     - name: Create Assisted cluster object
@@ -193,25 +192,8 @@
         body_format: raw
         status_code: 201
       register: cluster_create
-      no_log: false   # TEMP: open log so we see API errors during mirror integration
-      failed_when: false
+      no_log: true
       when: cluster_id is not defined or cluster_id | length == 0
-
-    - name: Show CreateCluster error if non-201
-      ansible.builtin.debug:
-        var: cluster_create
-      when:
-        - cluster_create is defined
-        - cluster_create is not skipped
-        - cluster_create.status | default(0) != 201
-
-    - name: Fail if cluster create did not succeed
-      ansible.builtin.fail:
-        msg: "POST /clusters failed (see Show CreateCluster error above for details)."
-      when:
-        - cluster_create is defined
-        - cluster_create is not skipped
-        - cluster_create.status | default(0) != 201
 
     - name: Capture new cluster ID
       ansible.builtin.set_fact:
@@ -224,6 +206,27 @@
         fail_msg: >-
           cluster_id is not set. Cluster creation or adoption failed.
           Check Assisted API response above.
+
+    # ── Mirror: apply install_config_overrides via PATCH ─────────────────────
+    # AI's POST /v2/clusters rejects install_config_overrides as an unknown
+    # field — it must be set via PATCH /v2/clusters/{id} after creation
+    # (works on both freshly-created AND adopted clusters).
+    - name: PATCH cluster with install_config_overrides (mirror config)
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ ai_access_token }}"
+          Content-Type: application/json
+        body:
+          install_config_overrides: "{{ _install_config_overrides }}"
+        body_format: json
+        status_code: [200, 201]
+      register: cluster_patch
+      no_log: true
+      when:
+        - mirror_enabled | default(false) | bool
+        - cluster_id is defined and cluster_id | length > 0
 
     # ── Create infra-env (this is what generates the ISO) ──────────────────
     - name: Look up infra-env for the cluster
