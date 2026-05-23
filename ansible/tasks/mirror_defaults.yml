@@ -1,0 +1,23 @@
+---
+# Provide fallback defaults for mirror_* variables when mirror_enabled=true.
+#
+# Why: users who selectively add `mirror_enabled: true` to group_vars/all.yml
+# (e.g. via `echo >>` rather than copy-pasting the full template block from
+# group_vars/all.yml.example) end up with mirror_enabled set but the other
+# mirror_* defaults missing.  Without defaults set in the playbook itself,
+# downstream tasks like Augment pull_secret reference undefined facts and
+# fail with censored output.
+#
+# This task normalizes the namespace: after include, ALL mirror_* facts are
+# guaranteed to be defined (with the values from group_vars taking precedence
+# over the defaults below).
+- name: Normalize mirror_* defaults (group_vars wins; fallback otherwise)
+  ansible.builtin.set_fact:
+    mirror_private_ip:     "{{ mirror_private_ip | default('10.0.16.4') }}"
+    mirror_instance_type:  "{{ mirror_instance_type | default('ecs.g7.large') }}"
+    mirror_data_disk_size: "{{ mirror_data_disk_size | default(100) }}"
+    mirror_init_user:      "{{ mirror_init_user | default('mirror-admin') }}"
+    mirror_oss_object: >-
+      {{ mirror_oss_object
+         | default('mirror-tarballs/' + cluster_name + '-' + (openshift_version | string) + '.tar') }}
+  when: mirror_enabled | default(false) | bool

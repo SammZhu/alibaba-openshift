@@ -7,6 +7,7 @@
     iso_path: "{{ output_dir }}/discovery-{{ cluster_name }}.iso"
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/mirror_defaults.yml
     - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
 
     # ── Adopt existing cluster by name to avoid duplicates ─────────────────
