@@ -193,8 +193,28 @@
         body_format: raw
         status_code: 201
       register: cluster_create
-      no_log: true
+      no_log: false   # TEMP: open log so we see API errors during mirror integration
+      failed_when: false
       when: cluster_id is not defined or cluster_id | length == 0
+
+    - name: Show CreateCluster error if non-201
+      ansible.builtin.debug:
+        msg: |
+          POST /clusters returned {{ cluster_create.status | default('?') }}
+          Response body:
+          {{ cluster_create.content | default('(no content)') | from_json | default(cluster_create.content) }}
+      when:
+        - cluster_create is defined
+        - cluster_create is not skipped
+        - cluster_create.status | default(0) != 201
+
+    - name: Fail if cluster create did not succeed
+      ansible.builtin.fail:
+        msg: "POST /clusters failed (see Show CreateCluster error above for details)."
+      when:
+        - cluster_create is defined
+        - cluster_create is not skipped
+        - cluster_create.status | default(0) != 201
 
     - name: Capture new cluster ID
       ansible.builtin.set_fact:
