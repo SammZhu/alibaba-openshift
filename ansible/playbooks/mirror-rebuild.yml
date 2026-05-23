@@ -1,0 +1,128 @@
+---
+# Refresh the mirror-registry's image content from an updated OSS tarball
+# WITHOUT touching the cluster.
+#
+# Use cases:
+#   - You added operator catalogs to imageset-config.yaml and rebuilt the
+#     tarball on your RHEL 8 box.  Want masters to immediately see the new
+#     images without re-running Phase 03 / Phase 04.
+#   - You bumped OPENSHIFT_VERSION and re-mirrored a newer release; want
+#     to swap mirror contents in place before doing an `oc adm upgrade`.
+#   - You suspect the on-disk Quay state is corrupt and want to re-import
+#     from the canonical tarball in OSS.
+#
+# What this playbook does:
+#   1. Loads state.yml — needs mirror_private_ip, mirror_init_user,
+#      mirror_init_password, jump_host_ip.
+#   2. SSHes into the mirror ECS via jump host.
+#   3. Re-downloads tarball from OSS (overwrites existing).
+#   4. Runs `oc mirror --from=TARBALL docker://mirror:8443`.
+#      oc-mirror handles incrementally: only NEW layers are pushed.
+#
+# Usage:
+#   ansible-playbook ansible/playbooks/mirror-rebuild.yml
+#
+# Skip re-download (use existing tarball on the mirror ECS):
+#   ansible-playbook ansible/playbooks/mirror-rebuild.yml \
+#     -e mirror_redownload=false
+- name: Rebuild mirror-registry contents from updated OSS tarball
+  hosts: local
+  gather_facts: false
+  vars:
+    mirror_redownload: true      # set false to reuse on-disk tarball
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: Sanity — required mirror state present
+      ansible.builtin.assert:
+        that:
+          - mirror_enabled | default(false) | bool
+          - mirror_private_ip is defined and mirror_private_ip | length > 0
+          - mirror_init_user is defined and mirror_init_user | length > 0
+          - mirror_init_password is defined and mirror_init_password | length > 0
+          - jump_host_ip is defined and jump_host_ip | length > 0
+          - mirror_oss_object is defined and mirror_oss_object | length > 0
+        fail_msg: |
+          Missing mirror state in state.yml.  This playbook is for rebuilding
+          an EXISTING mirror — run Phase 03 (with mirror_enabled=true) first.
+
+    - name: Confirm mirror ECS is reachable
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -i
+          - "{{ ssh_priv_key_file }}"
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - ConnectTimeout=10
+          - -o
+          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -W %h:%p root@{{ jump_host_ip }}"
+          - "root@{{ mirror_private_ip }}"
+          - "test -f /var/lib/mirror-ready && curl -ksf https://{{ mirror_private_ip }}:8443/health/instance"
+      register: mirror_ping
+      changed_when: false
+      failed_when: mirror_ping.rc != 0
+
+    # ── Re-download tarball from OSS (incremental thanks to OSS resume) ──────
+    # OSS internal endpoint is free + fast (same region).  Same RAM role
+    # already attached to mirror ECS, so no credentials needed.
+    - name: Re-download tarball from OSS (overwrite existing)
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -i
+          - "{{ ssh_priv_key_file }}"
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -W %h:%p root@{{ jump_host_ip }}"
+          - "root@{{ mirror_private_ip }}"
+          - bash
+          - -lc
+          - |
+            set -euxo pipefail
+            aliyun oss cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}" \
+              /var/lib/quay-storage/mirror-tarball.tar \
+              --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
+              --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
+              --part-size=100m --parallel=10 --force
+            ls -lh /var/lib/quay-storage/mirror-tarball.tar
+      register: oss_download
+      changed_when: oss_download.rc == 0
+      when: mirror_redownload | bool
+
+    # ── Re-import tarball (oc-mirror is incremental — only NEW layers pushed) ──
+    # Uses /root/.docker/config.json already populated by cloud-init.
+    - name: Re-import tarball into mirror-registry
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -i
+          - "{{ ssh_priv_key_file }}"
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -W %h:%p root@{{ jump_host_ip }}"
+          - "root@{{ mirror_private_ip }}"
+          - bash
+          - -lc
+          - |
+            set -euxo pipefail
+            oc mirror --from=/var/lib/quay-storage/mirror-tarball.tar \
+              "docker://{{ mirror_private_ip }}:8443"
+            date -Iseconds > /var/lib/mirror-last-rebuild
+      register: oc_mirror_import
+      # oc-mirror import can take a while; don't fail on transient SSH
+      # disconnect — re-run the playbook if needed.
+      changed_when: true
+
+    - name: Show mirror rebuild summary
+      ansible.builtin.debug:
+        msg: |
+          ✓ Mirror contents refreshed from oss://{{ oss_bucket }}/{{ mirror_oss_object }}
+          Mirror endpoint : https://{{ mirror_private_ip }}:8443
+          New images are immediately available to cluster nodes — no Phase 03/04 rerun needed.
+
+          To verify what's in the mirror:
+            ansible-playbook ansible/playbooks/mirror-verify.yml

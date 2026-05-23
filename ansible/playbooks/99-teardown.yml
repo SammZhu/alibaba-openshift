@@ -274,6 +274,47 @@
         - teardown_from | int >= 3
         - ros_stack_id is defined and ros_stack_id | length > 0
 
+    # ── Mirror-registry RAM resources — same pattern as node-policy/role ──────
+    # ALIYUN::RAM::ManagedPolicy + AttachPolicyToRole can fail to delete inside
+    # a ROS stack if the policy is still attached to the role.  Pre-detach +
+    # pre-delete here so the stack deletion path is clean.  Safe to run even
+    # when mirror was never enabled — the commands fail-silently with rc != 0.
+    - name: Pre-detach mirror RAM policy from role (unblocks stack deletion)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ram
+          - DetachPolicyFromRole
+          - --PolicyName
+          - "{{ cluster_name }}-mirror-policy"
+          - --PolicyType
+          - Custom
+          - --RoleName
+          - "{{ cluster_name }}-mirror-role"
+          - --profile
+          - "{{ aliyun_profile }}"
+      failed_when: false
+      changed_when: false
+      when:
+        - teardown_from | int >= 3
+        - ros_stack_id is defined and ros_stack_id | length > 0
+
+    - name: Pre-delete mirror RAM policy (unblocks stack deletion)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ram
+          - DeletePolicy
+          - --PolicyName
+          - "{{ cluster_name }}-mirror-policy"
+          - --profile
+          - "{{ aliyun_profile }}"
+      failed_when: false
+      changed_when: false
+      when:
+        - teardown_from | int >= 3
+        - ros_stack_id is defined and ros_stack_id | length > 0
+
     - name: Delete ROS stack
       ansible.builtin.command:
         argv:
@@ -435,6 +476,10 @@
         - stack_deleted | default(false) | bool
 
     # Case B: stack deleted, AI records + image preserved
+    # mirror_* fields are also cleared — the mirror ECS belongs to the stack
+    # and was destroyed with it.  Phase 03 + Phase 01's "Resolve mirror init
+    # password (auto-generate if blank)" will regenerate a fresh password on
+    # rebuild, which will mismatch the stale one if it isn't cleared here.
     - name: Clear stack IDs from state (stack rebuilt, AI records + image reused)
       ansible.builtin.include_tasks: ../tasks/save_state.yml
       vars:
@@ -452,6 +497,10 @@
           dynamic_manifest_file: ''
           kubeconfig_path: ''
           kubeadmin_password_path: ''
+          mirror_private_ip: ''
+          mirror_init_user: ''
+          mirror_init_password: ''
+          mirror_ca_cert_path: ''
       when:
         - teardown_from | int >= 3
         - keep_image | bool

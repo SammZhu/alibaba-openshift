@@ -1,0 +1,114 @@
+---
+# Verify the mirror-registry is healthy and contains the expected images.
+#
+# Use cases:
+#   - After Phase 03 completed, sanity-check before Phase 04 trigger.
+#   - After mirror-rebuild.yml, confirm new tarball was imported.
+#   - Anytime Phase 04 stalls — first thing to check is "can the mirror
+#     even serve images right now".
+#
+# Usage:
+#   ansible-playbook ansible/playbooks/mirror-verify.yml
+- name: Verify mirror-registry health + contents
+  hosts: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: Sanity — required mirror state present
+      ansible.builtin.assert:
+        that:
+          - mirror_enabled | default(false) | bool
+          - mirror_private_ip is defined and mirror_private_ip | length > 0
+          - mirror_init_user is defined and mirror_init_user | length > 0
+          - mirror_init_password is defined and mirror_init_password | length > 0
+          - jump_host_ip is defined and jump_host_ip | length > 0
+        fail_msg: |
+          Missing mirror state in state.yml.  Run Phase 03 (with mirror_enabled=true)
+          first.
+
+    # ── Quay health endpoint ──────────────────────────────────────────────
+    - name: Check mirror-registry /health/instance endpoint
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -i
+          - "{{ ssh_priv_key_file }}"
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - ConnectTimeout=10
+          - -o
+          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -W %h:%p root@{{ jump_host_ip }}"
+          - "root@{{ mirror_private_ip }}"
+          - "curl -ksf https://{{ mirror_private_ip }}:8443/health/instance"
+      register: health_check
+      changed_when: false
+
+    # ── Quay catalog (list of pushed repos) ───────────────────────────────
+    # Uses Quay's /v2/_catalog endpoint — Docker Distribution v2 standard.
+    - name: List repositories present in the mirror
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -i
+          - "{{ ssh_priv_key_file }}"
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -W %h:%p root@{{ jump_host_ip }}"
+          - "root@{{ mirror_private_ip }}"
+          - "curl -ks -u '{{ mirror_init_user }}:{{ mirror_init_password }}' https://{{ mirror_private_ip }}:8443/v2/_catalog?n=500"
+      register: catalog_check
+      changed_when: false
+      no_log: true   # mirror password is in argv
+
+    - name: Parse repository list
+      ansible.builtin.set_fact:
+        _mirror_repos: "{{ (catalog_check.stdout | from_json).repositories | default([]) }}"
+
+    - name: Show mirror catalog summary
+      ansible.builtin.debug:
+        msg: |
+          ✓ Mirror reachable at https://{{ mirror_private_ip }}:8443
+          ✓ Repositories in mirror: {{ _mirror_repos | length }} total
+
+          Sample (first 10):
+          {% for r in _mirror_repos[:10] %}
+            - {{ r }}
+          {% endfor %}
+          {% if _mirror_repos | length > 10 %}
+            ... + {{ _mirror_repos | length - 10 }} more
+          {% endif %}
+
+    # ── Verify the critical AI component images are present ──────────────
+    - name: Verify required AI agent repo exists in mirror
+      ansible.builtin.assert:
+        that:
+          - "'rhai/assisted-installer-agent-rhel9' in _mirror_repos"
+          - "'rhai/assisted-installer-rhel9' in _mirror_repos"
+          - "'rhai/assisted-installer-controller-rhel9' in _mirror_repos"
+        fail_msg: |
+          Mirror is reachable but is missing one or more critical AI components.
+          Repos found: {{ _mirror_repos | length }}
+          rhai/* entries: {{ _mirror_repos | select('match', '^rhai/') | list }}
+
+          Re-run scripts/build-mirror-tarball.sh on your build host (the
+          OFFLINE_TOKEN_FILE auto-discovery includes all 3), upload to OSS,
+          then `ansible-playbook ansible/playbooks/mirror-rebuild.yml`.
+
+    - name: Verify OpenShift release repo exists in mirror
+      ansible.builtin.assert:
+        that:
+          - _mirror_repos | select('match', '^openshift-release-dev/') | list | length > 0
+        fail_msg: |
+          Mirror has no openshift-release-dev/* repos — Phase 04 will fail
+          when bootstrap tries to pull the release image.
+          Re-run scripts/build-mirror-tarball.sh with a valid OPENSHIFT_VERSION.
+
+    - name: All checks passed
+      ansible.builtin.debug:
+        msg: |
+          ✓ Mirror is healthy and contains all critical images.
+          Safe to proceed with Phase 04:
+            ansible-playbook ansible/playbooks/04-install-cluster.yml
