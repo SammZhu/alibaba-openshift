@@ -1,35 +1,67 @@
-# 自动化脚本套件（已弃用，推荐用 ansible/）
+# Scripts —— legacy 部署脚本 + 活跃维护的 mirror 工具
 
-> **⚠️ 已被 [`ansible/`](../ansible/) 取代**——后者更稳健（原生 retry/idempotent、
-> 结构化 HTTP/JSON、跨 playbook state 自动传递）。本 shell 版本保留作快速参考，
-> 不再维护新特性。
+本目录混了**两类**脚本，注意区分：
+
+| 类别 | 文件 | 状态 |
+|------|------|------|
+| **部署脚本（legacy）** | `01-prepare-iso.sh` ~ `99-teardown.sh`, `all.sh`, `config.sh.example`, `lib/` | ⚠️ **已弃用**，推荐用 [`ansible/`](../ansible/) |
+| **Mirror tarball 构建** | `build-mirror-tarball.sh` | ✅ **活跃维护** —— 没有 ansible 等价物 |
+
+---
+
+## ✅ `build-mirror-tarball.sh`（mirror 工作流用）
+
+在**境外构建主机**（能稳定访问 quay.io）跑，生成 OpenShift 离线镜像 tarball 上传 OSS。
+配套的部署侧（mirror ECS 创建、cloud-init、节点配置）都在 `ansible/`。
+
+```sh
+OFFLINE_TOKEN_FILE=/path/to/offline-token \
+OSS_BUCKET=openshift-iso-samzhu-test \
+CLUSTER_NAME=aliocp1 \
+OPENSHIFT_VERSION=4.20 \
+    ./scripts/build-mirror-tarball.sh
+```
+
+完整工作流（构建 / 部署 / 验证 / 刷新 / teardown / operator 扩展）见
+📘 **[`docs/MIRROR.md`](../docs/MIRROR.md)**
+
+脚本顶部注释含全部环境变量说明 + 手动模式（不依赖 offline-token）。
+
+---
+
+## ⚠️ Legacy 部署脚本（01–99 + all.sh）
+
+> **已被 [`ansible/`](../ansible/) 取代**——后者更稳健（原生 retry/idempotent、
+> 结构化 HTTP/JSON、跨 playbook state 自动传递、且**支持 mirror 工作流**）。
+> 本 shell 版本保留作快速参考，**不再维护新特性，不支持 mirror**。
 >
 > **平台**：仅 RHEL 8 / Alibaba Cloud Linux 3 / 其它 EL8 兼容发行版（GNU coreutils）。
 > macOS / BSD 上某些命令选项不同（`sed -i`/`base64 -w0`/`stat -c%s`），不会跑。
 > 跨平台用 `ansible/`。
 
-
-
 把整个测试流程拆成 6 个脚本，**端到端 ~90 分钟无人值守**（不算等待时间）。
 
-## 文件结构
+### 文件结构
 
 ```
 scripts/
-├── lib/common.sh           # 共用函数库（不直接执行）
-├── config.sh.example       # 配置模板（复制为 config.sh 后编辑）
-├── config.sh               # ← 你的配置（gitignored）
-├── .state                  # ← 跨脚本传递 ID/IP 的状态文件（gitignored）
+├── lib/common.sh                  # 共用函数库（不直接执行）
+├── config.sh.example              # 配置模板（复制为 config.sh 后编辑）
+├── config.sh                      # ← 你的配置（gitignored）
+├── .state                         # ← 跨脚本传递 ID/IP 的状态文件（gitignored）
 │
-├── 01-prepare-iso.sh       # Phase A.1: Assisted API → Discovery ISO
-├── 02-import-image.sh      # Phase A.2-4: OSS 上传 + ECS 镜像导入
-├── 03-create-stack.sh      # Phase B: ROS 栈 + 等就绪 + 拿 Outputs
-├── 04-install-cluster.sh   # Phase C: 等节点 + 分配角色 + 上传 manifest + 装集群 + 拉 kubeconfig
-├── 05-deploy-post-install.sh  # Phase D: 部署 CSI/CAPI（在跳板上跑）
-├── 99-teardown.sh          # Phase G: 销毁集群 + 检测孤儿资源
+├── 01-prepare-iso.sh              # Phase A.1: Assisted API → Discovery ISO
+├── 02-import-image.sh             # Phase A.2-4: OSS 上传 + ECS 镜像导入
+├── 03-create-stack.sh             # Phase B: ROS 栈 + 等就绪 + 拿 Outputs
+├── 04-install-cluster.sh          # Phase C: 等节点 + 分配角色 + 上传 manifest + 装集群 + 拉 kubeconfig
+├── 05-deploy-post-install.sh      # Phase D: 部署 CSI/CAPI（在跳板上跑）
+├── 99-teardown.sh                 # Phase G: 销毁集群 + 检测孤儿资源
 │
-├── all.sh                  # 跑 01-04 一条龙
-└── README.md               # 本文件
+├── all.sh                         # 跑 01-04 一条龙
+│
+├── build-mirror-tarball.sh   ✅   # 活跃维护 — mirror tarball 构建（见上）
+│
+└── README.md                      # 本文件
 ```
 
 ## 一次性准备

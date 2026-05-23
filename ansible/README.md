@@ -23,13 +23,16 @@ ansible/
 │   └── assisted_token.yml         # 刷新 Red Hat access token
 ├── playbooks/
 │   ├── 00-preflight.yml           # CLI + 凭证 + 权限自检
-│   ├── 01-prepare-iso.yml         # Assisted API → Discovery ISO
+│   ├── 01-prepare-iso.yml         # Assisted API → Discovery ISO（mirror_enabled 时注入 registries.conf）
 │   ├── 02-import-image.yml        # OSS 上传 + RAM 角色 + ImportImage + 等就绪
-│   ├── 03-create-stack.yml        # ROS 栈 + 等就绪 + 输出
+│   ├── 03-create-stack.yml        # ROS 栈 + 等就绪 + 输出（mirror_enabled 时多建 mirror ECS）
 │   ├── 04-install-cluster.yml     # 分配角色 + 上传 manifest + 装集群 + 拉 kubeconfig
 │   ├── 05-deploy-post-install.yml # 跳板上跑，部署 CAPI/CSI
 │   ├── 99-teardown.yml            # 应用层清理 + 删栈 + 孤儿扫描
-│   └── site.yml                   # 跑 00-04 一条龙
+│   ├── site.yml                   # 跑 00-04 一条龙
+│   │
+│   ├── mirror-rebuild.yml         # 【mirror only】刷新 mirror 镜像（不动 cluster）
+│   └── mirror-verify.yml          # 【mirror only】mirror 健康检查 + 镜像存在验证
 ├── state.yml                      # 流水线状态（gitignored，自动生成）
 └── README.md
 ```
@@ -85,6 +88,30 @@ ansible-playbook playbooks/99-teardown.yml
 ansible-playbook playbooks/99-teardown.yml -e teardown_confirmed=true
 ```
 
+## Disconnected install via private mirror（cn-* region）
+
+跨境拉 `quay.io` 不稳时，启用 mirror 让节点全部走 VPC 内网拉镜像：
+
+```sh
+# 1. 在境外构建主机构建 tarball 上传 OSS（一次性，跑 scripts/build-mirror-tarball.sh）
+
+# 2. 在 group_vars/all.yml 开 mirror
+echo 'mirror_enabled: true' >> group_vars/all.yml
+echo 'mirror_oss_object: "mirror-tarballs/aliocp1-4.20.tar"' >> group_vars/all.yml
+
+# 3. 正常跑 01-04，Phase 03 后先 verify 再 Phase 04
+ansible-playbook playbooks/01-prepare-iso.yml
+ansible-playbook playbooks/02-import-image.yml
+ansible-playbook playbooks/03-create-stack.yml    # 多 ~30 min（mirror cloud-init）
+ansible-playbook playbooks/mirror-verify.yml      # 健康检查
+ansible-playbook playbooks/04-install-cluster.yml
+
+# 后续刷新 mirror 镜像（加 operator / 升级版本）
+ansible-playbook playbooks/mirror-rebuild.yml     # 不动 cluster
+```
+
+📘 **完整文档**：[`docs/MIRROR.md`](../docs/MIRROR.md)（架构、成本、配置参考、故障排查、设计要点）
+
 ## 失败恢复
 
 每个 playbook 都做了幂等：
@@ -110,3 +137,6 @@ ansible-playbook playbooks/99-teardown.yml -e teardown_confirmed=true
 | ROS stack `CREATE_FAILED` | `aliyun ros GetStackResources --StackId ...` 看哪个资源失败 |
 | Hosts 一直不上线 | ECS 实例没启动？登 ECS VNC 看是否进了 Discovery 界面 |
 | 04 卡 ready | `ai_curl GET /clusters/<id>/host-requirements` 看 validation 哪条没过 |
+| 03 卡 "Wait for mirror registry"（mirror 启用时）| 经 jump host SSH 进 mirror ECS `tail /var/log/mirror-setup.log` 看 cloud-init 进度，或 `mirror-verify.yml` 跑健康检查 |
+| 04 节点拉 mirror 镜像 401 | `pull_secret` 没有 mirror auth — 重跑 Phase 01 自动注入 |
+| 04 节点拉 mirror 镜像 manifest unknown | tarball 缺这个 image — 重 build + `mirror-rebuild.yml` |
