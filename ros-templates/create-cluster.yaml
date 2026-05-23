@@ -1103,7 +1103,7 @@ Resources:
               /var/lib/quay-storage/mirror-tarball.tar \
               --endpoint="oss-${Region}-internal.aliyuncs.com" \
               --mode=EcsRamRole --ecs-role-name "${ClusterName}-mirror-role" \
-              --part-size=100m --parallel=10
+              --part-size=104857600 --parallel=10
 
             # 6. Install mirror-registry
             echo "=== $(date -Iseconds) installing mirror-registry ==="

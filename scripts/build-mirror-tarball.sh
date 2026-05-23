@@ -193,7 +193,7 @@ aliyun oss ls "oss://${OSS_BUCKET}/" \
 echo "[6/6] Uploading tarball + checksum to OSS (this will take a while)..."
 aliyun oss cp "$TARBALL_PATH" "oss://${OSS_BUCKET}/${OSS_OBJECT}" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
-    --part-size=100m --parallel=10 --force
+    --part-size=104857600 --parallel=10 --force
 
 aliyun oss cp "${TARBALL_PATH}.sha256" "oss://${OSS_BUCKET}/${OSS_OBJECT}.sha256" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
