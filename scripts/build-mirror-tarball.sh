@@ -16,34 +16,39 @@
 #   oss://<bucket>/mirror-tarballs/<cluster>-<version>.tar
 #   oss://<bucket>/mirror-tarballs/<cluster>-<version>.tar.sha256
 #
-# Usage:
+# Usage (recommended — auto-discovers all AI component images):
 #   OSS_BUCKET=openshift-iso-samzhu-test \
 #   REGION=cn-wulanchabu \
 #   CLUSTER_NAME=aliocp1 \
 #   OPENSHIFT_VERSION=4.20 \
-#   AGENT_IMAGE_DIGEST=<digest from previous infra-env discovery ISO> \
+#   OFFLINE_TOKEN_FILE=~/.openshift/offline-token \
 #       ./build-mirror-tarball.sh
 #
-# Finding AGENT_IMAGE_DIGEST:
-#   The Assisted Installer assigns a specific assisted-installer-agent
-#   digest per OpenShift version.  Two ways to discover it:
+# Usage (manual — pin specific images):
+#   OSS_BUCKET=... CLUSTER_NAME=... OPENSHIFT_VERSION=4.20 \
+#   AI_AGENT_IMAGE=registry.redhat.io/rhai/assisted-installer-agent-rhel9:008935... \
+#   AI_INSTALLER_IMAGE=registry.redhat.io/rhai/assisted-installer-rhel9:a9bfccc... \
+#   AI_CONTROLLER_IMAGE=registry.redhat.io/rhai/assisted-installer-controller-rhel9:a9bfccc... \
+#       ./build-mirror-tarball.sh
 #
-#   (a) From a master node's journalctl after Phase 03 (look for
-#       'Trying to pull registry.redhat.io/rhai/assisted-installer-agent-rhel9:<DIGEST>')
+# What gets mirrored:
+#   - OpenShift release (platform.channels → ~25 GB of release images)
+#   - discovery-agent (boots from ISO, first image masters pull)
+#   - assisted-installer + assisted-installer-controller (run during install)
 #
-#   (b) From the AI API directly:
-#       TOKEN=$(curl -s --data-urlencode 'grant_type=refresh_token' \
-#         --data-urlencode 'client_id=cloud-services' \
-#         --data-urlencode "refresh_token=$(cat ~/.openshift/offline-token)" \
-#         https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token \
-#         | jq -r .access_token)
-#       curl -sH "Authorization: Bearer $TOKEN" \
-#         https://api.openshift.com/api/assisted-install/v2/component-versions \
-#         | jq -r '.versions["assisted-installer-agent"]'
+# Why all three AI images?  The discovery agent is just the first hurdle —
+# the install phase pulls assisted-installer + controller too.  Missing any
+# of them stalls the install.
 #
-#   If you omit AGENT_IMAGE_DIGEST, the agent image is NOT mirrored — masters
-#   will still need to pull it from registry.redhat.io directly (which is the
-#   exact problem this script is supposed to solve).  Set it.
+# Discover digests manually:
+#   TOKEN=$(curl -s --data-urlencode 'grant_type=refresh_token' \
+#     --data-urlencode 'client_id=cloud-services' \
+#     --data-urlencode "refresh_token=$(cat ~/.openshift/offline-token)" \
+#     https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token \
+#     | jq -r .access_token)
+#   curl -sH "Authorization: Bearer $TOKEN" \
+#     https://api.openshift.com/api/assisted-install/v2/component-versions \
+#     | jq '.versions'
 
 set -euo pipefail
 
@@ -52,7 +57,36 @@ OSS_BUCKET="${OSS_BUCKET:?OSS_BUCKET is required}"
 REGION="${REGION:-cn-wulanchabu}"
 CLUSTER_NAME="${CLUSTER_NAME:?CLUSTER_NAME is required}"
 OPENSHIFT_VERSION="${OPENSHIFT_VERSION:-4.20}"
-AGENT_IMAGE_DIGEST="${AGENT_IMAGE_DIGEST:-}"   # see header — strongly recommended
+OFFLINE_TOKEN_FILE="${OFFLINE_TOKEN_FILE:-$HOME/.openshift/offline-token}"
+
+# Auto-discover AI component images if OFFLINE_TOKEN_FILE exists and AI_* not set.
+if [[ -z "${AI_AGENT_IMAGE:-}" && -r "$OFFLINE_TOKEN_FILE" ]]; then
+  echo "[0/6] Auto-discovering AI component images from openshift.com..."
+  _TOKEN=$(curl -s --data-urlencode 'grant_type=refresh_token' \
+    --data-urlencode 'client_id=cloud-services' \
+    --data-urlencode "refresh_token=$(cat "$OFFLINE_TOKEN_FILE")" \
+    https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token \
+    | jq -r .access_token)
+  if [[ -z "$_TOKEN" || "$_TOKEN" == "null" ]]; then
+    echo "ERROR: failed to get access token from $OFFLINE_TOKEN_FILE"; exit 1
+  fi
+  _VERSIONS=$(curl -sH "Authorization: Bearer $_TOKEN" \
+    https://api.openshift.com/api/assisted-install/v2/component-versions)
+  AI_AGENT_IMAGE="${AI_AGENT_IMAGE:-$(echo "$_VERSIONS" | jq -r '.versions["discovery-agent"]')}"
+  AI_INSTALLER_IMAGE="${AI_INSTALLER_IMAGE:-$(echo "$_VERSIONS" | jq -r '.versions["assisted-installer"]')}"
+  AI_CONTROLLER_IMAGE="${AI_CONTROLLER_IMAGE:-$(echo "$_VERSIONS" | jq -r '.versions["assisted-installer-controller"]')}"
+  echo "    discovery-agent              : $AI_AGENT_IMAGE"
+  echo "    assisted-installer           : $AI_INSTALLER_IMAGE"
+  echo "    assisted-installer-controller: $AI_CONTROLLER_IMAGE"
+fi
+
+# Validate we have all three AI images (either auto-discovered or env-provided)
+for v in AI_AGENT_IMAGE AI_INSTALLER_IMAGE AI_CONTROLLER_IMAGE; do
+  [[ -n "${!v:-}" && "${!v}" != "null" ]] || {
+    echo "ERROR: $v is unset. Provide OFFLINE_TOKEN_FILE for auto-discovery, or set AI_AGENT_IMAGE / AI_INSTALLER_IMAGE / AI_CONTROLLER_IMAGE explicitly."
+    exit 1
+  }
+done
 PULL_SECRET="${PULL_SECRET:-$HOME/.docker/config.json}"
 WORK_DIR="${WORK_DIR:-$(pwd)/mirror-build}"
 TARBALL_NAME="${CLUSTER_NAME}-${OPENSHIFT_VERSION}.tar"
@@ -98,12 +132,12 @@ mirror:
         minVersion: ${OPENSHIFT_VERSION}.0
 EOF
 
-if [[ -n "$AGENT_IMAGE_DIGEST" ]]; then
-  cat >> imageset-config.yaml <<EOF
+cat >> imageset-config.yaml <<EOF
   additionalImages:
-    - name: registry.redhat.io/rhai/assisted-installer-agent-rhel9:${AGENT_IMAGE_DIGEST}
+    - name: ${AI_AGENT_IMAGE}
+    - name: ${AI_INSTALLER_IMAGE}
+    - name: ${AI_CONTROLLER_IMAGE}
 EOF
-fi
 
 # ── Run oc-mirror (the slow step — pulls ~25-30 GB from quay.io) ──────────────
 echo "[3/6] Running oc-mirror (will take 15-60 min depending on link speed)..."
