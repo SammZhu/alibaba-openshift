@@ -223,10 +223,27 @@
         body_format: json
         status_code: [200, 201]
       register: cluster_patch
-      no_log: true
+      no_log: false   # TEMP: surface API errors
+      failed_when: false
       when:
         - mirror_enabled | default(false) | bool
         - cluster_id is defined and cluster_id | length > 0
+
+    - name: Show PATCH cluster error if non-2xx
+      ansible.builtin.debug:
+        var: cluster_patch
+      when:
+        - cluster_patch is defined
+        - cluster_patch is not skipped
+        - cluster_patch.status | default(0) not in [200, 201]
+
+    - name: Fail if PATCH cluster did not succeed
+      ansible.builtin.fail:
+        msg: "PATCH /clusters/{{ cluster_id }} failed (see Show PATCH cluster error above)."
+      when:
+        - cluster_patch is defined
+        - cluster_patch is not skipped
+        - cluster_patch.status | default(0) not in [200, 201]
 
     # ── Create infra-env (this is what generates the ISO) ──────────────────
     - name: Look up infra-env for the cluster
