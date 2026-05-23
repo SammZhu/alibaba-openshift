@@ -61,6 +61,24 @@ teardown_from:      3        # default scope when you run 99-teardown.yml
 keep_image:         true     # true = preserve ECS image on stack rebuild (saves ~30 min re-upload)
 teardown_confirmed: false    # true = skip "Type yes to proceed" prompt (set true for CI/CD)
 
+# ── Disconnected / mirror registry ───────────────────────────────────────────
+# When mirror_enabled=true, Phase 03 creates a dedicated mirror ECS inside
+# the cluster VPC at a static private IP.  Cluster nodes pull all images
+# from this mirror instead of quay.io (solves cross-border connectivity
+# issues in China regions).
+#
+# Generate the tarball ONCE on a host with good quay.io connectivity:
+#   scripts/build-mirror-tarball.sh
+#
+# Then enable here and run Phase 01 → 02 → 03 → 04 as normal.
+mirror_enabled:         false
+mirror_oss_object:      "mirror-tarballs/{{ cluster_name }}-{{ openshift_version }}.tar"
+mirror_private_ip:      "10.0.16.4"           # static IP in private_subnet_cidr
+mirror_instance_type:   "ecs.g7.large"        # 2vCPU/8GB is enough for single-cluster
+mirror_data_disk_size:  100                   # GB for /var/lib/quay-storage
+mirror_init_user:       "mirror-admin"
+mirror_init_password:   ""                    # leave empty to auto-generate
+
 # ── Internal: endpoints (don't change unless instructed) ─────────────────────
 assisted_api:  https://api.openshift.com/api/assisted-install/v2
 sso_url:       https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token

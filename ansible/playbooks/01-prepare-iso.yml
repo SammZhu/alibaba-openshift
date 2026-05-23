@@ -114,17 +114,98 @@
         - infra_list is defined
         - infra_list.json | length > 0
 
-    - name: Build infra-env create payload
+    # ── Mirror registry: build registries.conf override for the discovery ISO ──
+    # Mirror ECS doesn't exist yet (Phase 03 creates it), so we mark the mirror
+    # as insecure rather than try to bake in a CA cert.  Safe because the mirror
+    # lives in a private VPC and is only reachable from cluster nodes.
+    - name: Build registries.conf for mirror (insecure for discovery ISO)
       ansible.builtin.set_fact:
-        _infra_body: "{{ {
-          'name': cluster_name + '-infra',
-          'cluster_id': cluster_id,
-          'image_type': 'full-iso',
-          'pull_secret': pull_slurp.content | b64decode,
-          'ssh_authorized_key': ssh_pub_slurp.content | b64decode | trim,
-          'openshift_version': openshift_version | string,
-          'cpu_architecture': 'x86_64'
-        } | to_json }}"
+        _registries_conf: |
+          [[registry]]
+          prefix = ""
+          location = "registry.redhat.io/rhai/assisted-installer-agent-rhel9"
+          mirror-by-digest-only = true
+
+          [[registry.mirror]]
+          location = "{{ mirror_private_ip }}:8443/rhai/assisted-installer-agent-rhel9"
+          insecure = true
+
+          [[registry]]
+          prefix = ""
+          location = "registry.redhat.io/rhai/assisted-installer-rhel9"
+          mirror-by-digest-only = true
+
+          [[registry.mirror]]
+          location = "{{ mirror_private_ip }}:8443/rhai/assisted-installer-rhel9"
+          insecure = true
+
+          [[registry]]
+          prefix = ""
+          location = "registry.redhat.io/rhai/assisted-installer-controller-rhel9"
+          mirror-by-digest-only = true
+
+          [[registry.mirror]]
+          location = "{{ mirror_private_ip }}:8443/rhai/assisted-installer-controller-rhel9"
+          insecure = true
+
+          [[registry]]
+          prefix = ""
+          location = "quay.io/openshift-release-dev/ocp-release"
+          mirror-by-digest-only = true
+
+          [[registry.mirror]]
+          location = "{{ mirror_private_ip }}:8443/openshift-release-dev/ocp-release"
+          insecure = true
+
+          [[registry]]
+          prefix = ""
+          location = "quay.io/openshift-release-dev/ocp-v4.0-art-dev"
+          mirror-by-digest-only = true
+
+          [[registry.mirror]]
+          location = "{{ mirror_private_ip }}:8443/openshift-release-dev/ocp-v4.0-art-dev"
+          insecure = true
+      when: mirror_enabled | default(false) | bool
+
+    - name: Build ignition config override JSON
+      ansible.builtin.set_fact:
+        _ignition_override: >-
+          {{ {
+            'ignition': {'version': '3.1.0'},
+            'storage': {
+              'files': [{
+                'path': '/etc/containers/registries.conf',
+                'mode': 420,
+                'overwrite': true,
+                'contents': {
+                  'source': 'data:text/plain;base64,' + (_registries_conf | b64encode)
+                }
+              }]
+            }
+          } | to_json }}
+      when: mirror_enabled | default(false) | bool
+
+    - name: Build base infra-env body
+      ansible.builtin.set_fact:
+        _infra_body_base:
+          name: "{{ cluster_name + '-infra' }}"
+          cluster_id: "{{ cluster_id }}"
+          image_type: "full-iso"
+          pull_secret: "{{ pull_slurp.content | b64decode }}"
+          ssh_authorized_key: "{{ ssh_pub_slurp.content | b64decode | trim }}"
+          openshift_version: "{{ openshift_version | string }}"
+          cpu_architecture: "x86_64"
+      no_log: true
+      when: infra_env_id is not defined or infra_env_id | length == 0
+
+    - name: Build infra-env body (with mirror override if enabled)
+      ansible.builtin.set_fact:
+        _infra_body: >-
+          {{ (_infra_body_base
+                | combine({'ignition_config_override': _ignition_override})
+              if (mirror_enabled | default(false) | bool)
+              else _infra_body_base)
+             | to_json }}
       no_log: true
       when: infra_env_id is not defined or infra_env_id | length == 0
 

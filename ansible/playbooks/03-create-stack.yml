@@ -307,6 +307,12 @@
             echo "ecs_image_id: '<ImageId>'" >> ansible/state.yml
       when: ros_stack_id is not defined or ros_stack_id | length == 0
 
+    - name: Resolve mirror init password (auto-generate if blank)
+      ansible.builtin.set_fact:
+        _mirror_init_password_resolved: "{{ mirror_init_password if (mirror_init_password | default('') | length > 0) else lookup('password', '/dev/null length=20 chars=ascii_letters,digits') }}"
+      when: mirror_enabled | default(false) | bool
+      no_log: true
+
     - name: Build ROS Parameters JSON
       ansible.builtin.set_fact:
         ros_params:
@@ -333,7 +339,15 @@
           - {ParameterKey: JumpHostInstanceType,     ParameterValue: "{{ jump_host_type }}"}
           - {ParameterKey: SshPublicKey,             ParameterValue: "{{ ssh_pub_slurp.content | b64decode | trim }}"}
           - {ParameterKey: SshPrivateKey,            ParameterValue: "{{ ssh_priv_slurp.content | trim if enable_jump_host | bool else '' }}"}
-      no_log: "{{ enable_jump_host | bool }}"   # suppress log when private key is present
+          - {ParameterKey: MirrorEnabled,            ParameterValue: "{{ mirror_enabled | default(false) | string | lower }}"}
+          - {ParameterKey: MirrorOssBucket,          ParameterValue: "{{ oss_bucket | default('') }}"}
+          - {ParameterKey: MirrorOssObject,          ParameterValue: "{{ mirror_oss_object | default('') }}"}
+          - {ParameterKey: MirrorPrivateIp,          ParameterValue: "{{ mirror_private_ip | default('10.0.16.4') }}"}
+          - {ParameterKey: MirrorInstanceType,       ParameterValue: "{{ mirror_instance_type | default('ecs.g7.large') }}"}
+          - {ParameterKey: MirrorDataDiskSize,       ParameterValue: "{{ mirror_data_disk_size | default(100) | string }}"}
+          - {ParameterKey: MirrorInitUser,           ParameterValue: "{{ mirror_init_user | default('mirror-admin') }}"}
+          - {ParameterKey: MirrorInitPassword,       ParameterValue: "{{ _mirror_init_password_resolved | default('') }}"}
+      no_log: "{{ enable_jump_host | bool or (mirror_enabled | default(false) | bool) }}"   # suppress log when private key or mirror password is present
       when: ros_stack_id is not defined or ros_stack_id | length == 0
 
     - name: Write ROS parameters to temp file
@@ -844,6 +858,66 @@
           master_ip1: "{{ master_ip1 | default('') }}"
           master_ip2: "{{ master_ip2 | default('') }}"
           master_ip3: "{{ master_ip3 | default('') }}"
+
+    # ── Wait for mirror-registry cloud-init (only when mirror_enabled) ─────────
+    # Mirror ECS cloud-init does: data-disk mount, mirror-registry install,
+    # OSS tarball download, oc-mirror import.  Takes ~25-30 min on first boot.
+    - name: Wait for mirror registry to finish cloud-init (up to 60 min)
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -i
+          - "{{ ssh_priv_key_file }}"
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -W %h:%p root@{{ jump_host_ip }}"
+          - "root@{{ mirror_private_ip }}"
+          - test -f /var/lib/mirror-ready
+      register: mirror_ready_check
+      changed_when: false
+      failed_when: false
+      retries: 60
+      delay: 60
+      until: mirror_ready_check.rc == 0
+      when: mirror_enabled | default(false) | bool
+
+    - name: Fail if mirror not ready after 60 min
+      ansible.builtin.fail:
+        msg: |
+          Mirror ECS at {{ mirror_private_ip }} did not finish cloud-init within 60 min.
+          SSH into it via jump host and inspect /var/log/mirror-setup.log:
+            ssh -J root@{{ jump_host_ip }} root@{{ mirror_private_ip }}
+            tail -100 /var/log/mirror-setup.log
+      when:
+        - mirror_enabled | default(false) | bool
+        - mirror_ready_check is defined
+        - mirror_ready_check.rc | default(0) != 0
+
+    - name: Fetch mirror CA cert to ansible host
+      ansible.builtin.command:
+        argv:
+          - scp
+          - -i
+          - "{{ ssh_priv_key_file }}"
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -W %h:%p root@{{ jump_host_ip }}"
+          - "root@{{ mirror_private_ip }}:/var/lib/mirror-ca.crt"
+          - "{{ output_dir }}/mirror-ca.crt"
+      when: mirror_enabled | default(false) | bool
+
+    - name: Save mirror state (IP + password + CA path)
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        new_state:
+          mirror_private_ip: "{{ mirror_private_ip }}"
+          mirror_init_user: "{{ mirror_init_user | default('mirror-admin') }}"
+          mirror_init_password: "{{ _mirror_init_password_resolved }}"
+          mirror_ca_cert_path: "{{ output_dir }}/mirror-ca.crt"
+      when: mirror_enabled | default(false) | bool
+      no_log: true
 
     - name: Phase 03 done
       ansible.builtin.debug:
