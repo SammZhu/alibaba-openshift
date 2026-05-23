@@ -97,6 +97,23 @@ PULL_SECRET="${PULL_SECRET:-$HOME/.docker/config.json}"
 WORK_DIR="${WORK_DIR:-$(pwd)/mirror-build}"
 TARBALL_NAME="${CLUSTER_NAME}-${OPENSHIFT_VERSION}.tar"
 
+# Auto-discover the latest patch version in the stable channel if not pinned.
+# Setting min=max to a SPECIFIC version makes oc-mirror download just that one
+# release (~25 GB) instead of every release in the upgrade path (250+ GB).
+OPENSHIFT_PATCH_VERSION="${OPENSHIFT_PATCH_VERSION:-}"
+if [[ -z "$OPENSHIFT_PATCH_VERSION" ]]; then
+  echo "[?] Looking up latest stable-${OPENSHIFT_VERSION} release from Cincinnati..."
+  OPENSHIFT_PATCH_VERSION=$(curl -fsSL \
+    "https://api.openshift.com/api/upgrades_info/v1/graph?channel=stable-${OPENSHIFT_VERSION}" \
+    -H 'Accept: application/json' \
+    | jq -r '.nodes[].version' | sort -V | tail -1)
+  [[ -n "$OPENSHIFT_PATCH_VERSION" && "$OPENSHIFT_PATCH_VERSION" != "null" ]] || {
+    echo "ERROR: stable-${OPENSHIFT_VERSION} channel returned no releases. Try OPENSHIFT_VERSION=4.19 or pin OPENSHIFT_PATCH_VERSION=X.Y.Z explicitly."
+    exit 1
+  }
+  echo "    → will mirror $OPENSHIFT_PATCH_VERSION"
+fi
+
 OSS_ENDPOINT="oss-${REGION}.aliyuncs.com"
 OSS_PREFIX="mirror-tarballs"
 OSS_OBJECT="${OSS_PREFIX}/${TARBALL_NAME}"
@@ -135,7 +152,8 @@ mirror:
     channels:
       - name: stable-${OPENSHIFT_VERSION}
         type: ocp
-        minVersion: ${OPENSHIFT_VERSION}.0
+        minVersion: ${OPENSHIFT_PATCH_VERSION}
+        maxVersion: ${OPENSHIFT_PATCH_VERSION}
 EOF
 
 cat >> imageset-config.yaml <<EOF
