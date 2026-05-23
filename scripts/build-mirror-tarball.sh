@@ -21,8 +21,11 @@
 #   REGION=cn-wulanchabu \
 #   CLUSTER_NAME=aliocp1 \
 #   OPENSHIFT_VERSION=4.20 \
-#   OFFLINE_TOKEN_FILE=~/.openshift/offline-token \
+#   OFFLINE_TOKEN_FILE=/full/path/to/offline-token \
 #       ./build-mirror-tarball.sh
+#
+# OFFLINE_TOKEN_FILE has no default — pass your actual token path explicitly.
+# Get a token at https://console.redhat.com/openshift/token
 #
 # Usage (manual — pin specific images):
 #   OSS_BUCKET=... CLUSTER_NAME=... OPENSHIFT_VERSION=4.20 \
@@ -57,11 +60,14 @@ OSS_BUCKET="${OSS_BUCKET:?OSS_BUCKET is required}"
 REGION="${REGION:-cn-wulanchabu}"
 CLUSTER_NAME="${CLUSTER_NAME:?CLUSTER_NAME is required}"
 OPENSHIFT_VERSION="${OPENSHIFT_VERSION:-4.20}"
-OFFLINE_TOKEN_FILE="${OFFLINE_TOKEN_FILE:-$HOME/.openshift/offline-token}"
+OFFLINE_TOKEN_FILE="${OFFLINE_TOKEN_FILE:-}"   # no default — must be passed explicitly
 
 # Auto-discover AI component images if OFFLINE_TOKEN_FILE exists and AI_* not set.
-if [[ -z "${AI_AGENT_IMAGE:-}" && -r "$OFFLINE_TOKEN_FILE" ]]; then
-  echo "[0/6] Auto-discovering AI component images from openshift.com..."
+if [[ -z "${AI_AGENT_IMAGE:-}" && -n "$OFFLINE_TOKEN_FILE" ]]; then
+  [[ -r "$OFFLINE_TOKEN_FILE" ]] || {
+    echo "ERROR: OFFLINE_TOKEN_FILE='$OFFLINE_TOKEN_FILE' not readable"; exit 1
+  }
+  echo "[0/6] Auto-discovering AI component images from openshift.com (token: $OFFLINE_TOKEN_FILE)..."
   _TOKEN=$(curl -s --data-urlencode 'grant_type=refresh_token' \
     --data-urlencode 'client_id=cloud-services' \
     --data-urlencode "refresh_token=$(cat "$OFFLINE_TOKEN_FILE")" \
