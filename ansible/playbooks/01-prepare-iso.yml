@@ -45,29 +45,105 @@
         src: "{{ ssh_pub_key_file }}"
       register: ssh_pub_slurp
 
+    # ── Mirror-registry: resolve admin password (auto-generate if blank) ──────
+    # Saved to state.yml immediately so Phase 03 reads the SAME password when
+    # provisioning mirror-registry — they MUST match (one is used in pull_secret
+    # auth, the other in `mirror-registry install --initPassword`).
+    - name: Resolve mirror init password (auto-generate if blank)
+      ansible.builtin.set_fact:
+        _mirror_init_password_resolved: >-
+          {{ mirror_init_password
+             if (mirror_init_password | default('') | length > 0)
+             else lookup('password', '/dev/null length=20 chars=ascii_letters,digits') }}
+      when: mirror_enabled | default(false) | bool
+      no_log: true
+
+    - name: Persist mirror password to state (Phase 03 reads it from here)
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        new_state:
+          mirror_init_password: "{{ _mirror_init_password_resolved }}"
+      when: mirror_enabled | default(false) | bool
+      no_log: true
+
+    # ── Mirror-registry: augment pull_secret with mirror auth ─────────────────
+    # discovery agent + bootstrap installer will pull from <mirror>:8443 which
+    # requires basic auth (mirror-admin:password).  Without this entry in
+    # pull_secret, pulls 401 even though registries.conf points to the mirror.
+    - name: Augment pull_secret with mirror auth
+      ansible.builtin.set_fact:
+        _pull_secret_with_mirror: >-
+          {{ ((pull_slurp.content | b64decode | from_json)
+              | combine({'auths':
+                  (pull_slurp.content | b64decode | from_json).auths
+                  | combine({ (mirror_private_ip + ':8443'): {
+                      'auth': ((mirror_init_user | default('mirror-admin')) + ':' + _mirror_init_password_resolved) | b64encode,
+                      'email': 'mirror-registry@localhost'
+                    }})
+              }))
+             | to_json }}
+      when: mirror_enabled | default(false) | bool
+      no_log: true
+
+    # ── Mirror-registry: build install_config_overrides ────────────────────────
+    # Discovery ISO's registries.conf only affects the discovery agent.
+    # During the actual install, bootstrap + masters use install-config's
+    # imageDigestSources to know where to find release images.  Without this,
+    # bootstrap pulls quay.io/openshift-release-dev/... directly and stalls
+    # on the same cross-border connectivity problem the mirror is solving.
+    - name: Build install_config_overrides with mirror image sources
+      ansible.builtin.set_fact:
+        _install_config_overrides: >-
+          {{ {
+            'imageDigestSources': [
+              {'source': 'registry.redhat.io/rhai/assisted-installer-agent-rhel9',
+               'mirrors': [mirror_private_ip + ':8443/rhai/assisted-installer-agent-rhel9']},
+              {'source': 'registry.redhat.io/rhai/assisted-installer-rhel9',
+               'mirrors': [mirror_private_ip + ':8443/rhai/assisted-installer-rhel9']},
+              {'source': 'registry.redhat.io/rhai/assisted-installer-controller-rhel9',
+               'mirrors': [mirror_private_ip + ':8443/rhai/assisted-installer-controller-rhel9']},
+              {'source': 'quay.io/openshift-release-dev/ocp-release',
+               'mirrors': [mirror_private_ip + ':8443/openshift-release-dev/ocp-release']},
+              {'source': 'quay.io/openshift-release-dev/ocp-v4.0-art-dev',
+               'mirrors': [mirror_private_ip + ':8443/openshift-release-dev/ocp-v4.0-art-dev']}
+            ]
+          } | to_json }}
+      when: mirror_enabled | default(false) | bool
+
     # Build body as a JSON string so integer fields are serialized correctly.
     # In Ansible's uri module, body_format=json with a dict converts values via
     # Python's json.dumps — but only if the Python types are already correct.
     # Using to_json inside Jinja2 guarantees control_plane_count is an int, not "3".
-    - name: Build cluster create payload
+    - name: Build base cluster create payload
       ansible.builtin.set_fact:
-        _cluster_body: "{{ {
-          'name': cluster_name,
-          'openshift_version': openshift_version | string,
-          'cpu_architecture': 'x86_64',
-          'base_dns_domain': base_domain,
-          'high_availability_mode': 'Full',
-          'control_plane_count': control_plane_count | int,
-          'pull_secret': pull_slurp.content | b64decode,
-          'ssh_public_key': ssh_pub_slurp.content | b64decode | trim,
-          'platform': {
-            'type': 'external',
-            'external': {
-              'platform_name': 'AlibabaCloud',
-              'cloud_controller_manager': 'External'
+        _cluster_body_base: >-
+          {{ {
+            'name': cluster_name,
+            'openshift_version': openshift_version | string,
+            'cpu_architecture': 'x86_64',
+            'base_dns_domain': base_domain,
+            'high_availability_mode': 'Full',
+            'control_plane_count': control_plane_count | int,
+            'pull_secret': _pull_secret_with_mirror if (mirror_enabled | default(false) | bool) else (pull_slurp.content | b64decode),
+            'ssh_public_key': ssh_pub_slurp.content | b64decode | trim,
+            'platform': {
+              'type': 'external',
+              'external': {
+                'platform_name': 'AlibabaCloud',
+                'cloud_controller_manager': 'External'
+              }
             }
-          }
-        } | to_json }}"
+          } }}
+      no_log: true
+
+    - name: Build cluster payload (with mirror install-config overrides if enabled)
+      ansible.builtin.set_fact:
+        _cluster_body: >-
+          {{ (_cluster_body_base
+                | combine({'install_config_overrides': _install_config_overrides})
+              if (mirror_enabled | default(false) | bool)
+              else _cluster_body_base)
+             | to_json }}
       no_log: true
 
     - name: Create Assisted cluster object
@@ -187,14 +263,16 @@
 
     - name: Build base infra-env body
       ansible.builtin.set_fact:
-        _infra_body_base:
-          name: "{{ cluster_name + '-infra' }}"
-          cluster_id: "{{ cluster_id }}"
-          image_type: "full-iso"
-          pull_secret: "{{ pull_slurp.content | b64decode }}"
-          ssh_authorized_key: "{{ ssh_pub_slurp.content | b64decode | trim }}"
-          openshift_version: "{{ openshift_version | string }}"
-          cpu_architecture: "x86_64"
+        _infra_body_base: >-
+          {{ {
+            'name': cluster_name + '-infra',
+            'cluster_id': cluster_id,
+            'image_type': 'full-iso',
+            'pull_secret': _pull_secret_with_mirror if (mirror_enabled | default(false) | bool) else (pull_slurp.content | b64decode),
+            'ssh_authorized_key': ssh_pub_slurp.content | b64decode | trim,
+            'openshift_version': openshift_version | string,
+            'cpu_architecture': 'x86_64'
+          } }}
       no_log: true
       when: infra_env_id is not defined or infra_env_id | length == 0
 

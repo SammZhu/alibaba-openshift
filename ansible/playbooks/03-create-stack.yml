@@ -919,6 +919,50 @@
       when: mirror_enabled | default(false) | bool
       no_log: true
 
+    # ── PATCH AI cluster with mirror CA bundle so install-config trusts mirror ─
+    # Phase 01 created cluster body without additional_trust_bundle (mirror CA
+    # didn't exist yet).  Now that mirror is up and we have the cert, PATCH
+    # the cluster so install-config's TLS verification passes when bootstrap
+    # pulls release images from the in-VPC mirror.
+    - name: Load mirror CA cert content (for PATCH)
+      ansible.builtin.slurp:
+        src: "{{ output_dir }}/mirror-ca.crt"
+      register: mirror_ca_slurp
+      when: mirror_enabled | default(false) | bool
+
+    - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+      when: mirror_enabled | default(false) | bool
+
+    - name: PATCH cluster with mirror additional_trust_bundle
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ ai_access_token }}"
+          Content-Type: application/json
+        body:
+          additional_trust_bundle: "{{ mirror_ca_slurp.content | b64decode }}"
+        body_format: json
+        status_code: 201
+      when:
+        - mirror_enabled | default(false) | bool
+        - cluster_id is defined and cluster_id | length > 0
+
+    - name: PATCH infra-env with mirror additional_trust_bundle
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ ai_access_token }}"
+          Content-Type: application/json
+        body:
+          additional_trust_bundle: "{{ mirror_ca_slurp.content | b64decode }}"
+        body_format: json
+        status_code: 201
+      when:
+        - mirror_enabled | default(false) | bool
+        - infra_env_id is defined and infra_env_id | length > 0
+
     - name: Phase 03 done
       ansible.builtin.debug:
         msg: |
