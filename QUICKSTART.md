@@ -595,68 +595,40 @@ aliyun slb DescribeLoadBalancers --RegionId cn-wulanchabu --Tag.1.TagKey "$TAG_K
 
 ## Disconnected install via private mirror (China regions)
 
-跨境拉 `quay.io` 在 `cn-*` Region 常不稳定（NAT EIP 多次重试也时通时断）。
-启用 **mirror_enabled** 后，Phase 03 会在集群 VPC 内额外建一台 mirror ECS
-（静态私网 IP `10.0.16.4`），cloud-init 自动从 OSS 拉镜像 tarball 并
-跑 `mirror-registry install` + `oc mirror` 导入；集群节点全部走内网 VPC
-拉镜像，不再依赖 `quay.io`。
+跨境拉 `quay.io` 在 `cn-*` region 常不稳定。设 `mirror_enabled: true` 后 Phase 03
+会在集群 VPC 内额外建一台 mirror ECS（静态私网 IP `10.0.16.4`），节点全部走内网拉镜像。
 
-### 适用场景
-- ✅ Region 在 `cn-*`（特别是 `cn-wulanchabu`、`cn-hangzhou` 等跨境带宽紧张的地区）
-- ✅ 多次安装同一版本（一次构建 tarball，多次复用）
-- ❌ 不适用：单次实验性安装（构建 tarball 本身要 ~30-60 min，不划算）
+**3 步速览**：
 
-### 前置条件
-- 一台**境外 / 国际线路**主机（如美西 / 法兰克福 ECS 或本地开发机）做 tarball 构建
-- 该主机要能稳定访问 `quay.io` + 已配置 `aliyun` CLI（用于上传到 OSS）
+```bash
+# Step 1: 境外主机构建 tarball 上传 OSS（一次性，~1-2 小时）
+OFFLINE_TOKEN_FILE=/path/to/offline-token \
+OSS_BUCKET=openshift-iso-samzhu-test \
+CLUSTER_NAME=aliocp1 \
+OPENSHIFT_VERSION=4.20 \
+    ./scripts/build-mirror-tarball.sh
 
-### Step 1 — 在境外主机构建 tarball（一次性）
-```sh
-# 默认上传到 oss://<oss_bucket>/mirror-tarballs/<cluster>-<version>.tar
-./scripts/build-mirror-tarball.sh
-```
-脚本会下载 OCP release + Assisted/Agent installer images，打包成单文件 tarball，
-然后 `aliyun oss cp` 到 OSS bucket（用 `--region cn-wulanchabu`，走 OSS 加速）。
+# Step 2: 在 ansible 机器开 mirror
+echo 'mirror_enabled: true' >> ansible/group_vars/all.yml
+echo 'mirror_oss_object: "mirror-tarballs/aliocp1-4.20.tar"' >> ansible/group_vars/all.yml
 
-### Step 2 — 在 `ansible/group_vars/all.yml` 启用
-```yaml
-mirror_enabled:    true
-mirror_oss_object: "mirror-tarballs/cluster1-4.20.tar"   # 与上一步上传路径一致
-# 其余字段保留默认即可（mirror_private_ip / mirror_instance_type / mirror_data_disk_size）
+# Step 3: 正常跑 + 验证
+ansible-playbook ansible/playbooks/01-prepare-iso.yml
+ansible-playbook ansible/playbooks/02-import-image.yml
+ansible-playbook ansible/playbooks/03-create-stack.yml    # 多 ~30 min（mirror cloud-init）
+ansible-playbook ansible/playbooks/mirror-verify.yml      # Phase 04 前 sanity check
+ansible-playbook ansible/playbooks/04-install-cluster.yml
 ```
 
-### Step 3 — 正常跑 Phase 01 → 02 → 03 → 04
-```sh
-ansible-playbook playbooks/site.yml
-```
-区别只有：
-- Phase 01 的 discovery ISO 里多注入一份 `registries.conf`（指向 mirror 私网 IP，标 `insecure = true`）
-- Phase 03 多建 1 台 mirror ECS（`${cluster}-mirror-registry`），并多等 ~25-30 min 让 cloud-init 跑完（mount 数据盘 / 装 mirror-registry / OSS 下 tarball / `oc mirror` 导入）
-- 节点在 mirror 还没起来时会 retry 拉镜像（agent.service 是无限重试）；mirror Ready 后自动恢复
-- Phase 03 完成后 `output_dir/mirror-ca.crt` 会落地一份 CA cert（Phase 04 不用，但日后调试用）
+**完整文档（架构 / 成本 / 配置参考 / 扩展 operator + CCM / 详细故障排查）**：  
+📘 **[`docs/MIRROR.md`](docs/MIRROR.md)**
 
-### 故障排查
-```sh
-# SSH 到 mirror ECS（经跳板机；mirror 没有公网 IP）
-ssh -J root@<jump-host-ip> root@10.0.16.4
+辅助 playbook（按需用）：
 
-# 看 cloud-init 进度（最常用）
-tail -f /var/log/mirror-setup.log
-
-# mirror-registry 健康检查
-curl -k https://10.0.16.4:8443/health/instance
-
-# Quay containers 状态
-podman ps
-```
-常见原因：
-- OSS 下载超时 → 检查 RAM Role 是否绑上（`${cluster}-mirror-role`），OSS bucket 是否同 Region
-- `mirror-registry install` 失败 → 通常是 podman storage 空间 / SELinux denial，看 `/var/log/mirror-setup.log` 尾部
-- `oc mirror` 报 manifest unknown → tarball 是用错的 OCP 版本构建的，重新跑 `build-mirror-tarball.sh`
-
-### 销毁
-默认 `teardown_from=3` 会销毁整个 ROS 栈，**mirror ECS 一起销毁**。
-OSS 里的 tarball 不动（下次启用直接复用）。
+| Playbook | 用途 |
+|---------|------|
+| `mirror-rebuild.yml` | 刷新 mirror 镜像（不动 cluster），加 operator / 升级版本时用 |
+| `mirror-verify.yml` | 健康检查 + 镜像存在验证 |
 
 ---
 
