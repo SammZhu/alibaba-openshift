@@ -199,10 +199,7 @@
 
     - name: Show CreateCluster error if non-201
       ansible.builtin.debug:
-        msg: |
-          POST /clusters returned {{ cluster_create.status | default('?') }}
-          Response body:
-          {{ cluster_create.content | default('(no content)') | from_json | default(cluster_create.content) }}
+        var: cluster_create
       when:
         - cluster_create is defined
         - cluster_create is not skipped
