@@ -1083,9 +1083,26 @@ Resources:
             install -m 0755 aliyun /usr/local/bin/
             rm -f aliyun-cli-linux-latest-amd64.tgz aliyun
 
-            # 3. Download mirror-registry installer
+            # 3. Download mirror-registry installer FROM OSS (build host put it there)
+            # mirror.openshift.com 307-redirects to access.cdn.redhat.com with a
+            # signed URL that times out from cn-* regions.  We get it from OSS
+            # via the internal endpoint instead — same RAM role, free traffic.
             cd /opt
-            curl -fLO https://mirror.openshift.com/pub/openshift-v4/clients/mirror-registry/latest/mirror-registry.tar.gz
+            # Download the "version marker" file first
+            aliyun oss cp \
+              "oss://${MirrorOssBucket}/mirror-tarballs/mirror-registry-version.txt" \
+              ./mr-version.txt \
+              --endpoint="oss-${Region}-internal.aliyuncs.com" \
+              --mode=EcsRamRole --ecs-role-name "${ClusterName}-mirror-role" --force
+            MR_VERSION=$(cat ./mr-version.txt | tr -d '[:space:]')
+            rm -f ./mr-version.txt
+            echo "    mirror-registry version: $MR_VERSION"
+            aliyun oss cp \
+              "oss://${MirrorOssBucket}/mirror-tarballs/mirror-registry-$MR_VERSION.tar.gz" \
+              ./mirror-registry.tar.gz \
+              --endpoint="oss-${Region}-internal.aliyuncs.com" \
+              --mode=EcsRamRole --ecs-role-name "${ClusterName}-mirror-role" \
+              --part-size=104857600 --parallel=10
             tar xzf mirror-registry.tar.gz
             rm -f mirror-registry.tar.gz
 

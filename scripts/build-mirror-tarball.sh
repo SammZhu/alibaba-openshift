@@ -199,15 +199,49 @@ aliyun oss cp "${TARBALL_PATH}.sha256" "oss://${OSS_BUCKET}/${OSS_OBJECT}.sha256
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
     --force
 
+# ── Also fetch + upload mirror-registry installer to OSS ─────────────────────
+# Why: mirror.openshift.com 307-redirects to access.cdn.redhat.com with a
+# signed query string.  Cloud-init on the in-VPC mirror ECS can't reliably
+# follow this from cn-* regions (cross-border, no Red Hat token).  By
+# staging the installer in OSS alongside the image tarball, cloud-init pulls
+# everything from one place (free VPC-internal traffic).
+echo "[7/8] Fetching mirror-registry installer (~700 MB) from Red Hat..."
+MR_VERSION="${MIRROR_REGISTRY_VERSION:-}"
+if [[ -z "$MR_VERSION" ]]; then
+  MR_VERSION=$(curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/mirror-registry/ \
+    | grep -oE 'href="[^"]+/"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1)
+  [[ -n "$MR_VERSION" ]] || { echo "ERROR: could not discover mirror-registry latest version"; exit 1; }
+  echo "    → using mirror-registry $MR_VERSION (auto-detected; override with MIRROR_REGISTRY_VERSION=)"
+fi
+
+MR_TARBALL="$WORK_DIR/mirror-registry-${MR_VERSION}.tar.gz"
+if [[ ! -s "$MR_TARBALL" ]]; then
+  # developers.redhat.com is the redirect target; anonymous works, no Bearer token
+  curl -fL --retry 5 --retry-delay 10 -o "$MR_TARBALL" \
+    "https://developers.redhat.com/content-gateway/file/pub/openshift-v4/clients/mirror-registry/${MR_VERSION}/mirror-registry.tar.gz"
+fi
+ls -lh "$MR_TARBALL"
+
+echo "[8/8] Uploading mirror-registry installer to OSS..."
+aliyun oss cp "$MR_TARBALL" "oss://${OSS_BUCKET}/${OSS_PREFIX}/mirror-registry-${MR_VERSION}.tar.gz" \
+    --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
+    --part-size=104857600 --parallel=10 --force
+
+# Mark the "current" version so cloud-init can find it without knowing the version
+echo -n "$MR_VERSION" > "$WORK_DIR/mirror-registry-version.txt"
+aliyun oss cp "$WORK_DIR/mirror-registry-version.txt" \
+    "oss://${OSS_BUCKET}/${OSS_PREFIX}/mirror-registry-version.txt" \
+    --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" --force
+
 cat <<EOF
 
 ═══════════════════════════════════════════════════════════════════════
-✓ Mirror tarball ready in OSS
+✓ Mirror artefacts ready in OSS
 
-  Bucket : $OSS_BUCKET
-  Object : $OSS_OBJECT
-  Size   : $TARBALL_SIZE
-  SHA256 : $(cat "${TARBALL_PATH}.sha256")
+  Image tarball     : oss://$OSS_BUCKET/$OSS_OBJECT  ($TARBALL_SIZE)
+  SHA256            : $(cat "${TARBALL_PATH}.sha256")
+  mirror-registry   : oss://$OSS_BUCKET/$OSS_PREFIX/mirror-registry-${MR_VERSION}.tar.gz
+  Version marker    : oss://$OSS_BUCKET/$OSS_PREFIX/mirror-registry-version.txt → $MR_VERSION
 
 Next step — on your local ansible host:
 
