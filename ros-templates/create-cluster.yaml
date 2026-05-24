@@ -1093,7 +1093,8 @@ Resources:
               "oss://${MirrorOssBucket}/mirror-tarballs/mirror-registry-version.txt" \
               ./mr-version.txt \
               --endpoint="oss-${Region}-internal.aliyuncs.com" \
-              --mode=EcsRamRole --ecs-role-name "${ClusterName}-mirror-role" --force
+              --mode=EcsRamRole --ecs-role-name "${ClusterName}-mirror-role" \
+              --region "${Region}" --force
             MR_VERSION=$(cat ./mr-version.txt | tr -d '[:space:]')
             rm -f ./mr-version.txt
             echo "    mirror-registry version: $MR_VERSION"
@@ -1102,7 +1103,7 @@ Resources:
               ./mirror-registry.tar.gz \
               --endpoint="oss-${Region}-internal.aliyuncs.com" \
               --mode=EcsRamRole --ecs-role-name "${ClusterName}-mirror-role" \
-              --part-size=104857600 --parallel=10
+              --region "${Region}" --part-size=104857600 --parallel=10
             tar xzf mirror-registry.tar.gz
             rm -f mirror-registry.tar.gz
 
@@ -1120,7 +1121,7 @@ Resources:
               /var/lib/quay-storage/mirror-tarball.tar \
               --endpoint="oss-${Region}-internal.aliyuncs.com" \
               --mode=EcsRamRole --ecs-role-name "${ClusterName}-mirror-role" \
-              --part-size=104857600 --parallel=10
+              --region "${Region}" --part-size=104857600 --parallel=10
 
             # 6. Install mirror-registry
             echo "=== $(date -Iseconds) installing mirror-registry ==="

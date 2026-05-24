@@ -88,7 +88,7 @@
               /var/lib/quay-storage/mirror-tarball.tar \
               --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
               --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
-              --part-size=104857600 --parallel=10 --force
+              --region "{{ region }}" --part-size=104857600 --parallel=10 --force
             ls -lh /var/lib/quay-storage/mirror-tarball.tar
       register: oss_download
       changed_when: oss_download.rc == 0
