@@ -255,6 +255,11 @@
         set -uxo pipefail
         export HOME=/root
         export USER=root
+        # Preserve the 22 GB tarball before uninstall (which wipes the entire
+        # --quayRoot directory).  Stash to a sibling path, restore after.
+        if [ -s /var/lib/quay-storage/mirror-tarball.tar ]; then
+          mv /var/lib/quay-storage/mirror-tarball.tar /var/lib/mirror-tarball.tar
+        fi
         /opt/mirror-registry uninstall --autoApprove --quayRoot /var/lib/quay-storage 2>&1 || true
         # Belt-and-suspenders: ensure no lingering containers/volumes/services
         systemctl stop quay-app quay-postgres quay-redis quay-pod 2>/dev/null || true
@@ -263,6 +268,11 @@
         podman volume rm -f pg-storage 2>/dev/null || true
         rm -f /etc/systemd/system/quay-*.service
         systemctl daemon-reload
+        # Restore tarball
+        mkdir -p /var/lib/quay-storage
+        if [ -s /var/lib/mirror-tarball.tar ]; then
+          mv /var/lib/mirror-tarball.tar /var/lib/quay-storage/mirror-tarball.tar
+        fi
         REMOTE
       when:
         - already_ready.rc != 0
