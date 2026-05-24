@@ -1,3 +1,5 @@
 group_vars/all.yml
 state.yml
 *.retry
+logs/*
+!logs/.gitkeep
