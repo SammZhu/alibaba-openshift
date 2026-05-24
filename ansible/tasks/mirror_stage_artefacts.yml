@@ -1,0 +1,104 @@
+---
+# Stage the mirror-registry installer + version marker in OSS so Phase 03's
+# mirror-ECS cloud-init can fetch them via the internal endpoint instead of
+# trying to curl from mirror.openshift.com (which 307-redirects through
+# access.cdn.redhat.com to a signed URL that is unreliable from cn-* regions).
+#
+# Caller must define:
+#   - _oss_endpoint  (e.g. "oss-cn-wulanchabu.aliyuncs.com")
+#   - _oss_ak / _oss_sk
+#
+# Idempotency: each OSS object existence is checked before download/upload.
+- name: Mirror — auto-discover latest mirror-registry version (or honor override)
+  ansible.builtin.shell: |
+    if [ -n "{{ mirror_registry_version | default('') }}" ]; then
+      echo "{{ mirror_registry_version }}"
+    else
+      curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/mirror-registry/ \
+        | grep -oE 'href="[^"]+/"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
+        | sort -V | tail -1
+    fi
+  register: _mr_version_query
+  changed_when: false
+
+- name: Mirror — set version fact
+  ansible.builtin.set_fact:
+    _mirror_registry_version: "{{ _mr_version_query.stdout | trim }}"
+
+- name: Mirror — assert version discovered
+  ansible.builtin.assert:
+    that: _mirror_registry_version | length > 0
+    fail_msg: |
+      Could not auto-discover mirror-registry version.  Possible causes:
+        - This host can't reach mirror.openshift.com
+        - The directory listing format changed
+      Workaround: pass an explicit version via group_vars or -e:
+        mirror_registry_version: "1.3.11"
+
+- name: Mirror — check whether installer already in OSS (idempotency)
+  ansible.builtin.command:
+    argv:
+      - aliyun
+      - oss
+      - stat
+      - "oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-{{ _mirror_registry_version }}.tar.gz"
+      - "--endpoint={{ _oss_endpoint }}"
+      - "--access-key-id={{ _oss_ak }}"
+      - "--access-key-secret={{ _oss_sk }}"
+  register: _mr_oss_stat
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Mirror — download installer from Red Hat (anonymous; ~700 MB, may take 5-15 min)
+  ansible.builtin.get_url:
+    url: "https://developers.redhat.com/content-gateway/file/pub/openshift-v4/clients/mirror-registry/{{ _mirror_registry_version }}/mirror-registry.tar.gz"
+    dest: "/tmp/mirror-registry-{{ _mirror_registry_version }}.tar.gz"
+    mode: "0644"
+    timeout: 60
+    force: false
+  when: _mr_oss_stat.rc != 0
+
+- name: Mirror — upload installer to OSS
+  ansible.builtin.command:
+    argv:
+      - aliyun
+      - oss
+      - cp
+      - "/tmp/mirror-registry-{{ _mirror_registry_version }}.tar.gz"
+      - "oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-{{ _mirror_registry_version }}.tar.gz"
+      - "--endpoint={{ _oss_endpoint }}"
+      - "--access-key-id={{ _oss_ak }}"
+      - "--access-key-secret={{ _oss_sk }}"
+      - "--part-size=104857600"
+      - "--parallel=10"
+      - "--force"
+  when: _mr_oss_stat.rc != 0
+  no_log: true
+
+- name: Mirror — write local version-marker file
+  ansible.builtin.copy:
+    content: "{{ _mirror_registry_version }}"
+    dest: "/tmp/mirror-registry-version.txt"
+    mode: "0644"
+
+- name: Mirror — upload version marker to OSS (always; cheap; cloud-init reads it)
+  ansible.builtin.command:
+    argv:
+      - aliyun
+      - oss
+      - cp
+      - "/tmp/mirror-registry-version.txt"
+      - "oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-version.txt"
+      - "--endpoint={{ _oss_endpoint }}"
+      - "--access-key-id={{ _oss_ak }}"
+      - "--access-key-secret={{ _oss_sk }}"
+      - "--force"
+  no_log: true
+
+- name: Mirror — report staged artefacts
+  ansible.builtin.debug:
+    msg: |
+      ✓ Mirror artefacts staged in OSS:
+          oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-{{ _mirror_registry_version }}.tar.gz
+          oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-version.txt → {{ _mirror_registry_version }}

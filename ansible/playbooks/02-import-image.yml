@@ -10,6 +10,7 @@
     _oss_endpoint: "oss-{{ region }}.aliyuncs.com"
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/mirror_defaults.yml
 
     - name: Assert ISO exists from Phase 01
       ansible.builtin.stat:
@@ -270,6 +271,13 @@
       changed_when: oss_rm.rc == 0
       failed_when: false   # non-fatal: object may already be gone
       no_log: true
+
+    # ── Mirror: stage mirror-registry installer in OSS (when mirror_enabled) ────
+    # Phase 03's cloud-init pulls this from OSS instead of mirror.openshift.com
+    # (which 307-redirects to access.cdn.redhat.com — unreachable from cn-* VPC).
+    # Idempotent: skips download/upload if the matching version is already in OSS.
+    - ansible.builtin.include_tasks: ../tasks/mirror_stage_artefacts.yml
+      when: mirror_enabled | default(false) | bool
 
     - name: Phase 02 done
       ansible.builtin.debug:
