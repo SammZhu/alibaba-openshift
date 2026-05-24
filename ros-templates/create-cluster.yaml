@@ -1063,11 +1063,14 @@ Resources:
             exec > /var/log/mirror-setup.log 2>&1
             echo "=== $(date -Iseconds) cloud-init started ==="
 
-            # cloud-init systemd unit may not export HOME; mirror-registry
-            # then resolves --sshKey default to '/.ssh/quay_installer' which
-            # fails ('open /.ssh/quay_installer.pub: no such file or directory').
-            # Set HOME so mirror-registry (and any other ~ users) find /root.
+            # cloud-init systemd unit doesn't export HOME or USER; mirror-registry
+            # then resolves:
+            #   --sshKey default → '/.ssh/quay_installer' (HOME empty)
+            #   --targetUsername default ${USER} → '' → inventory entry "@host"
+            #     which fails with: "fatal: [@host]: UNREACHABLE! ... usage: ssh ..."
+            # Set both so mirror-registry's defaults work end-to-end.
             export HOME=/root
+            export USER=root
 
             # 0. Authorise operator SSH key for root so Ansible can SSH in
             mkdir -p /root/.ssh && chmod 700 /root/.ssh
