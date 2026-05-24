@@ -127,9 +127,9 @@ cd "$WORK_DIR"
 
 # ── Install oc + oc-mirror if missing ─────────────────────────────────────────
 if ! command -v oc-mirror >/dev/null; then
-  echo "[1/6] Installing oc + oc-mirror..."
-  curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/oc/latest/openshift-client-linux.tar.gz | tar -xz oc
-  curl -sLO https://mirror.openshift.com/pub/openshift-v4/clients/oc-mirror/latest/oc-mirror.tar.gz
+  echo "[1/6] Installing oc + oc-mirror (versioned URLs — /latest/ is now 404)..."
+  curl -sL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OPENSHIFT_PATCH_VERSION/openshift-client-linux.tar.gz" | tar -xz oc
+  curl -sLO "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OPENSHIFT_PATCH_VERSION/oc-mirror.tar.gz"
   tar -xzf oc-mirror.tar.gz
   chmod +x oc oc-mirror
   sudo mv oc oc-mirror /usr/local/bin/

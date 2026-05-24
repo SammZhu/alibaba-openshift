@@ -1107,9 +1107,22 @@ Resources:
             tar xzf mirror-registry.tar.gz
             rm -f mirror-registry.tar.gz
 
-            # 4. Download oc + oc-mirror
-            curl -fL https://mirror.openshift.com/pub/openshift-v4/clients/oc/latest/openshift-client-linux.tar.gz | tar xz oc
-            curl -fLO https://mirror.openshift.com/pub/openshift-v4/clients/oc-mirror/latest/oc-mirror.tar.gz
+            # 4. Download oc + oc-mirror using VERSIONED URLs
+            # /latest/ symlinks on mirror.openshift.com are now 404; URL must
+            # pin to a specific patch.  Phase 02 stages the patch version in
+            # OSS as openshift-patch-version.txt — read it first.
+            aliyun oss cp \
+              "oss://${MirrorOssBucket}/mirror-tarballs/openshift-patch-version.txt" \
+              ./ocp-version.txt \
+              --endpoint="oss-${Region}-internal.aliyuncs.com" \
+              --mode=EcsRamRole --ecs-role-name "${ClusterName}-mirror-role" \
+              --region "${Region}" --force
+            OCP_VERSION=$(cat ./ocp-version.txt | tr -d '[:space:]')
+            rm -f ./ocp-version.txt
+            echo "    OpenShift patch version: $OCP_VERSION"
+
+            curl -fL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OCP_VERSION/openshift-client-linux.tar.gz" | tar xz oc
+            curl -fLO "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OCP_VERSION/oc-mirror.tar.gz"
             tar xzf oc-mirror.tar.gz
             chmod +x oc oc-mirror
             install -m 0755 oc oc-mirror /usr/local/bin/

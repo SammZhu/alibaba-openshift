@@ -97,9 +97,58 @@
       - "--force"
   no_log: true
 
+# ── Also stage the OpenShift patch version marker ─────────────────────────────
+# Cloud-init constructs the versioned URL for oc + oc-mirror download.  The
+# previous /latest/ symlinks on mirror.openshift.com are 404 now; URLs must
+# pin to a specific patch (e.g. .../ocp/4.20.22/oc-mirror.tar.gz).
+- name: Mirror — discover OpenShift patch version (from Cincinnati)
+  ansible.builtin.shell: |
+    V={{ (openshift_patch_version | default('')) | quote }}
+    if [ -n "$V" ]; then
+      echo "$V"
+    else
+      curl -sfSL "https://api.openshift.com/api/upgrades_info/v1/graph?channel=stable-{{ openshift_version }}" \
+        -H 'Accept: application/json' \
+        | jq -r '.nodes[].version' | sort -V | tail -1
+    fi
+  register: _ocp_patch_query
+  changed_when: false
+
+- name: Mirror — set OpenShift patch version fact
+  ansible.builtin.set_fact:
+    _openshift_patch_version: "{{ _ocp_patch_query.stdout | trim }}"
+
+- name: Mirror — assert OpenShift patch version discovered
+  ansible.builtin.assert:
+    that: _openshift_patch_version | length > 0
+    fail_msg: |
+      Could not auto-discover OpenShift patch version for channel
+      stable-{{ openshift_version }}.  Override with -e openshift_patch_version=X.Y.Z.
+
+- name: Mirror — write local OpenShift patch version marker
+  ansible.builtin.copy:
+    content: "{{ _openshift_patch_version }}"
+    dest: "/tmp/openshift-patch-version.txt"
+    mode: "0644"
+
+- name: Mirror — upload OpenShift patch version marker to OSS
+  ansible.builtin.command:
+    argv:
+      - aliyun
+      - oss
+      - cp
+      - "/tmp/openshift-patch-version.txt"
+      - "oss://{{ oss_bucket }}/mirror-tarballs/openshift-patch-version.txt"
+      - "--endpoint={{ _oss_endpoint }}"
+      - "--access-key-id={{ _oss_ak }}"
+      - "--access-key-secret={{ _oss_sk }}"
+      - "--force"
+  no_log: true
+
 - name: Mirror — report staged artefacts
   ansible.builtin.debug:
     msg: |
       ✓ Mirror artefacts staged in OSS:
           oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-{{ _mirror_registry_version }}.tar.gz
           oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-version.txt → {{ _mirror_registry_version }}
+          oss://{{ oss_bucket }}/mirror-tarballs/openshift-patch-version.txt → {{ _openshift_patch_version }}
