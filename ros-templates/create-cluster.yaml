@@ -1059,25 +1059,21 @@ Resources:
         Fn::Base64:
           Fn::Sub: |
             #!/bin/bash
+            # MINIMAL bootstrap — just make the host SSH-able and disk-mounted.
+            # The heavy work (mirror-registry install, oc mirror import, AI
+            # PATCH) happens later via ansible/playbooks/mirror-prepare.yml.
+            # That way a fix to the install logic doesn't require a full
+            # stack teardown — re-run the prepare playbook idempotently.
             set -euxo pipefail
-            exec > /var/log/mirror-setup.log 2>&1
-            echo "=== $(date -Iseconds) cloud-init started ==="
+            exec > /var/log/mirror-bootstrap.log 2>&1
+            echo "=== $(date -Iseconds) bootstrap started ==="
 
-            # cloud-init systemd unit doesn't export HOME or USER; mirror-registry
-            # then resolves:
-            #   --sshKey default → '/.ssh/quay_installer' (HOME empty)
-            #   --targetUsername default ${USER} → '' → inventory entry "@host"
-            #     which fails with: "fatal: [@host]: UNREACHABLE! ... usage: ssh ..."
-            # Set both so mirror-registry's defaults work end-to-end.
-            export HOME=/root
-            export USER=root
-
-            # 0. Authorise operator SSH key for root so Ansible can SSH in
+            # 1. Authorise operator SSH key so ansible can reach this host
             mkdir -p /root/.ssh && chmod 700 /root/.ssh
             echo "${SshPublicKey}" >> /root/.ssh/authorized_keys
             chmod 600 /root/.ssh/authorized_keys
 
-            # 1. Wait for + mount data disk
+            # 2. Wait for + mount the 100 GB data disk
             DATA_DISK=/dev/vdb
             for i in $(seq 1 60); do [ -b "$DATA_DISK" ] && break; sleep 2; done
             mkfs.xfs -f "$DATA_DISK"
@@ -1085,93 +1081,18 @@ Resources:
             mount "$DATA_DISK" /var/lib/quay-storage
             echo "$DATA_DISK /var/lib/quay-storage xfs defaults 0 0" >> /etc/fstab
 
-            # 2. Install dependencies
+            # 3. Install base packages (cheap; saves time later)
             dnf install -y podman tar curl jq
+
+            # 4. Install aliyun CLI (needed by mirror-prepare for OSS download)
             curl -fLO https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz
             tar xzf aliyun-cli-linux-latest-amd64.tgz
             install -m 0755 aliyun /usr/local/bin/
             rm -f aliyun-cli-linux-latest-amd64.tgz aliyun
 
-            # 3. Download mirror-registry installer FROM OSS (build host put it there)
-            # mirror.openshift.com 307-redirects to access.cdn.redhat.com with a
-            # signed URL that times out from cn-* regions.  We get it from OSS
-            # via the internal endpoint instead — same RAM role, free traffic.
-            cd /opt
-            # Download the "version marker" file first
-            aliyun oss cp \
-              "oss://${MirrorOssBucket}/mirror-tarballs/mirror-registry-version.txt" \
-              ./mr-version.txt \
-              --endpoint="oss-${Region}-internal.aliyuncs.com" \
-              --mode=EcsRamRole --ecs-role-name "${ClusterName}-mirror-role" \
-              --region "${Region}" --force
-            MR_VERSION=$(cat ./mr-version.txt | tr -d '[:space:]')
-            rm -f ./mr-version.txt
-            echo "    mirror-registry version: $MR_VERSION"
-            aliyun oss cp \
-              "oss://${MirrorOssBucket}/mirror-tarballs/mirror-registry-$MR_VERSION.tar.gz" \
-              ./mirror-registry.tar.gz \
-              --endpoint="oss-${Region}-internal.aliyuncs.com" \
-              --mode=EcsRamRole --ecs-role-name "${ClusterName}-mirror-role" \
-              --region "${Region}" --part-size=104857600 --parallel=10
-            tar xzf mirror-registry.tar.gz
-            rm -f mirror-registry.tar.gz
-
-            # 4. Download oc + oc-mirror using VERSIONED URLs
-            # /latest/ symlinks on mirror.openshift.com are now 404; URL must
-            # pin to a specific patch.  Phase 02 stages the patch version in
-            # OSS as openshift-patch-version.txt — read it first.
-            aliyun oss cp \
-              "oss://${MirrorOssBucket}/mirror-tarballs/openshift-patch-version.txt" \
-              ./ocp-version.txt \
-              --endpoint="oss-${Region}-internal.aliyuncs.com" \
-              --mode=EcsRamRole --ecs-role-name "${ClusterName}-mirror-role" \
-              --region "${Region}" --force
-            OCP_VERSION=$(cat ./ocp-version.txt | tr -d '[:space:]')
-            rm -f ./ocp-version.txt
-            echo "    OpenShift patch version: $OCP_VERSION"
-
-            curl -fL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OCP_VERSION/openshift-client-linux.tar.gz" | tar xz oc
-            curl -fLO "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OCP_VERSION/oc-mirror.tar.gz"
-            tar xzf oc-mirror.tar.gz
-            chmod +x oc oc-mirror
-            install -m 0755 oc oc-mirror /usr/local/bin/
-            rm -f oc oc-mirror oc-mirror.tar.gz
-
-            # 5. Download tarball from OSS via RAM role + internal endpoint
-            echo "=== $(date -Iseconds) downloading tarball from OSS ==="
-            aliyun oss cp "oss://${MirrorOssBucket}/${MirrorOssObject}" \
-              /var/lib/quay-storage/mirror-tarball.tar \
-              --endpoint="oss-${Region}-internal.aliyuncs.com" \
-              --mode=EcsRamRole --ecs-role-name "${ClusterName}-mirror-role" \
-              --region "${Region}" --part-size=104857600 --parallel=10
-
-            # 6. Install mirror-registry
-            echo "=== $(date -Iseconds) installing mirror-registry ==="
-            /opt/mirror-registry install \
-              --quayHostname "${MirrorPrivateIp}" \
-              --quayRoot /var/lib/quay-storage \
-              --initUser "${MirrorInitUser}" \
-              --initPassword "${MirrorInitPassword}"
-
-            # 7. Trust cert + import tarball
-            cp /var/lib/quay-storage/quay-rootCA/rootCA.pem /etc/pki/ca-trust/source/anchors/quay-mirror.crt
-            update-ca-trust extract
-
-            mkdir -p /root/.docker
-            cat > /root/.docker/config.json <<DOCKEREOF
-            {"auths":{"${MirrorPrivateIp}:8443":{"auth":"$(echo -n "${MirrorInitUser}:${MirrorInitPassword}" | base64 -w0)"}}}
-            DOCKEREOF
-
-            until curl -ksf "https://${MirrorPrivateIp}:8443/health/instance"; do sleep 5; done
-
-            echo "=== $(date -Iseconds) importing tarball into mirror-registry ==="
-            oc mirror --from=/var/lib/quay-storage/mirror-tarball.tar \
-              "docker://${MirrorPrivateIp}:8443"
-
-            # 8. Expose CA + signal ready
-            cp /var/lib/quay-storage/quay-rootCA/rootCA.pem /var/lib/mirror-ca.crt
-            echo "$(date -Iseconds) READY" > /var/lib/mirror-ready
-            echo "=== $(date -Iseconds) mirror ready ==="
+            # 5. Signal "host is ready for ansible to take over"
+            echo "$(date -Iseconds) BOOTSTRAP_READY" > /var/lib/mirror-bootstrap-ready
+            echo "=== $(date -Iseconds) bootstrap complete; awaiting mirror-prepare.yml ==="
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
           Value: owned

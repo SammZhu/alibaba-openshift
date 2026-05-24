@@ -1,0 +1,339 @@
+---
+# mirror-prepare.yml — set up the mirror-registry on the bare ECS that
+# Phase 03's ROS stack created.  Runs AFTER Phase 03, BEFORE Phase 04.
+#
+# Why a separate playbook (not cloud-init):
+#   - Iterative debugging.  A bug in install/import logic doesn't force
+#     re-creation of the whole ROS stack (VPC + 4 ECS instances + SLB + NAT).
+#     Fix the playbook, re-run.  Each step is idempotent.
+#   - Better error visibility.  ansible logs go to ansible/logs/ansible.log;
+#     cloud-init logs are buried in /var/log/cloud-init-output.log.
+#   - Standard ansible patterns: until/retries, when conditions, no_log
+#     gating, jinja templating — all easier than bash heredoc in UserData.
+#
+# Idempotency strategy:
+#   - Each "do work" task is guarded by a prior "check if already done" task.
+#   - Re-running on a fully-prepared mirror is a no-op (~30 seconds).
+#   - Re-running after a mid-flight failure resumes from the failed step.
+- name: Prepare mirror-registry on the bare ECS provisioned by Phase 03
+  hosts: local
+  gather_facts: false
+  vars:
+    _ssh_common_args: "-i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+    _ssh_proxy_args: "-o ProxyCommand='ssh {{ _ssh_common_args }} -W %h:%p root@{{ jump_host_ip }}'"
+    _ssh_root_mirror: "ssh {{ _ssh_common_args }} {{ _ssh_proxy_args }} root@{{ mirror_private_ip }}"
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
+    - ansible.builtin.include_tasks: ../tasks/mirror_defaults.yml
+
+    - name: Sanity — Phase 03 ran with mirror_enabled and saved its outputs
+      ansible.builtin.assert:
+        that:
+          - mirror_enabled | default(false) | bool
+          - mirror_private_ip is defined and mirror_private_ip | length > 0
+          - mirror_init_user is defined and mirror_init_user | length > 0
+          - mirror_init_password is defined and mirror_init_password | length > 0
+          - jump_host_ip is defined and jump_host_ip | length > 0
+          - cluster_id is defined and cluster_id | length > 0
+          - infra_env_id is defined and infra_env_id | length > 0
+          - oss_bucket is defined and oss_bucket | length > 0
+          - mirror_oss_object is defined and mirror_oss_object | length > 0
+        fail_msg: |
+          Required state is missing.  This playbook runs AFTER Phase 03 and
+          requires:
+            - mirror_enabled=true in group_vars
+            - Phase 03 completed (state.yml has mirror_private_ip / jump_host_ip
+              / cluster_id / infra_env_id)
+            - mirror_oss_object / oss_bucket configured
+
+    # ── Step 1: wait for ECS bootstrap signal ────────────────────────────────
+    # Cloud-init wrote /var/lib/mirror-bootstrap-ready when the host is
+    # SSH-able + has the data disk mounted + has aliyun CLI installed.
+    - name: Wait for mirror ECS bootstrap-ready signal (up to 10 min)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} -o ConnectTimeout=5 test -f /var/lib/mirror-bootstrap-ready
+      register: bootstrap_check
+      changed_when: false
+      failed_when: false
+      retries: 30
+      delay: 20
+      until: bootstrap_check.rc == 0
+
+    - name: Fail if mirror ECS not bootstrap-ready
+      ansible.builtin.fail:
+        msg: |
+          Mirror ECS at {{ mirror_private_ip }} is not SSH-reachable or did not
+          finish minimal cloud-init within 10 min.
+          Debug:
+            ssh -J root@{{ jump_host_ip }} root@{{ mirror_private_ip }} \
+              cat /var/log/mirror-bootstrap.log
+      when: bootstrap_check.rc | default(0) != 0
+
+    # ── Step 2: idempotent check — is mirror already ready? ─────────────────
+    # If /var/lib/mirror-ready exists, all heavy work is done.  Skip to the
+    # AI PATCH step (which is also idempotent).
+    - name: Check if mirror is already fully prepared
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} test -f /var/lib/mirror-ready
+      register: already_ready
+      changed_when: false
+      failed_when: false
+
+    - name: Mirror already ready — skipping heavy work
+      ansible.builtin.debug:
+        msg: "mirror-registry is already ready (/var/lib/mirror-ready exists). Skipping install + import + PATCH still runs."
+      when: already_ready.rc == 0
+
+    # ── Step 3: download mirror-registry installer from OSS ──────────────────
+    - name: Check if mirror-registry installer already extracted
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} test -x /opt/mirror-registry
+      register: mr_installer_present
+      changed_when: false
+      failed_when: false
+      when: already_ready.rc != 0
+
+    - name: Download + extract mirror-registry installer
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        cd /opt
+        aliyun oss cp \
+          "oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-version.txt" \
+          ./mr-version.txt \
+          --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
+          --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
+          --region "{{ region }}" --force
+        MR_VERSION=$(cat ./mr-version.txt | tr -d '[:space:]')
+        rm -f ./mr-version.txt
+        echo "    mirror-registry version: $MR_VERSION"
+        aliyun oss cp \
+          "oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-$MR_VERSION.tar.gz" \
+          ./mirror-registry.tar.gz \
+          --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
+          --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
+          --region "{{ region }}" --part-size=104857600 --parallel=10
+        tar xzf mirror-registry.tar.gz
+        rm -f mirror-registry.tar.gz
+        REMOTE
+      when:
+        - already_ready.rc != 0
+        - mr_installer_present.rc | default(1) != 0
+
+    # ── Step 4: download oc + oc-mirror via versioned URL ───────────────────
+    - name: Check if oc + oc-mirror already installed
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} 'command -v oc && command -v oc-mirror'
+      register: oc_tools_present
+      changed_when: false
+      failed_when: false
+      when: already_ready.rc != 0
+
+    - name: Download + install oc + oc-mirror
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        cd /tmp
+        aliyun oss cp \
+          "oss://{{ oss_bucket }}/mirror-tarballs/openshift-patch-version.txt" \
+          ./ocp-version.txt \
+          --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
+          --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
+          --region "{{ region }}" --force
+        OCP_VERSION=$(cat ./ocp-version.txt | tr -d '[:space:]')
+        rm -f ./ocp-version.txt
+        echo "    OpenShift patch version: $OCP_VERSION"
+        curl -fL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OCP_VERSION/openshift-client-linux.tar.gz" | tar xz oc
+        curl -fLO "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OCP_VERSION/oc-mirror.tar.gz"
+        tar xzf oc-mirror.tar.gz
+        chmod +x oc oc-mirror
+        install -m 0755 oc oc-mirror /usr/local/bin/
+        rm -f oc oc-mirror oc-mirror.tar.gz
+        REMOTE
+      when:
+        - already_ready.rc != 0
+        - oc_tools_present.rc | default(1) != 0
+
+    # ── Step 5: download the 22 GB image tarball from OSS ────────────────────
+    - name: Check if image tarball already on disk (correct size)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} 'stat -c%s /var/lib/quay-storage/mirror-tarball.tar 2>/dev/null || echo 0'
+      register: tarball_size_check
+      changed_when: false
+      failed_when: false
+      when: already_ready.rc != 0
+
+    - name: Get expected tarball size from OSS
+      ansible.builtin.shell: |
+        AK=$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id' ~/.aliyun/config.json)
+        SK=$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_secret' ~/.aliyun/config.json)
+        aliyun oss stat "oss://{{ oss_bucket }}/{{ mirror_oss_object }}" \
+          --endpoint="oss-{{ region }}.aliyuncs.com" \
+          --access-key-id="$AK" --access-key-secret="$SK" 2>/dev/null \
+          | awk -F': *' '/Content-Length/ {print $2}'
+      register: oss_size
+      changed_when: false
+      when: already_ready.rc != 0
+      no_log: true
+
+    - name: Download image tarball from OSS (skip if size matches)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        echo "=== $(date -Iseconds) downloading 22 GB image tarball from OSS ==="
+        aliyun oss cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}" \
+          /var/lib/quay-storage/mirror-tarball.tar \
+          --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
+          --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
+          --region "{{ region }}" --part-size=104857600 --parallel=10 --force
+        REMOTE
+      register: tarball_download
+      when:
+        - already_ready.rc != 0
+        - (tarball_size_check.stdout | default('0') | int) != (oss_size.stdout | default('0') | trim | int)
+
+    # ── Step 6: run mirror-registry install (idempotent on /etc/quay-installer) ─
+    - name: Check if mirror-registry already running
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} 'podman ps --format "{{ '{{' }}.Names{{ '}}' }}" 2>/dev/null | grep -q "^quay-app$"'
+      register: quay_running
+      changed_when: false
+      failed_when: false
+      when: already_ready.rc != 0
+
+    - name: Run mirror-registry install
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        export HOME=/root
+        export USER=root
+        echo "=== $(date -Iseconds) installing mirror-registry ==="
+        /opt/mirror-registry install \
+          --quayHostname "{{ mirror_private_ip }}" \
+          --quayRoot /var/lib/quay-storage \
+          --initUser "{{ mirror_init_user }}" \
+          --initPassword "{{ mirror_init_password }}"
+        REMOTE
+      register: mirror_install
+      when:
+        - already_ready.rc != 0
+        - quay_running.rc | default(1) != 0
+      no_log: true   # contains init password
+
+    # ── Step 7: trust the self-signed CA + register docker auth ──────────────
+    - name: Trust mirror's self-signed CA + set up docker auth
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<REMOTE
+        set -euxo pipefail
+        cp /var/lib/quay-storage/quay-rootCA/rootCA.pem /etc/pki/ca-trust/source/anchors/quay-mirror.crt
+        update-ca-trust extract
+        mkdir -p /root/.docker
+        cat > /root/.docker/config.json <<DOCKEREOF
+        {"auths":{"{{ mirror_private_ip }}:8443":{"auth":"\$(echo -n '{{ mirror_init_user }}:{{ mirror_init_password }}' | base64 -w0)"}}}
+        DOCKEREOF
+        until curl -ksf "https://{{ mirror_private_ip }}:8443/health/instance"; do sleep 5; done
+        REMOTE
+      when: already_ready.rc != 0
+      no_log: true
+
+    # ── Step 8: import the image tarball via oc mirror ──────────────────────
+    - name: Import image tarball into mirror-registry (~15-20 min)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        export HOME=/root
+        echo "=== $(date -Iseconds) importing tarball into mirror-registry ==="
+        oc mirror --from=/var/lib/quay-storage/mirror-tarball.tar \
+          "docker://{{ mirror_private_ip }}:8443"
+        echo "=== $(date -Iseconds) import complete ==="
+        REMOTE
+      when: already_ready.rc != 0
+
+    # ── Step 9: expose CA + signal ready ────────────────────────────────────
+    - name: Expose CA cert + write ready signal
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        cp /var/lib/quay-storage/quay-rootCA/rootCA.pem /var/lib/mirror-ca.crt
+        echo "$(date -Iseconds) READY" > /var/lib/mirror-ready
+        REMOTE
+      when: already_ready.rc != 0
+
+    # ── Step 10: fetch CA cert back to ansible host ─────────────────────────
+    - name: Fetch mirror CA cert to ansible host
+      ansible.builtin.shell: |
+        scp {{ _ssh_common_args }} {{ _ssh_proxy_args }} \
+          root@{{ mirror_private_ip }}:/var/lib/mirror-ca.crt \
+          {{ output_dir }}/mirror-ca.crt
+      changed_when: true
+
+    - name: Save mirror CA path to state
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        new_state:
+          mirror_ca_cert_path: "{{ output_dir }}/mirror-ca.crt"
+
+    # ── Step 11: PATCH AI cluster install-config + infra-env trust bundle ───
+    - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+
+    - name: Load mirror CA cert content (for PATCH)
+      ansible.builtin.slurp:
+        src: "{{ output_dir }}/mirror-ca.crt"
+      register: mirror_ca_slurp
+
+    - name: Build install_config_overrides JSON (imageDigestSources + CA)
+      ansible.builtin.set_fact:
+        _install_config_overrides_json: >-
+          {{ {
+            'imageDigestSources': [
+              {'source': 'registry.redhat.io/rhai/assisted-installer-agent-rhel9',
+               'mirrors': [mirror_private_ip + ':8443/rhai/assisted-installer-agent-rhel9']},
+              {'source': 'registry.redhat.io/rhai/assisted-installer-rhel9',
+               'mirrors': [mirror_private_ip + ':8443/rhai/assisted-installer-rhel9']},
+              {'source': 'registry.redhat.io/rhai/assisted-installer-controller-rhel9',
+               'mirrors': [mirror_private_ip + ':8443/rhai/assisted-installer-controller-rhel9']},
+              {'source': 'quay.io/openshift-release-dev/ocp-release',
+               'mirrors': [mirror_private_ip + ':8443/openshift-release-dev/ocp-release']},
+              {'source': 'quay.io/openshift-release-dev/ocp-v4.0-art-dev',
+               'mirrors': [mirror_private_ip + ':8443/openshift-release-dev/ocp-v4.0-art-dev']}
+            ],
+            'additionalTrustBundle': mirror_ca_slurp.content | b64decode,
+            'additionalTrustBundlePolicy': 'Always'
+          } | to_json }}
+      no_log: true
+
+    - name: PATCH AI cluster install-config (imageDigestSources + CA)
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}/install-config"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ ai_access_token }}"
+          Content-Type: application/json
+        body: "{{ _install_config_overrides_json }}"
+        body_format: json
+        status_code: 201
+      no_log: true
+
+    - name: PATCH AI infra-env with mirror additional_trust_bundle
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ ai_access_token }}"
+          Content-Type: application/json
+        body:
+          additional_trust_bundle: "{{ mirror_ca_slurp.content | b64decode }}"
+        body_format: json
+        status_code: 201
+
+    - name: Mirror prepare done
+      ansible.builtin.debug:
+        msg: |
+          ✓ Mirror ready at https://{{ mirror_private_ip }}:8443
+          ✓ AI cluster install-config patched
+          ✓ AI infra-env trust bundle patched
+
+          Next step:
+            ansible-playbook ansible/playbooks/mirror-verify.yml
+            ansible-playbook ansible/playbooks/04-install-cluster.yml
