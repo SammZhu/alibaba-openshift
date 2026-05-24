@@ -199,16 +199,81 @@
         - already_ready.rc != 0
         - (tarball_size_check.stdout | default('0') | int) != (oss_size.stdout | default('0') | trim | int)
 
-    # ── Step 6: run mirror-registry install (idempotent on /etc/quay-installer) ─
-    - name: Check if mirror-registry already running
+    # ── Step 6a: generate a self-signed cert with IP SAN ─────────────────────
+    # mirror-registry's auto-generated cert has NO IP SAN.  When --quayHostname
+    # is an IP (10.0.16.4), Quay's HostSettings validation rejects the cert
+    # with: "x509: cannot validate certificate for 10.0.16.4 because it
+    # doesn't contain any IP SANs".  quay-app then loops on restart.
+    #
+    # Workaround: generate our own cert with IP SAN and hand it to
+    # mirror-registry via --sslCert / --sslKey.
+    - name: Check if /etc/quay-config/ssl.cert already present
       ansible.builtin.shell: |
-        {{ _ssh_root_mirror }} 'podman ps --format "{{ '{{' }}.Names{{ '}}' }}" 2>/dev/null | grep -q "^quay-app$"'
+        {{ _ssh_root_mirror }} test -s /etc/quay-config/ssl.cert
+      register: ssl_cert_present
+      changed_when: false
+      failed_when: false
+      when: already_ready.rc != 0
+
+    - name: Generate self-signed cert with IP SAN for mirror's static IP
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        mkdir -p /etc/quay-config
+        openssl req -newkey rsa:4096 -nodes -sha256 \
+          -keyout /etc/quay-config/ssl.key \
+          -x509 -days 3650 \
+          -subj "/CN={{ mirror_private_ip }}" \
+          -addext "subjectAltName = IP:{{ mirror_private_ip }}" \
+          -out /etc/quay-config/ssl.cert
+        chmod 600 /etc/quay-config/ssl.key
+        REMOTE
+      when:
+        - already_ready.rc != 0
+        - ssl_cert_present.rc | default(1) != 0
+
+    # ── Step 6b: nuke any partial mirror-registry state ──────────────────────
+    # If the previous install attempt left half-baked containers + DB state
+    # (e.g. quay-app stuck restart-looping due to the cert issue we just
+    # fixed), do a clean uninstall before re-installing.  Skip when this is
+    # the first attempt.
+    - name: Check for stale Quay containers (any state) — sign of broken prior install
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} 'podman ps -a --format "{{ '{{' }}.Names{{ '}}' }}" 2>/dev/null | grep -q "^quay-"'
+      register: quay_containers_exist
+      changed_when: false
+      failed_when: false
+      when: already_ready.rc != 0
+
+    - name: Uninstall stale mirror-registry from previous failed attempt
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -uxo pipefail
+        export HOME=/root
+        export USER=root
+        /opt/mirror-registry uninstall --autoApprove --quayRoot /var/lib/quay-storage 2>&1 || true
+        # Belt-and-suspenders: ensure no lingering containers/volumes/services
+        systemctl stop quay-app quay-postgres quay-redis quay-pod 2>/dev/null || true
+        systemctl disable quay-app quay-postgres quay-redis quay-pod 2>/dev/null || true
+        podman pod rm -f quay-pod 2>/dev/null || true
+        podman volume rm -f pg-storage 2>/dev/null || true
+        rm -f /etc/systemd/system/quay-*.service
+        systemctl daemon-reload
+        REMOTE
+      when:
+        - already_ready.rc != 0
+        - quay_containers_exist.rc | default(1) == 0
+
+    # ── Step 6c: actually run mirror-registry install ────────────────────────
+    - name: Check if mirror-registry already running (healthy)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} 'curl -ksf https://{{ mirror_private_ip }}:8443/health/instance'
       register: quay_running
       changed_when: false
       failed_when: false
       when: already_ready.rc != 0
 
-    - name: Run mirror-registry install
+    - name: Run mirror-registry install (with IP-SAN cert)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
@@ -219,20 +284,21 @@
           --quayHostname "{{ mirror_private_ip }}" \
           --quayRoot /var/lib/quay-storage \
           --initUser "{{ mirror_init_user }}" \
-          --initPassword "{{ mirror_init_password }}"
+          --initPassword "{{ mirror_init_password }}" \
+          --sslCert /etc/quay-config/ssl.cert \
+          --sslKey /etc/quay-config/ssl.key
         REMOTE
       register: mirror_install
       when:
         - already_ready.rc != 0
         - quay_running.rc | default(1) != 0
-      no_log: true   # contains init password
 
     # ── Step 7: trust the self-signed CA + register docker auth ──────────────
     - name: Trust mirror's self-signed CA + set up docker auth
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<REMOTE
         set -euxo pipefail
-        cp /var/lib/quay-storage/quay-rootCA/rootCA.pem /etc/pki/ca-trust/source/anchors/quay-mirror.crt
+        cp /etc/quay-config/ssl.cert /etc/pki/ca-trust/source/anchors/quay-mirror.crt
         update-ca-trust extract
         mkdir -p /root/.docker
         cat > /root/.docker/config.json <<DOCKEREOF
@@ -261,7 +327,7 @@
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
-        cp /var/lib/quay-storage/quay-rootCA/rootCA.pem /var/lib/mirror-ca.crt
+        cp /etc/quay-config/ssl.cert /var/lib/mirror-ca.crt
         echo "$(date -Iseconds) READY" > /var/lib/mirror-ready
         REMOTE
       when: already_ready.rc != 0
