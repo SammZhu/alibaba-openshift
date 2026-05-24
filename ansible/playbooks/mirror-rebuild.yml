@@ -111,7 +111,8 @@
           - -lc
           - |
             set -euxo pipefail
-            oc-mirror --from=/var/lib/quay-storage/mirror-tarball.tar \
+            # --v1 mandatory starting oc-mirror 4.21; tarball is v1 format
+            oc-mirror --v1 --from=/var/lib/quay-storage/mirror-tarball.tar \
               "docker://{{ mirror_private_ip }}:8443"
             date -Iseconds > /var/lib/mirror-last-rebuild
       register: oc_mirror_import

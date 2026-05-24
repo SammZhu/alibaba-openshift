@@ -347,7 +347,9 @@
         set -euxo pipefail
         export HOME=/root
         echo "=== $(date -Iseconds) importing tarball into mirror-registry ==="
-        oc-mirror --from=/var/lib/quay-storage/mirror-tarball.tar \
+        # --v1 is mandatory starting oc-mirror 4.21; our tarball is v1 format
+        # (built by scripts/build-mirror-tarball.sh via oc-mirror v1 imageset-config).
+        oc-mirror --v1 --from=/var/lib/quay-storage/mirror-tarball.tar \
           "docker://{{ mirror_private_ip }}:8443"
         echo "=== $(date -Iseconds) import complete ==="
         REMOTE
