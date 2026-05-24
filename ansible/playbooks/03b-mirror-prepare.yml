@@ -187,11 +187,14 @@
       when: already_ready.rc != 0
       no_log: true
 
-    - name: Download image tarball from OSS (skip if size matches)
+    - name: Download image tarball from OSS (with retries; aliyun multipart resumes from .temp)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
         echo "=== $(date -Iseconds) downloading 22 GB image tarball from OSS ==="
+        # aliyun oss cp multipart download uses a .temp file + checkpoint.
+        # Re-invoking the same command after a 'connection reset' picks up
+        # from where the .temp left off (~10x faster than restarting at 0).
         aliyun oss cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}" \
           /var/lib/quay-storage/mirror-tarball.tar \
           --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
@@ -199,6 +202,9 @@
           --region "{{ region }}" --part-size=104857600 --parallel=10 --force
         REMOTE
       register: tarball_download
+      retries: 5
+      delay: 30
+      until: tarball_download.rc == 0
       when:
         - already_ready.rc != 0
         - (tarball_size_check.stdout | default('0') | int) != (oss_size.stdout | default('0') | trim | int)
