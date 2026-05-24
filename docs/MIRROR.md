@@ -96,10 +96,12 @@ alibaba-openshift/
 │   │   └── all.yml.example                  # mirror_* 参数定义
 │   ├── tasks/
 │   │   ├── load_state.yml                   # 加载含 mirror_* 的 state
-│   │   └── save_state.yml                   # 保存 mirror_init_password 等
+│   │   ├── save_state.yml                   # 保存 mirror_init_password 等
+│   │   └── mirror_defaults.yml         ✦    # mirror_* 默认值兜底（让最小配置生效）
 │   └── playbooks/
-│       ├── 01-prepare-iso.yml               # mirror auth + ICS + ignition override
-│       ├── 03-create-stack.yml              # 等 cloud-init + scp CA + PATCH AI
+│       ├── 01-prepare-iso.yml               # pull_secret + mirror auth + ignition override
+│       │                                    # （install-config overrides 不在这里，挪到了 03）
+│       ├── 03-create-stack.yml              # 等 cloud-init + scp CA + PATCH install-config + infra-env
 │       ├── mirror-rebuild.yml          ✦    # 刷新 mirror 镜像（不动 cluster）
 │       ├── mirror-verify.yml           ✦    # 健康检查 + 镜像存在验证
 │       └── 99-teardown.yml                  # 含 mirror RAM 资源预清理
@@ -204,8 +206,8 @@ ansible-playbook ansible/playbooks/04-install-cluster.yml
 
 - 生成 / 加载 `mirror_init_password`（auto-generate 或用 group_vars 设的），存 state.yml
 - `pull_secret` 注入 `{mirror_ip}:8443` 的 basic auth entry
-- `cluster body` 加 `install_config_overrides`（含 5 个 `imageDigestSources` 映射）
-- `infra-env body` 加 `ignition_config_override`（含 registries.conf 注入到 `/etc/containers/`）
+- `cluster body` 用增强后的 pull_secret（**不再注入 install_config_overrides**——AI v2 API 不接受这个字段进 cluster body）
+- `infra-env body` 加 `ignition_config_override`（含 registries.conf 注入到 `/etc/containers/`，`insecure=true`）
 
 **Phase 03 实际改变**：
 
@@ -213,7 +215,10 @@ ansible-playbook ansible/playbooks/04-install-cluster.yml
 - Mirror ECS cloud-init（~30 分钟）自动完成整套 setup
 - ansible SSH polling `/var/lib/mirror-ready` 等就绪（最多 60 min）
 - `scp` mirror CA cert 到 `output_dir/mirror-ca.crt`
-- PATCH AI cluster + infra-env 注入 `additional_trust_bundle`（CA cert）
+- **PATCH `/v2/clusters/{id}/install-config`** 子资源端点，body 是含
+  `imageDigestSources` + `additionalTrustBundle` + `additionalTrustBundlePolicy: Always`
+  的 JSON 字符串（AI v2 的 install-config overrides 必须走这个独立子资源）
+- **PATCH `/v2/infra-envs/{id}`** 注入 `additional_trust_bundle`（infra-env-update-params 上有这字段）
 
 ---
 
@@ -475,14 +480,36 @@ pull_secret 创建了。
 
 state.yml 同步两阶段：Phase 01 生成 + 存，Phase 03 load 同一个值。
 
-### 为什么 PATCH cluster 的 additional_trust_bundle 在 Phase 03 而不是 Phase 01
+### 为什么 install-config overrides 和 trust bundle 都在 Phase 03 PATCH 而不是 Phase 01
 
 mirror 自签 CA 在 mirror-registry 第一次跑起来时生成。Phase 01 时 mirror ECS 还
 不存在，没法拿到 CA。所以：
 
 - Phase 01 用 `insecure=true` 让 discovery ISO 跳 TLS verify（无需 CA）
-- Phase 03 mirror ready 后，`scp` CA 回来 + PATCH AI cluster/infra-env 注入
-  `additional_trust_bundle`，让 install 阶段 install-config 信任 mirror
+- Phase 03 mirror ready 后，`scp` CA 回来 + PATCH AI 注入 imageDigestSources +
+  CA bundle，让 install 阶段 install-config 信任 mirror
+
+### 为什么 install-config overrides 走 `/install-config` 子资源而不是 cluster body
+
+AI v2 API 实测：
+
+| 路径 | 字段 | 状态 |
+|------|------|------|
+| `POST /v2/clusters`（创建） | `install_config_overrides` | ❌ 400 unknown field |
+| `PATCH /v2/clusters/{id}` | `install_config_overrides` | ❌ 400 unknown field |
+| `PATCH /v2/clusters/{id}` | `additional_trust_bundle` | ❌ 400 unknown field |
+| **`PATCH /v2/clusters/{id}/install-config`** | body 是 JSON 字符串 | ✅ 唯一可用 |
+| `PATCH /v2/infra-envs/{id}` | `additional_trust_bundle` | ✅ infra-env 上有这字段 |
+
+所以我们的实现：
+
+1. **install-config overrides 全部塞进一个 JSON 字符串**（imageDigestSources +
+   additionalTrustBundle + additionalTrustBundlePolicy），PATCH 到
+   `/v2/clusters/{id}/install-config`
+2. **infra-env 的 additional_trust_bundle** 单独 PATCH 到 `/v2/infra-envs/{id}`
+
+cluster body 上 **不放任何 mirror 相关字段**（除了 pull_secret 的 auth entry，
+这个直接合进了 `pull_secret`）。
 
 ### 为什么 `registries.conf` 用 `mirror-by-digest-only = true`
 
