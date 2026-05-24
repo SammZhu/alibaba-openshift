@@ -237,17 +237,27 @@
         - ssl_cert_present.rc | default(1) != 0
 
     # ── Step 6b: nuke any partial mirror-registry state ──────────────────────
-    # If the previous install attempt left half-baked containers + DB state
-    # (e.g. quay-app stuck restart-looping due to the cert issue we just
-    # fixed), do a clean uninstall before re-installing.  Skip when this is
-    # the first attempt.
-    - name: Check for stale Quay containers (any state) — sign of broken prior install
+    # Only uninstall if Quay containers EXIST but are NOT healthy.  Earlier
+    # logic uninstalled whenever any quay-* container was present, which
+    # nuked working Quay + tarball on re-runs after a fixable downstream
+    # bug (e.g. oc binary glibc issue).
+    - name: Check if Quay is already HEALTHY (curl /health/instance)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} 'curl -ksf https://{{ mirror_private_ip }}:8443/health/instance'
+      register: quay_healthy_precheck
+      changed_when: false
+      failed_when: false
+      when: already_ready.rc != 0
+
+    - name: Check for stale Quay containers (only when Quay NOT healthy)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} 'podman ps -a --format "{{ '{{' }}.Names{{ '}}' }}" 2>/dev/null | grep -q "^quay-"'
       register: quay_containers_exist
       changed_when: false
       failed_when: false
-      when: already_ready.rc != 0
+      when:
+        - already_ready.rc != 0
+        - quay_healthy_precheck.rc | default(1) != 0
 
     - name: Uninstall stale mirror-registry from previous failed attempt
       ansible.builtin.shell: |
@@ -276,6 +286,7 @@
         REMOTE
       when:
         - already_ready.rc != 0
+        - quay_healthy_precheck.rc | default(1) != 0
         - quay_containers_exist.rc | default(1) == 0
 
     # ── Step 6c: actually run mirror-registry install ────────────────────────
