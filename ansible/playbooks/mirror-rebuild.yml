@@ -32,6 +32,7 @@
     mirror_redownload: true      # set false to reuse on-disk tarball
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
     - ansible.builtin.include_tasks: ../tasks/mirror_defaults.yml
 
     - name: Sanity — required mirror state present

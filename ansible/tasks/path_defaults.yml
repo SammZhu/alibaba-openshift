@@ -1,0 +1,31 @@
+---
+# Normalize file path facts that are derived from {{ output_dir }} +
+# {{ cluster_name }}.  These have play-level defaults but load_state's
+# "Promote state values to top-level facts" set_fact OVERRIDES those
+# defaults with whatever's in state.yml — including stale empty strings
+# left by teardown.  Re-derive when empty/missing.
+#
+# Caller pattern (right after load_state.yml):
+#   - include_tasks: ../tasks/load_state.yml
+#   - include_tasks: ../tasks/path_defaults.yml
+#   - include_tasks: ../tasks/mirror_defaults.yml   # if applicable
+
+- name: Normalize iso_path (re-derive when state cleared it)
+  ansible.builtin.set_fact:
+    iso_path: "{{ output_dir }}/discovery-{{ cluster_name }}.iso"
+  when: iso_path is not defined or iso_path | length == 0
+
+- name: Normalize kubeconfig_path (re-derive when state cleared it)
+  ansible.builtin.set_fact:
+    kubeconfig_path: "{{ output_dir }}/kubeconfig"
+  when: kubeconfig_path is not defined or kubeconfig_path | length == 0
+
+- name: Normalize kubeadmin_password_path (re-derive when state cleared it)
+  ansible.builtin.set_fact:
+    kubeadmin_password_path: "{{ output_dir }}/kubeadmin-password"
+  when: kubeadmin_password_path is not defined or kubeadmin_password_path | length == 0
+
+- name: Normalize dynamic_manifest_file (re-derive when state cleared it)
+  ansible.builtin.set_fact:
+    dynamic_manifest_file: "{{ output_dir }}/alibaba-ccm-config.yaml"
+  when: dynamic_manifest_file is not defined or dynamic_manifest_file | length == 0

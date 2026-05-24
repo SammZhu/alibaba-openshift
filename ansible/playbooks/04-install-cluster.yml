@@ -23,6 +23,8 @@
         src: "{{ repo_root }}/custom_manifests/03-machineconfig-providerid-worker.yaml"
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
+    - ansible.builtin.include_tasks: ../tasks/mirror_defaults.yml
     - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
 
     - ansible.builtin.assert:

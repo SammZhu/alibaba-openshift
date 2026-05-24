@@ -35,6 +35,7 @@
     keep_image: true        # default: preserve ECS image across stack rebuilds
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
 
     - name: Show teardown scope
       ansible.builtin.debug:

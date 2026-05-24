@@ -7,16 +7,8 @@
     iso_path: "{{ output_dir }}/discovery-{{ cluster_name }}.iso"
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
     - ansible.builtin.include_tasks: ../tasks/mirror_defaults.yml
-
-    # load_state's "Promote state values to top-level facts" set_fact OVERRIDES
-    # the play's `vars:` block.  After a teardown that wiped iso_path to '',
-    # the play-level default never re-applies — re-derive it here when empty.
-    - name: Normalize iso_path (re-derive when state cleared it to empty)
-      ansible.builtin.set_fact:
-        iso_path: "{{ output_dir }}/discovery-{{ cluster_name }}.iso"
-      when: iso_path is not defined or iso_path | length == 0
-
     - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
 
     # ── Adopt existing cluster by name to avoid duplicates ─────────────────
