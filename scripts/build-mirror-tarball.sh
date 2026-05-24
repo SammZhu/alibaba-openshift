@@ -249,7 +249,7 @@ Next step — on your local ansible host:
   mirror_oss_object: $OSS_OBJECT
 
   # Spin up mirror ECS + import tarball:
-  ansible-playbook ansible/playbooks/mirror-prepare.yml
+  ansible-playbook ansible/playbooks/03b-mirror-prepare.yml
 
   # Then proceed with the normal cluster install:
   ansible-playbook ansible/playbooks/01-prepare-iso.yml

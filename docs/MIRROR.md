@@ -50,13 +50,18 @@
  ┌────────────────────────────────────────────────────────────────────┐
  │  cluster VPC (10.0.0.0/16)  ─ cn-wulanchabu                         │
  │                                                                     │
- │  Mirror ECS @ 10.0.16.4 (cluster ROS stack 的一部分)                │
- │    cloud-init 自动:                                                  │
+ │  Mirror ECS @ 10.0.16.4 (Phase 03 ROS stack 起的 "bare" 实例)        │
+ │    cloud-init 只做最小化:                                            │
  │      ① 挂数据盘 /var/lib/quay-storage                                │
- │      ② RAM Role + 内网 endpoint 拉 OSS tarball                       │
- │      ③ 装 mirror-registry (单容器 Quay)                              │
- │      ④ oc mirror import → 把 tarball 推进 Quay                       │
- │      ⑤ 写 /var/lib/mirror-ready 信号 + CA cert                       │
+ │      ② 装 podman/jq/curl + aliyun CLI                                │
+ │      ③ 写 /var/lib/mirror-bootstrap-ready 让 ansible 进得来          │
+ │                                                                     │
+ │  03b-mirror-prepare.yml (ansible 通过 SSH 跑重活):                   │
+ │      ① 从 OSS 内网拉 mirror-registry + tarballs                      │
+ │      ② mirror-registry install                                       │
+ │      ③ oc mirror import → 把 22 GB tarball 推进 Quay                 │
+ │      ④ PATCH AI cluster install-config + infra-env trust bundle      │
+ │     ※ 每步幂等;失败修代码后重跑,不动 ROS stack                       │
  │                                                                     │
  │  Cluster nodes (jump host + 3 masters)                              │
  │    discovery agent + bootstrap installer + master kubelet           │
@@ -103,7 +108,7 @@ alibaba-openshift/
 │       │                                    # （install-config overrides 不在这里，挪到了 03）
 │       ├── 03-create-stack.yml              # 等 cloud-init + scp CA + PATCH install-config + infra-env
 │       ├── mirror-rebuild.yml          ✦    # 刷新 mirror 镜像（不动 cluster）
-│       ├── mirror-verify.yml           ✦    # 健康检查 + 镜像存在验证
+│       ├── 03c-mirror-verify.yml           ✦    # 健康检查 + 镜像存在验证
 │       └── 99-teardown.yml                  # 含 mirror RAM 资源预清理
 └── docs/
     └── MIRROR.md                            # 本文档
@@ -190,35 +195,37 @@ vi ansible/group_vars/all.yml
 #   mirror_enabled: true
 #   mirror_oss_object: "mirror-tarballs/aliocp1-4.20.tar"
 
-# 2. 跑完整流程
-ansible-playbook ansible/playbooks/01-prepare-iso.yml
-ansible-playbook ansible/playbooks/02-import-image.yml
-ansible-playbook ansible/playbooks/03-create-stack.yml    # 多 ~30 min（mirror cloud-init）
+# 2. 跑完整流程（一条命令串完 00→04）
+ansible-playbook ansible/playbooks/site.yml
 
-# 3. Phase 04 前先验证 mirror
-ansible-playbook ansible/playbooks/mirror-verify.yml
-
-# 4. 触发 install
-ansible-playbook ansible/playbooks/04-install-cluster.yml
+# 或分阶段跑（调试时方便）：
+ansible-playbook ansible/playbooks/01-prepare-iso.yml         # ~10 min
+ansible-playbook ansible/playbooks/02-import-image.yml        # ~30 min（含 mirror artefacts staging）
+ansible-playbook ansible/playbooks/03-create-stack.yml        # ~5 min（bare stack，不含 mirror setup）
+ansible-playbook ansible/playbooks/03b-mirror-prepare.yml     # ~25-40 min（mirror-registry + import）
+ansible-playbook ansible/playbooks/03c-mirror-verify.yml      # ~30 sec（健康检查）
+ansible-playbook ansible/playbooks/04-install-cluster.yml     # ~30 min
 ```
 
 **Phase 01 实际改变**（mirror_enabled=true 时）：
 
 - 生成 / 加载 `mirror_init_password`（auto-generate 或用 group_vars 设的），存 state.yml
 - `pull_secret` 注入 `{mirror_ip}:8443` 的 basic auth entry
-- `cluster body` 用增强后的 pull_secret（**不再注入 install_config_overrides**——AI v2 API 不接受这个字段进 cluster body）
+- `cluster body` 用增强后的 pull_secret（**不注入 install_config_overrides**——AI v2 API 该字段走子资源，在 03b 处理）
 - `infra-env body` 加 `ignition_config_override`（含 registries.conf 注入到 `/etc/containers/`，`insecure=true`）
 
-**Phase 03 实际改变**：
+**Phase 03 实际改变**（重构后）：
 
-- ROS stack 多创建：MirrorRamRole / MirrorRamPolicy / MirrorRamAttach / 2 个 SecurityGroupIngress / MirrorRegistryInstance
-- Mirror ECS cloud-init（~30 分钟）自动完成整套 setup
-- ansible SSH polling `/var/lib/mirror-ready` 等就绪（最多 60 min）
-- `scp` mirror CA cert 到 `output_dir/mirror-ca.crt`
-- **PATCH `/v2/clusters/{id}/install-config`** 子资源端点，body 是含
-  `imageDigestSources` + `additionalTrustBundle` + `additionalTrustBundlePolicy: Always`
-  的 JSON 字符串（AI v2 的 install-config overrides 必须走这个独立子资源）
-- **PATCH `/v2/infra-envs/{id}`** 注入 `additional_trust_bundle`（infra-env-update-params 上有这字段）
+- ROS stack 创建：cluster nodes + jump host + **"bare" mirror ECS**（只 SSH-able + 数据盘挂好 + aliyun CLI 就位）
+- 不再等 cloud-init 跑完整套，不再 scp / PATCH——这些都搬到 03b
+- ~5 分钟完成，不再是 ~40 分钟
+
+**Phase 03b mirror-prepare.yml 实际改变**（新增的独立 playbook）：
+
+- SSH 进 mirror ECS（经 jump host）
+- 11 步幂等流程：bootstrap-ready → 检查 mirror-ready 早退 → 下 OSS artefacts → 装 mirror-registry → import 22 GB tarball → CA cert → 写 ready 信号 → 拉 CA 回本地 → save_state → **PATCH `/v2/clusters/{id}/install-config`** + **PATCH `/v2/infra-envs/{id}` additional_trust_bundle**
+- **失败后修了 bug 直接重跑**，从断点续做（每步有 "check if done" 守卫）
+- **不需要 teardown 整个 stack 来重试 mirror 步骤**
 
 ---
 
@@ -340,7 +347,7 @@ ansible-playbook ansible/playbooks/99-teardown.yml -e teardown_from=3 -e teardow
 ```bash
 # state.yml 还在但 mirror_* 已清空，mirror_enabled 仍然 true
 ansible-playbook ansible/playbooks/03-create-stack.yml   # ~30 min（cloud-init 再跑一遍）
-ansible-playbook ansible/playbooks/mirror-verify.yml
+ansible-playbook ansible/playbooks/03c-mirror-verify.yml
 ansible-playbook ansible/playbooks/04-install-cluster.yml
 ```
 
@@ -427,14 +434,14 @@ sudo journalctl -u agent.service -f
 | 错误 | 原因 | 处理 |
 |------|------|------|
 | `401 Unauthorized` | `pull_secret` 没有 mirror auth | 重跑 Phase 01（auto-injects）|
-| `connection refused` | mirror ECS 没起来 | `ansible-playbook mirror-verify.yml` |
+| `connection refused` | mirror ECS 没起来 | `ansible-playbook 03c-mirror-verify.yml` |
 | `manifest unknown` | tarball 没包含这个 image | 重 build tarball + `mirror-rebuild.yml` |
 | `tls: bad certificate` | CA cert 没 PATCH 到 AI | 检查 Phase 03 最后两个 PATCH task 是否成功 |
 
 ### Mirror 健康检查
 
 ```bash
-ansible-playbook ansible/playbooks/mirror-verify.yml
+ansible-playbook ansible/playbooks/03c-mirror-verify.yml
 ```
 
 会检查：

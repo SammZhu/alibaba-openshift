@@ -17,6 +17,11 @@
     - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
     - ansible.builtin.include_tasks: ../tasks/mirror_defaults.yml
 
+    # Skip entire playbook gracefully when mirror is not enabled.
+    - name: Skip — mirror_enabled is false (running in non-mirror mode)
+      ansible.builtin.meta: end_play
+      when: not (mirror_enabled | default(false) | bool)
+
     - name: Sanity — required mirror state present
       ansible.builtin.assert:
         that:

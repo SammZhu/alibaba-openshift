@@ -2,8 +2,13 @@
 # Convenience wrapper: run Phases 00 → 04 in sequence.
 # Phase 05 must run on the jump host (different inventory target).
 # Phase 99 must run with explicit confirmation.
+#
+# 03b/03c are mirror-only playbooks — they end_play harmlessly when
+# mirror_enabled=false, so we can include them unconditionally here.
 - ansible.builtin.import_playbook: 00-preflight.yml
 - ansible.builtin.import_playbook: 01-prepare-iso.yml
 - ansible.builtin.import_playbook: 02-import-image.yml
 - ansible.builtin.import_playbook: 03-create-stack.yml
+- ansible.builtin.import_playbook: 03b-mirror-prepare.yml   # no-op if mirror_enabled=false
+- ansible.builtin.import_playbook: 03c-mirror-verify.yml    # no-op if mirror_enabled=false
 - ansible.builtin.import_playbook: 04-install-cluster.yml

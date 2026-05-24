@@ -127,4 +127,4 @@
           New images are immediately available to cluster nodes — no Phase 03/04 rerun needed.
 
           To verify what's in the mirror:
-            ansible-playbook ansible/playbooks/mirror-verify.yml
+            ansible-playbook ansible/playbooks/03c-mirror-verify.yml

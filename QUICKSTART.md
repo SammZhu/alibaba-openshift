@@ -616,7 +616,7 @@ echo 'mirror_oss_object: "mirror-tarballs/aliocp1-4.20.tar"' >> ansible/group_va
 ansible-playbook ansible/playbooks/01-prepare-iso.yml
 ansible-playbook ansible/playbooks/02-import-image.yml
 ansible-playbook ansible/playbooks/03-create-stack.yml    # 多 ~30 min（mirror cloud-init）
-ansible-playbook ansible/playbooks/mirror-verify.yml      # Phase 04 前 sanity check
+ansible-playbook ansible/playbooks/03c-mirror-verify.yml      # Phase 04 前 sanity check
 ansible-playbook ansible/playbooks/04-install-cluster.yml
 ```
 
@@ -628,7 +628,7 @@ ansible-playbook ansible/playbooks/04-install-cluster.yml
 | Playbook | 用途 |
 |---------|------|
 | `mirror-rebuild.yml` | 刷新 mirror 镜像（不动 cluster），加 operator / 升级版本时用 |
-| `mirror-verify.yml` | 健康检查 + 镜像存在验证 |
+| `03c-mirror-verify.yml` | 健康检查 + 镜像存在验证 |
 
 ---
 

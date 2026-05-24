@@ -904,9 +904,11 @@
 
           Next step:
           {% if mirror_enabled | default(false) | bool %}
-            ansible-playbook ansible/playbooks/mirror-prepare.yml    # ~25-40 min
-            ansible-playbook ansible/playbooks/mirror-verify.yml     # sanity
+            ansible-playbook ansible/playbooks/03b-mirror-prepare.yml   # ~25-40 min
+            ansible-playbook ansible/playbooks/03c-mirror-verify.yml    # sanity
             ansible-playbook ansible/playbooks/04-install-cluster.yml
           {% else %}
             ansible-playbook ansible/playbooks/04-install-cluster.yml
           {% endif %}
+
+          Or one-shot 00→04:  ansible-playbook ansible/playbooks/site.yml

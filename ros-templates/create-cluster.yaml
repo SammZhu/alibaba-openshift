@@ -1061,7 +1061,7 @@ Resources:
             #!/bin/bash
             # MINIMAL bootstrap — just make the host SSH-able and disk-mounted.
             # The heavy work (mirror-registry install, oc mirror import, AI
-            # PATCH) happens later via ansible/playbooks/mirror-prepare.yml.
+            # PATCH) happens later via ansible/playbooks/03b-mirror-prepare.yml.
             # That way a fix to the install logic doesn't require a full
             # stack teardown — re-run the prepare playbook idempotently.
             set -euxo pipefail
@@ -1092,7 +1092,7 @@ Resources:
 
             # 5. Signal "host is ready for ansible to take over"
             echo "$(date -Iseconds) BOOTSTRAP_READY" > /var/lib/mirror-bootstrap-ready
-            echo "=== $(date -Iseconds) bootstrap complete; awaiting mirror-prepare.yml ==="
+            echo "=== $(date -Iseconds) bootstrap complete; awaiting 03b-mirror-prepare.yml ==="
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
           Value: owned

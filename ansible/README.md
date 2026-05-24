@@ -32,7 +32,7 @@ ansible/
 │   ├── site.yml                   # 跑 00-04 一条龙
 │   │
 │   ├── mirror-rebuild.yml         # 【mirror only】刷新 mirror 镜像（不动 cluster）
-│   └── mirror-verify.yml          # 【mirror only】mirror 健康检查 + 镜像存在验证
+│   └── 03c-mirror-verify.yml          # 【mirror only】mirror 健康检查 + 镜像存在验证
 ├── state.yml                      # 流水线状态（gitignored，自动生成）
 └── README.md
 ```
@@ -103,7 +103,7 @@ echo 'mirror_oss_object: "mirror-tarballs/aliocp1-4.20.tar"' >> group_vars/all.y
 ansible-playbook playbooks/01-prepare-iso.yml
 ansible-playbook playbooks/02-import-image.yml
 ansible-playbook playbooks/03-create-stack.yml    # 多 ~30 min（mirror cloud-init）
-ansible-playbook playbooks/mirror-verify.yml      # 健康检查
+ansible-playbook playbooks/03c-mirror-verify.yml      # 健康检查
 ansible-playbook playbooks/04-install-cluster.yml
 
 # 后续刷新 mirror 镜像（加 operator / 升级版本）
@@ -137,6 +137,6 @@ ansible-playbook playbooks/mirror-rebuild.yml     # 不动 cluster
 | ROS stack `CREATE_FAILED` | `aliyun ros GetStackResources --StackId ...` 看哪个资源失败 |
 | Hosts 一直不上线 | ECS 实例没启动？登 ECS VNC 看是否进了 Discovery 界面 |
 | 04 卡 ready | `ai_curl GET /clusters/<id>/host-requirements` 看 validation 哪条没过 |
-| 03 卡 "Wait for mirror registry"（mirror 启用时）| 经 jump host SSH 进 mirror ECS `tail /var/log/mirror-setup.log` 看 cloud-init 进度，或 `mirror-verify.yml` 跑健康检查 |
+| 03 卡 "Wait for mirror registry"（mirror 启用时）| 经 jump host SSH 进 mirror ECS `tail /var/log/mirror-setup.log` 看 cloud-init 进度，或 `03c-mirror-verify.yml` 跑健康检查 |
 | 04 节点拉 mirror 镜像 401 | `pull_secret` 没有 mirror auth — 重跑 Phase 01 自动注入 |
 | 04 节点拉 mirror 镜像 manifest unknown | tarball 缺这个 image — 重 build + `mirror-rebuild.yml` |
