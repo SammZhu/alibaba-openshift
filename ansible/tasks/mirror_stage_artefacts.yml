@@ -11,8 +11,9 @@
 # Idempotency: each OSS object existence is checked before download/upload.
 - name: Mirror — auto-discover latest mirror-registry version (or honor override)
   ansible.builtin.shell: |
-    if [ -n "{{ mirror_registry_version | default('') }}" ]; then
-      echo "{{ mirror_registry_version }}"
+    V={{ (mirror_registry_version | default('')) | quote }}
+    if [ -n "$V" ]; then
+      echo "$V"
     else
       curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/mirror-registry/ \
         | grep -oE 'href="[^"]+/"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
