@@ -11,13 +11,19 @@
 # This task normalizes the namespace: after include, ALL mirror_* facts are
 # guaranteed to be defined (with the values from group_vars taking precedence
 # over the defaults below).
-- name: Normalize mirror_* defaults (group_vars wins; fallback otherwise)
+# IMPORTANT: the second arg `true` to default() makes it replace not only
+# undefined values but ALSO empty strings / nil / falsy values.  Without it,
+# teardown Case B (which sets mirror_* to '' in state.yml) leaves these
+# variables as empty strings, and the bare default('X') filter would NOT
+# replace them — so ROS receives empty MirrorPrivateIp and assigns a random
+# DHCP IP instead of the fixed 10.0.16.4 our registries.conf points to.
+- name: Normalize mirror_* defaults (group_vars wins; fallback otherwise; empty='undefined')
   ansible.builtin.set_fact:
-    mirror_private_ip:     "{{ mirror_private_ip | default('10.0.16.4') }}"
-    mirror_instance_type:  "{{ mirror_instance_type | default('ecs.g7.large') }}"
-    mirror_data_disk_size: "{{ mirror_data_disk_size | default(100) }}"
-    mirror_init_user:      "{{ mirror_init_user | default('mirror-admin') }}"
+    mirror_private_ip:     "{{ mirror_private_ip     | default('10.0.16.4', true) }}"
+    mirror_instance_type:  "{{ mirror_instance_type  | default('ecs.g7.large', true) }}"
+    mirror_data_disk_size: "{{ mirror_data_disk_size | default(100, true) }}"
+    mirror_init_user:      "{{ mirror_init_user      | default('mirror-admin', true) }}"
     mirror_oss_object: >-
       {{ mirror_oss_object
-         | default('mirror-tarballs/' + cluster_name + '-' + (openshift_version | string) + '.tar') }}
+         | default('mirror-tarballs/' + cluster_name + '-' + (openshift_version | string) + '.tar', true) }}
   when: mirror_enabled | default(false) | bool
