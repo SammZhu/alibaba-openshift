@@ -127,16 +127,21 @@
         - already_ready.rc != 0
         - mr_installer_present.rc | default(1) != 0
 
-    # ── Step 4: download oc + oc-mirror via versioned URL ───────────────────
-    - name: Check if oc + oc-mirror already installed
+    # ── Step 4: download oc-mirror (standalone binary) ──────────────────────
+    # We only need oc-mirror, not oc.  Using `oc mirror --from=...` requires
+    # the oc binary which is built against newer glibc than Alibaba Linux 3
+    # provides ('GLIBC_2.33 not found').  The standalone oc-mirror binary
+    # has no such requirement and exposes the same import functionality:
+    #   oc-mirror --from=tarball.tar docker://registry:8443
+    - name: Check if oc-mirror already installed
       ansible.builtin.shell: |
-        {{ _ssh_root_mirror }} 'command -v oc && command -v oc-mirror'
-      register: oc_tools_present
+        {{ _ssh_root_mirror }} 'command -v oc-mirror'
+      register: oc_mirror_present
       changed_when: false
       failed_when: false
       when: already_ready.rc != 0
 
-    - name: Download + install oc + oc-mirror
+    - name: Download + install oc-mirror
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
@@ -150,16 +155,15 @@
         OCP_VERSION=$(cat ./ocp-version.txt | tr -d '[:space:]')
         rm -f ./ocp-version.txt
         echo "    OpenShift patch version: $OCP_VERSION"
-        curl -fL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OCP_VERSION/openshift-client-linux.tar.gz" | tar xz oc
         curl -fLO "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OCP_VERSION/oc-mirror.tar.gz"
         tar xzf oc-mirror.tar.gz
-        chmod +x oc oc-mirror
-        install -m 0755 oc oc-mirror /usr/local/bin/
-        rm -f oc oc-mirror oc-mirror.tar.gz
+        chmod +x oc-mirror
+        install -m 0755 oc-mirror /usr/local/bin/
+        rm -f oc-mirror oc-mirror.tar.gz
         REMOTE
       when:
         - already_ready.rc != 0
-        - oc_tools_present.rc | default(1) != 0
+        - oc_mirror_present.rc | default(1) != 0
 
     # ── Step 5: download the 22 GB image tarball from OSS ────────────────────
     - name: Check if image tarball already on disk (correct size)
@@ -309,14 +313,14 @@
       when: already_ready.rc != 0
       no_log: true
 
-    # ── Step 8: import the image tarball via oc mirror ──────────────────────
+    # ── Step 8: import the image tarball via oc-mirror standalone ──────────
     - name: Import image tarball into mirror-registry (~15-20 min)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
         export HOME=/root
         echo "=== $(date -Iseconds) importing tarball into mirror-registry ==="
-        oc mirror --from=/var/lib/quay-storage/mirror-tarball.tar \
+        oc-mirror --from=/var/lib/quay-storage/mirror-tarball.tar \
           "docker://{{ mirror_private_ip }}:8443"
         echo "=== $(date -Iseconds) import complete ==="
         REMOTE

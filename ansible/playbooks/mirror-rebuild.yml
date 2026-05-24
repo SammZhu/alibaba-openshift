@@ -16,7 +16,7 @@
 #      mirror_init_password, jump_host_ip.
 #   2. SSHes into the mirror ECS via jump host.
 #   3. Re-downloads tarball from OSS (overwrites existing).
-#   4. Runs `oc mirror --from=TARBALL docker://mirror:8443`.
+#   4. Runs `oc-mirror --from=TARBALL docker://mirror:8443`.
 #      oc-mirror handles incrementally: only NEW layers are pushed.
 #
 # Usage:
@@ -111,7 +111,7 @@
           - -lc
           - |
             set -euxo pipefail
-            oc mirror --from=/var/lib/quay-storage/mirror-tarball.tar \
+            oc-mirror --from=/var/lib/quay-storage/mirror-tarball.tar \
               "docker://{{ mirror_private_ip }}:8443"
             date -Iseconds > /var/lib/mirror-last-rebuild
       register: oc_mirror_import
