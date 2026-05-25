@@ -575,6 +575,9 @@ Resources:
           Value: owned
 
   # 6443 — Kubernetes API server
+  # Servers are embedded inline in the ServerGroup (NLB does not have a
+  # separate ALIYUN::NLB::ServerGroupServerAttachment resource — that was
+  # SLB's pattern).
   ApiServerGroup:
     Type: ALIYUN::NLB::ServerGroup
     Properties:
@@ -590,6 +593,19 @@ Resources:
         HealthCheckInterval: 10
         HealthyThreshold: 2
         UnhealthyThreshold: 2
+      Servers:
+        - ServerId: !Ref RendezvousInstance
+          ServerType: Ecs
+          Port: 6443
+          Weight: 100
+        - ServerId: !Ref ControlPlaneInstance2
+          ServerType: Ecs
+          Port: 6443
+          Weight: 100
+        - ServerId: !Ref ControlPlaneInstance3
+          ServerType: Ecs
+          Port: 6443
+          Weight: 100
 
   ApiNLBListener:
     Type: ALIYUN::NLB::Listener
@@ -615,6 +631,19 @@ Resources:
         HealthCheckInterval: 10
         HealthyThreshold: 2
         UnhealthyThreshold: 2
+      Servers:
+        - ServerId: !Ref RendezvousInstance
+          ServerType: Ecs
+          Port: 22623
+          Weight: 100
+        - ServerId: !Ref ControlPlaneInstance2
+          ServerType: Ecs
+          Port: 22623
+          Weight: 100
+        - ServerId: !Ref ControlPlaneInstance3
+          ServerType: Ecs
+          Port: 22623
+          Weight: 100
 
   McsNLBListener:
     Type: ALIYUN::NLB::Listener
@@ -830,46 +859,9 @@ Resources:
         - Key: openshift-node-role
           Value: master
 
-  # Register all 3 control plane nodes as NLB backends (one attachment per
-  # ServerGroup / port).  Must exist before installation completes so that
-  # api-int.<cluster>.<domain> can reach the API server and MCS.
-  ApiServerGroupAttachment:
-    Type: ALIYUN::NLB::ServerGroupServerAttachment
-    DependsOn: ApiNLBListener
-    Properties:
-      ServerGroupId: !Ref ApiServerGroup
-      Servers:
-        - ServerId: !Ref RendezvousInstance
-          ServerType: Ecs
-          Port: 6443
-          Weight: 100
-        - ServerId: !Ref ControlPlaneInstance2
-          ServerType: Ecs
-          Port: 6443
-          Weight: 100
-        - ServerId: !Ref ControlPlaneInstance3
-          ServerType: Ecs
-          Port: 6443
-          Weight: 100
-
-  McsServerGroupAttachment:
-    Type: ALIYUN::NLB::ServerGroupServerAttachment
-    DependsOn: McsNLBListener
-    Properties:
-      ServerGroupId: !Ref McsServerGroup
-      Servers:
-        - ServerId: !Ref RendezvousInstance
-          ServerType: Ecs
-          Port: 22623
-          Weight: 100
-        - ServerId: !Ref ControlPlaneInstance2
-          ServerType: Ecs
-          Port: 22623
-          Weight: 100
-        - ServerId: !Ref ControlPlaneInstance3
-          ServerType: Ecs
-          Port: 22623
-          Weight: 100
+  # Note: NLB backends are declared inline on each ServerGroup above
+  # (ALIYUN::NLB::ServerGroup.Servers) — there is no equivalent of
+  # SLB's ServerGroupServerAttachment resource.
 
   WorkerInstanceGroup:
     Type: ALIYUN::ECS::InstanceGroup
