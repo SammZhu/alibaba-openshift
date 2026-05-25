@@ -208,7 +208,7 @@
           [[registry]]
           prefix = ""
           location = "registry.redhat.io/rhai/assisted-installer-agent-rhel9"
-          mirror-by-digest-only = true
+          mirror-by-digest-only = false
 
           [[registry.mirror]]
           location = "{{ mirror_private_ip }}:8443/rhai/assisted-installer-agent-rhel9"
@@ -217,7 +217,7 @@
           [[registry]]
           prefix = ""
           location = "registry.redhat.io/rhai/assisted-installer-rhel9"
-          mirror-by-digest-only = true
+          mirror-by-digest-only = false
 
           [[registry.mirror]]
           location = "{{ mirror_private_ip }}:8443/rhai/assisted-installer-rhel9"
@@ -226,7 +226,7 @@
           [[registry]]
           prefix = ""
           location = "registry.redhat.io/rhai/assisted-installer-controller-rhel9"
-          mirror-by-digest-only = true
+          mirror-by-digest-only = false
 
           [[registry.mirror]]
           location = "{{ mirror_private_ip }}:8443/rhai/assisted-installer-controller-rhel9"
@@ -239,7 +239,7 @@
           [[registry]]
           prefix = ""
           location = "quay.io/openshift-release-dev/ocp-release"
-          mirror-by-digest-only = true
+          mirror-by-digest-only = false
 
           [[registry.mirror]]
           location = "{{ mirror_private_ip }}:8443/openshift/release-images"
@@ -248,7 +248,7 @@
           [[registry]]
           prefix = ""
           location = "quay.io/openshift-release-dev/ocp-v4.0-art-dev"
-          mirror-by-digest-only = true
+          mirror-by-digest-only = false
 
           [[registry.mirror]]
           location = "{{ mirror_private_ip }}:8443/openshift/release"
