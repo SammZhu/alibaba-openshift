@@ -385,7 +385,14 @@
         rm -rf ./oc-mirror-workspace ./.oc-mirror.log
         # --v1 mandatory since oc-mirror 4.21.  --from=DIR makes oc-mirror
         # auto-discover the mirror_seq1_*.tar chunks in sequence order.
-        oc-mirror --v1 --from=. "docker://{{ mirror_private_ip }}:8443"
+        #
+        # --skip-metadata-check is REQUIRED here.  Our mirror tarball is
+        # built with --ignore-history so each rebuild gets the same
+        # publish/.metadata.json sequence number; without this flag
+        # oc-mirror reads that metadata, decides "sequence is the same",
+        # and silently exits in ~1 s with "No diff from previous mirror,
+        # nothing to do" — leaving Quay empty.
+        oc-mirror --v1 --from=. --skip-metadata-check "docker://{{ mirror_private_ip }}:8443"
         echo "=== $(date -Iseconds) import complete ==="
         REMOTE
       when: already_ready.rc != 0
