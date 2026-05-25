@@ -89,7 +89,9 @@
           AliyunServiceRoleForNlb is missing — NLB cannot be created until
           this account-level service-linked role exists.  Create it once:
 
-            aliyun resourcemanager CreateServiceLinkedRole --ServiceName nlb.aliyuncs.com \
+            aliyun resourcemanager CreateServiceLinkedRole \
+              --ServiceName nlb.aliyuncs.com \
+              --endpoint resourcemanager.aliyuncs.com \
               --profile {{ aliyun_profile }}
       when: nlb_slr.rc != 0
 

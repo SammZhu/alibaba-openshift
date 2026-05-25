@@ -148,7 +148,9 @@ If you've never used NLB on this account before, create its service-linked
 role once — otherwise Phase 03 fails with `OperationDenied.ServiceLinkedRoleNotExist`:
 
 ```bash
-aliyun resourcemanager CreateServiceLinkedRole --ServiceName nlb.aliyuncs.com \
+aliyun resourcemanager CreateServiceLinkedRole \
+  --ServiceName nlb.aliyuncs.com \
+  --endpoint resourcemanager.aliyuncs.com \
   --profile <your-profile>
 ```
 
