@@ -441,11 +441,14 @@
         headers:
           Authorization: "Bearer {{ ai_access_token }}"
           Content-Type: application/json
-        # AI v2 InstallConfigParams requires a single property
-        # `install_config_overrides` whose VALUE is the JSON string
-        # of the overrides — not the overrides object directly.
-        body:
-          install_config_overrides: "{{ _install_config_overrides_json }}"
+        # AI v2 PATCH /clusters/{id}/install-config takes the JSON-encoded
+        # install-config-overrides STRING as the entire body (not an object).
+        # Wire payload must look like:
+        #     "{\"imageDigestSources\":[...],\"additionalTrustBundle\":...}"
+        # (note the outer quotes — it's a JSON string, not a JSON object).
+        # `| to_json` on our already-JSON string adds the outer quotes
+        # and escapes internal quotes correctly.
+        body: '{{ _install_config_overrides_json | to_json }}'
         body_format: json
         status_code: [200, 201]
       # no_log temporarily removed for debugging — restore once green
