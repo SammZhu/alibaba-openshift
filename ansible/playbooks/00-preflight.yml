@@ -67,6 +67,91 @@
       loop_control:
         label: "{{ item[1] }} {{ item[2] }}"
 
+    # ── ECS instance-type stock check (avoid wasting Phase 03 time on stockouts) ──
+    # ROS CreateStack returns ResourceNoStock at the end of its provisioning
+    # attempt — i.e. after the stack is half-built — so the cleanup is annoying.
+    # Querying DescribeAvailableResource up front catches the problem in 5 sec
+    # and recommends alternatives.
+    - name: Compute the (zone, instance_type) combinations needed
+      ansible.builtin.set_fact:
+        _stock_checks: >-
+          {{ [
+            {'zone': zone,  'type': control_plane_type, 'role': 'control plane (master-1, master-2)'},
+            {'zone': zone2, 'type': control_plane_type, 'role': 'control plane (master-3)'}
+          ] + (
+            [{'zone': zone,  'type': compute_type,         'role': 'compute (workers)'}]
+              if (compute_count | int) > 0 else []
+          ) + (
+            [{'zone': zone,  'type': jump_host_type,       'role': 'jump host'}]
+              if (enable_jump_host | default(false) | bool) else []
+          ) + (
+            [{'zone': zone,  'type': mirror_instance_type, 'role': 'mirror registry'}]
+              if (mirror_enabled | default(false) | bool) else []
+          ) }}
+
+    - name: Probe each (zone, instance_type) for stock
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeAvailableResource
+          - --RegionId
+          - "{{ region }}"
+          - --DestinationResource
+          - InstanceType
+          - --InstanceType
+          - "{{ item.type }}"
+          - --ZoneId
+          - "{{ item.zone }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _stock_results
+      changed_when: false
+      loop: "{{ _stock_checks }}"
+      loop_control:
+        label: "{{ item.zone }} / {{ item.type }} ({{ item.role }})"
+
+    - name: Identify out-of-stock combinations
+      ansible.builtin.set_fact:
+        _stock_failures: >-
+          {{ _stock_results.results
+             | selectattr('stdout','defined')
+             | rejectattr('stdout','search','\"Status\":\\s*\"Available\"')
+             | map(attribute='item') | list }}
+
+    - name: Fail with actionable stockout report
+      ansible.builtin.fail:
+        msg: |
+          ECS stockout in {{ region }}.  ROS CreateStack would fail at the
+          end of Phase 03 (ResourceNoStock) — fix BEFORE running 03.
+
+          Out-of-stock:
+          {% for f in _stock_failures %}
+            ✗ {{ f.zone }} / {{ f.type }} ({{ f.role }})
+          {% endfor %}
+
+          To find an in-stock alternative quickly:
+
+            for T in c7 c7e c6e c6 g7 g7a r7; do
+              for Z in a b c; do
+                S=$(aliyun ecs DescribeAvailableResource --RegionId {{ region }} \
+                  --DestinationResource InstanceType --InstanceType ecs.${T}.2xlarge \
+                  --ZoneId {{ region }}-${Z} --profile {{ aliyun_profile }} 2>/dev/null \
+                  | jq -r '.AvailableZones.AvailableZone[]?.AvailableResources.AvailableResource[]?.SupportedResources.SupportedResource[]?.Status' | head -1)
+                [ "$S" = "Available" ] && echo "✓ ecs.${T}.2xlarge zone-${Z}"
+              done
+            done
+
+          Then edit group_vars/all.yml — change control_plane_type / zone(s)
+          to a row that shows ✓.  Same-tier swaps (c7 → c6e) keep the same
+          vCPU / RAM ratio; cross-tier (c7 → g7) doubles RAM.
+      when: _stock_failures | length > 0
+
+    - name: Stock check passed
+      ansible.builtin.debug:
+        msg: |
+          ✓ ECS stock available for all {{ _stock_checks | length }} (zone, type) combinations.
+
     # OSS uses ossutil under the hood, which does NOT support --profile.
     # Read AK/SK directly from ~/.aliyun/config.json for the named profile.
     - name: Read AK/SK from aliyun config for OSS check
