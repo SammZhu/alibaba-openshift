@@ -451,7 +451,7 @@
         body: '{{ _install_config_overrides_json | to_json }}'
         body_format: json
         status_code: [200, 201]
-      # no_log temporarily removed for debugging — restore once green
+      no_log: true
 
     - name: PATCH AI infra-env with mirror additional_trust_bundle
       ansible.builtin.uri:
