@@ -122,15 +122,19 @@
       loop_control:
         label: "{{ item.zone }} / {{ item.type }} ({{ item.role }})"
 
-    # Parse JSON properly instead of regex-matching the pretty-printed text
-    # (escape-prone in YAML).  An instance type is in stock iff the response
-    # contains at least one SupportedResource entry whose Status == 'Available'.
+    # Aliyun fields:
+    #   Status         : "Available"     ← merely "sold in this region", not in stock
+    #   StatusCategory : "WithStock"     ← actually has real-time inventory
+    #                    "ClosedWithStock" / "SoldOut" → ROS CreateStack will fail
+    # We must check StatusCategory == "WithStock" at the (innermost)
+    # SupportedResource level.  Using Status would (and did) green-light
+    # types that ROS then rejects with ResourceNoStock.
     - name: Identify out-of-stock combinations
       ansible.builtin.set_fact:
         _stock_failures: >-
           {{ _stock_results.results
              | selectattr('stdout','defined')
-             | rejectattr('stdout','search','"Status": "Available"')
+             | rejectattr('stdout','search','"StatusCategory": "WithStock"')
              | map(attribute='item') | list }}
 
     - name: Fail with actionable stockout report
