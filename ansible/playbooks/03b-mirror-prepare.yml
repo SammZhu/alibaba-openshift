@@ -413,17 +413,36 @@
         src: "{{ output_dir }}/mirror-ca.crt"
       register: mirror_ca_slurp
 
-    # oc-mirror v1 publishes upstream sources to shorter destination
-    # paths than the source.  These mappings come straight from
-    # oc-mirror's own generated imageContentSourcePolicy.yaml:
+    # Mirror path mappings come straight from oc-mirror's own generated
+    # imageContentSourcePolicy.yaml (oc-mirror v1 publishes upstream
+    # sources to shorter destinations):
     #   quay.io/openshift-release-dev/ocp-release      -> openshift/release-images
     #   quay.io/openshift-release-dev/ocp-v4.0-art-dev -> openshift/release
     #   registry.redhat.io/rhai                        -> rhai (unchanged)
-    - name: Build install_config_overrides JSON (imageDigestSources + CA)
+    #
+    # Why imageContentSources (deprecated) not imageDigestSources (newer):
+    #
+    #   - imageDigestSources → AI writes image-digest-mirror-set.yaml (IDMS)
+    #     and registries.conf with mirror-by-digest-only=true.  Two failures:
+    #     (a) bootkube's `oc adm release info --idms-file=...` hits a known
+    #         bug: manifest fetch goes via mirror, but layer iteration uses
+    #         the source URL → direct quay.io pull → fails in cn-* region.
+    #     (b) Pre-install image_availability_check pulls some images by
+    #         tag (release:4.20.22-x86_64); mirror-by-digest-only=true
+    #         skips redirect for tag pulls → fails.
+    #
+    #   - imageContentSources → AI writes image-content-source-policy.yaml
+    #     (ICSP) and registries.conf with mirror-by-digest-only=false.
+    #     bootkube prefers ICSP over IDMS and uses `--icsp-file` which
+    #     redirects both manifest AND layer pulls.  Tag pulls also work.
+    #
+    # imageContentSources is deprecated in 4.20 but still accepted.  When
+    # it's finally removed (4.25+?), switch to ImageTagMirrorSet.
+    - name: Build install_config_overrides JSON (imageContentSources + CA)
       ansible.builtin.set_fact:
         _install_config_overrides_json: >-
           {{ {
-            'imageDigestSources': [
+            'imageContentSources': [
               {'source': 'registry.redhat.io/rhai/assisted-installer-agent-rhel9',
                'mirrors': [mirror_private_ip + ':8443/rhai/assisted-installer-agent-rhel9']},
               {'source': 'registry.redhat.io/rhai/assisted-installer-rhel9',
@@ -440,7 +459,7 @@
           } | to_json }}
       no_log: true
 
-    - name: PATCH AI cluster install-config (imageDigestSources + CA)
+    - name: PATCH AI cluster install-config (imageContentSources + CA)
       ansible.builtin.uri:
         url: "{{ assisted_api }}/clusters/{{ cluster_id }}/install-config"
         method: PATCH
@@ -450,7 +469,7 @@
         # AI v2 PATCH /clusters/{id}/install-config takes the JSON-encoded
         # install-config-overrides STRING as the entire body (not an object).
         # Wire payload must look like:
-        #     "{\"imageDigestSources\":[...],\"additionalTrustBundle\":...}"
+        #     "{\"imageContentSources\":[...],\"additionalTrustBundle\":...}"
         # (note the outer quotes — it's a JSON string, not a JSON object).
         # `| to_json` on our already-JSON string adds the outer quotes
         # and escapes internal quotes correctly.
