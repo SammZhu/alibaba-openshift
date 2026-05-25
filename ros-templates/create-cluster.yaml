@@ -142,7 +142,7 @@ Parameters:
     Description: RAM Role name to bind to all ECS nodes (Instance Principal for CCM/CAPA)
 
   # ── Testing-only: SSH jump host into the VPC ─────────────────────────────────
-  # The cluster's API SLB is intranet-only and PrivateZone records resolve only
+  # The cluster's API NLB is intranet-only and PrivateZone records resolve only
   # inside the VPC. Set EnableJumpHost=true to provision a tiny ECS with a
   # public EIP + pre-installed oc/kubectl/openshift-install/aliyun CLI so an
   # operator working from a local workstation can SSH in and run oc commands.
@@ -331,7 +331,7 @@ Resources:
         - IpProtocol: tcp
           PortRange: 6443/6443
           SourceCidrIp: !Ref VpcCidr
-          Description: Kubernetes API (VPC-internal only; exposed via SLB)
+          Description: Kubernetes API (VPC-internal only; exposed via NLB)
         - IpProtocol: tcp
           PortRange: 22623/22623
           SourceCidrIp: !Ref VpcCidr
@@ -990,7 +990,7 @@ Resources:
             echo "──────────────────────────────────────────────────────────"
             echo " OpenShift on Alibaba Cloud — Jump Host"
             echo " Cluster : ${ClusterName}.${BaseDomain}"
-            echo " API SLB : api.${ClusterName}.${BaseDomain}:6443 (PrivateZone)"
+            echo " API NLB : api.${ClusterName}.${BaseDomain}:6443 (PrivateZone)"
             echo ""
             echo " Tools   : oc / kubectl / openshift-install / kustomize / aliyun"
             echo " Repos   : /root/openshift-alibaba/"

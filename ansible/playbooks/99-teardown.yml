@@ -12,7 +12,7 @@
 # teardown_from levels — cleans resources created UP TO that phase:
 #   1 → Assisted cluster + infra-env records (Red Hat API only, no Aliyun cost)
 #   2 → + ECS custom image
-#   3 → + ROS stack (VPC / ECS nodes / SLB / NAT / EIP / jump host)
+#   3 → + ROS stack (VPC / ECS nodes / NLB / NAT / EIP / jump host)
 #   4 → + app-layer cleanup first (LoadBalancer SVCs + PVCs), then everything above
 #        (use when OpenShift is installed and CCM/CSI may have created extra resources)
 #
@@ -42,10 +42,10 @@
         msg: |
           Teardown scope: phases 1–{{ teardown_from }}{% if keep_image | bool and teardown_from | int >= 3 %}  [keep_image=true: AI records + image preserved]{% endif %}
 
-          {% if teardown_from | int >= 4 %}  Step 0 : app-layer cleanup (SLBs / PVCs via jump host){% endif %}
+          {% if teardown_from | int >= 4 %}  Step 0 : app-layer cleanup (CCM-managed SLBs / PVCs via jump host){% endif %}
           {% if not (keep_image | bool and teardown_from | int >= 3) %}  Step 1 : Delete Assisted cluster + infra-env records{% else %}  Step 1 : SKIPPED — AI records preserved (keep_image=true; infra-env must match the ECS image){% endif %}
           {% if teardown_from | int >= 2 and not keep_image | bool %}  Step 2 : Delete ECS custom image + local ISO{% elif teardown_from | int >= 2 %}  Step 2 : SKIPPED — ECS image preserved (keep_image=true){% endif %}
-          {% if teardown_from | int >= 3 %}  Step 3 : Delete ROS stack (VPC / ECS / SLB / NAT / EIP){% endif %}
+          {% if teardown_from | int >= 3 %}  Step 3 : Delete ROS stack (VPC / ECS / NLB / NAT / EIP){% endif %}
             Step 4 : Orphan scan
           {% if keep_image | bool and teardown_from | int >= 3 %}  Step 5 : Partial state clear (stack IDs reset; AI + image IDs kept → Phase 03 → 04 next){% elif teardown_from | int >= 3 %}  Step 5 : Delete state.yml (full rebuild needed → Phase 01 → 02 → 03 → 04 next){% else %}  Step 5 : Partial state clear (stack preserved){% endif %}
 
