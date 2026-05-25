@@ -588,7 +588,7 @@ Resources:
       Scheduler: Wrr
       HealthCheckConfig:
         HealthCheckEnabled: true
-        HealthCheckType: TCP
+        HealthCheckType: Tcp
         HealthCheckConnectPort: 6443
         HealthCheckInterval: 10
         HealthyThreshold: 2
@@ -626,7 +626,7 @@ Resources:
       Scheduler: Wrr
       HealthCheckConfig:
         HealthCheckEnabled: true
-        HealthCheckType: TCP
+        HealthCheckType: Tcp
         HealthCheckConnectPort: 22623
         HealthCheckInterval: 10
         HealthyThreshold: 2
