@@ -209,6 +209,16 @@
           prefix = ""
           location = "registry.redhat.io/rhai/assisted-installer-agent-rhel9"
           mirror-by-digest-only = false
+          # Block direct contact with the upstream registry — every pull
+          # MUST resolve through the in-VPC mirror.  Without this, when a
+          # blob is missing from the mirror, podman/cri-o silently falls
+          # back to upstream and quay.io returns 302 to cdn01.quay.io
+          # (signed S3 URL), which times out from China and stalls the
+          # whole install for 30 s per retry.  blocked=true + mirror = …
+          # means: "no upstream allowed, only mirror".  If the mirror
+          # really lacks the image, we want to fail fast, surface it,
+          # and fix the mirror — not silently grind.
+          blocked = true
 
           [[registry.mirror]]
           location = "{{ mirror_private_ip }}:8443/rhai/assisted-installer-agent-rhel9"
@@ -218,6 +228,16 @@
           prefix = ""
           location = "registry.redhat.io/rhai/assisted-installer-rhel9"
           mirror-by-digest-only = false
+          # Block direct contact with the upstream registry — every pull
+          # MUST resolve through the in-VPC mirror.  Without this, when a
+          # blob is missing from the mirror, podman/cri-o silently falls
+          # back to upstream and quay.io returns 302 to cdn01.quay.io
+          # (signed S3 URL), which times out from China and stalls the
+          # whole install for 30 s per retry.  blocked=true + mirror = …
+          # means: "no upstream allowed, only mirror".  If the mirror
+          # really lacks the image, we want to fail fast, surface it,
+          # and fix the mirror — not silently grind.
+          blocked = true
 
           [[registry.mirror]]
           location = "{{ mirror_private_ip }}:8443/rhai/assisted-installer-rhel9"
@@ -227,6 +247,16 @@
           prefix = ""
           location = "registry.redhat.io/rhai/assisted-installer-controller-rhel9"
           mirror-by-digest-only = false
+          # Block direct contact with the upstream registry — every pull
+          # MUST resolve through the in-VPC mirror.  Without this, when a
+          # blob is missing from the mirror, podman/cri-o silently falls
+          # back to upstream and quay.io returns 302 to cdn01.quay.io
+          # (signed S3 URL), which times out from China and stalls the
+          # whole install for 30 s per retry.  blocked=true + mirror = …
+          # means: "no upstream allowed, only mirror".  If the mirror
+          # really lacks the image, we want to fail fast, surface it,
+          # and fix the mirror — not silently grind.
+          blocked = true
 
           [[registry.mirror]]
           location = "{{ mirror_private_ip }}:8443/rhai/assisted-installer-controller-rhel9"
@@ -240,6 +270,16 @@
           prefix = ""
           location = "quay.io/openshift-release-dev/ocp-release"
           mirror-by-digest-only = false
+          # Block direct contact with the upstream registry — every pull
+          # MUST resolve through the in-VPC mirror.  Without this, when a
+          # blob is missing from the mirror, podman/cri-o silently falls
+          # back to upstream and quay.io returns 302 to cdn01.quay.io
+          # (signed S3 URL), which times out from China and stalls the
+          # whole install for 30 s per retry.  blocked=true + mirror = …
+          # means: "no upstream allowed, only mirror".  If the mirror
+          # really lacks the image, we want to fail fast, surface it,
+          # and fix the mirror — not silently grind.
+          blocked = true
 
           [[registry.mirror]]
           location = "{{ mirror_private_ip }}:8443/openshift/release-images"
@@ -249,6 +289,16 @@
           prefix = ""
           location = "quay.io/openshift-release-dev/ocp-v4.0-art-dev"
           mirror-by-digest-only = false
+          # Block direct contact with the upstream registry — every pull
+          # MUST resolve through the in-VPC mirror.  Without this, when a
+          # blob is missing from the mirror, podman/cri-o silently falls
+          # back to upstream and quay.io returns 302 to cdn01.quay.io
+          # (signed S3 URL), which times out from China and stalls the
+          # whole install for 30 s per retry.  blocked=true + mirror = …
+          # means: "no upstream allowed, only mirror".  If the mirror
+          # really lacks the image, we want to fail fast, surface it,
+          # and fix the mirror — not silently grind.
+          blocked = true
 
           [[registry.mirror]]
           location = "{{ mirror_private_ip }}:8443/openshift/release"

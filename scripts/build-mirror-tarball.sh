@@ -163,6 +163,21 @@ cat >> imageset-config.yaml <<EOF
     - name: ${AI_CONTROLLER_IMAGE}
 EOF
 
+# Optional: mirror operator catalogs (post-install OperatorHub) so installing
+# any operator from those catalogs also works fully offline.
+# Set OPERATOR_CATALOGS=redhat-operators,certified-operators (comma-separated).
+# Each one expands to its full image set (~10-50 GB per catalog) — big.
+if [[ -n "${OPERATOR_CATALOGS:-}" ]]; then
+  echo "[2b/8] Adding operator catalogs: $OPERATOR_CATALOGS"
+  echo "  operators:" >> imageset-config.yaml
+  IFS=',' read -ra _CATS <<< "$OPERATOR_CATALOGS"
+  for cat in "${_CATS[@]}"; do
+    cat >> imageset-config.yaml <<EOF
+    - catalog: registry.redhat.io/redhat/${cat}-index:v${OPENSHIFT_VERSION}
+EOF
+  done
+fi
+
 # ── Run oc-mirror (the slow step — pulls ~25-30 GB from quay.io) ──────────────
 echo "[3/6] Running oc-mirror (will take 15-60 min depending on link speed)..."
 oc-mirror --config=imageset-config.yaml file://./openshift-mirror
@@ -196,6 +211,27 @@ aliyun oss cp "$TARBALL_PATH" "oss://${OSS_BUCKET}/${OSS_OBJECT}" \
     --part-size=104857600 --parallel=10 --force
 
 aliyun oss cp "${TARBALL_PATH}.sha256" "oss://${OSS_BUCKET}/${OSS_OBJECT}.sha256" \
+    --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
+    --force
+
+# ── Generate + upload expected-images.txt ────────────────────────────────────
+# 03b uses this to verify the mirror is complete after import: it queries
+# Quay's catalog and fails fast if any image listed here is missing.
+# Without this check, a partial mirror silently lets install start and then
+# bootkube grinds for hours retrying upstream pulls that ultimately fail.
+echo "[8b/8] Generating expected-images.txt from oc adm release info..."
+EXPECTED_LIST="$WORK_DIR/expected-images.txt"
+{
+  oc adm release info --registry-config="$PULL_SECRET" \
+    "quay.io/openshift-release-dev/ocp-release:${OPENSHIFT_PATCH_VERSION}-x86_64" \
+    -o jsonpath='{range .references.spec.tags[*]}{.from.name}{"\n"}{end}' \
+    2>/dev/null || true
+  echo "$AI_AGENT_IMAGE"
+  echo "$AI_INSTALLER_IMAGE"
+  echo "$AI_CONTROLLER_IMAGE"
+} | sort -u > "$EXPECTED_LIST"
+echo "    → $(wc -l < "$EXPECTED_LIST") images expected in mirror"
+aliyun oss cp "$EXPECTED_LIST" "oss://${OSS_BUCKET}/${OSS_PREFIX}/${CLUSTER_NAME}-${OPENSHIFT_VERSION}-expected-images.txt" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
     --force
 
