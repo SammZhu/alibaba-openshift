@@ -232,13 +232,17 @@
           location = "{{ mirror_private_ip }}:8443/rhai/assisted-installer-controller-rhel9"
           insecure = true
 
+          # Mirror destination paths come from oc-mirror's own ICSP — see
+          # comment on the analogous PATCH in 03b-mirror-prepare.yml.
+          # oc-mirror v1 publishes both OCP repos into the `openshift`
+          # namespace with *different* names from the source.
           [[registry]]
           prefix = ""
           location = "quay.io/openshift-release-dev/ocp-release"
           mirror-by-digest-only = true
 
           [[registry.mirror]]
-          location = "{{ mirror_private_ip }}:8443/openshift-release-dev/ocp-release"
+          location = "{{ mirror_private_ip }}:8443/openshift/release-images"
           insecure = true
 
           [[registry]]
@@ -247,7 +251,7 @@
           mirror-by-digest-only = true
 
           [[registry.mirror]]
-          location = "{{ mirror_private_ip }}:8443/openshift-release-dev/ocp-v4.0-art-dev"
+          location = "{{ mirror_private_ip }}:8443/openshift/release"
           insecure = true
       when: mirror_enabled | default(false) | bool
 
