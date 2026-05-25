@@ -543,40 +543,86 @@ Resources:
       PolicyName: !GetAtt NodeRamPolicy.PolicyName
       PolicyType: Custom
 
-  # ── API Server SLB ───────────────────────────────────────────────────────────
+  # ── API Server NLB (Network Load Balancer) ──────────────────────────────────
+  # Why NLB (not classic SLB / CLB):
+  #   Aliyun CLB does NOT support hairpin / self-loop — a backend ECS cannot
+  #   reach the VIP it is itself attached to (packet gets dropped).  During
+  #   OpenShift install every master fetches its ignition from
+  #   api-int.<cluster>.<base_domain>:22623 → LB VIP → bootstrap MCS.  With
+  #   CLB, masters in the backend pool loop and time out in initramfs.
+  #   NLB supports loopback natively, so this works out of the box.
+  #
+  # NLB structure differs from CLB:
+  #   - LoadBalancer needs ZoneMappings (≥1 zone; we use 2 for HA).
+  #   - Backends are grouped in ServerGroups (one per service port).
+  #   - Listener references the ServerGroup by ID (not direct ECS attach).
 
-  ApiSLB:
-    Type: ALIYUN::SLB::LoadBalancer
+  ApiNLB:
+    Type: ALIYUN::NLB::LoadBalancer
     Properties:
       LoadBalancerName: !Sub '${ClusterName}-api'
-      AddressType: intranet
+      LoadBalancerType: Network
+      AddressType: Intranet
+      AddressIpVersion: Ipv4
       VpcId: !Ref Vpc
-      VSwitchId: !Ref PrivateVSwitch
-      LoadBalancerSpec: slb.s2.small
+      ZoneMappings:
+        - ZoneId: !Ref ZoneId
+          VSwitchId: !Ref PrivateVSwitch
+        - ZoneId: !Ref ZoneId2
+          VSwitchId: !Ref PrivateVSwitch2
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
           Value: owned
 
-  ApiSLBListener:
-    Type: ALIYUN::SLB::Listener
+  # 6443 — Kubernetes API server
+  ApiServerGroup:
+    Type: ALIYUN::NLB::ServerGroup
     Properties:
-      LoadBalancerId: !Ref ApiSLB
-      ListenerPort: 6443
-      BackendServerPort: 6443
-      Protocol: tcp
-      Bandwidth: -1
-      # HealthCheck sub-properties are not supported by ROS ALIYUN::SLB::Listener;
-      # SLB uses default TCP health check on the backend port automatically.
+      ServerGroupName: !Sub '${ClusterName}-api-6443'
+      ServerGroupType: Instance
+      VpcId: !Ref Vpc
+      Protocol: TCP
+      Scheduler: Wrr
+      HealthCheckConfig:
+        HealthCheckEnabled: true
+        HealthCheckType: TCP
+        HealthCheckConnectPort: 6443
+        HealthCheckInterval: 10
+        HealthyThreshold: 2
+        UnhealthyThreshold: 2
 
-  McsListener:
-    Type: ALIYUN::SLB::Listener
+  ApiNLBListener:
+    Type: ALIYUN::NLB::Listener
     Properties:
-      LoadBalancerId: !Ref ApiSLB
+      LoadBalancerId: !Ref ApiNLB
+      ListenerProtocol: TCP
+      ListenerPort: 6443
+      ServerGroupId: !Ref ApiServerGroup
+
+  # 22623 — Machine Config Server (ignition fetch during install)
+  McsServerGroup:
+    Type: ALIYUN::NLB::ServerGroup
+    Properties:
+      ServerGroupName: !Sub '${ClusterName}-mcs-22623'
+      ServerGroupType: Instance
+      VpcId: !Ref Vpc
+      Protocol: TCP
+      Scheduler: Wrr
+      HealthCheckConfig:
+        HealthCheckEnabled: true
+        HealthCheckType: TCP
+        HealthCheckConnectPort: 22623
+        HealthCheckInterval: 10
+        HealthyThreshold: 2
+        UnhealthyThreshold: 2
+
+  McsNLBListener:
+    Type: ALIYUN::NLB::Listener
+    Properties:
+      LoadBalancerId: !Ref ApiNLB
+      ListenerProtocol: TCP
       ListenerPort: 22623
-      BackendServerPort: 22623
-      Protocol: tcp
-      Bandwidth: -1
-      # HealthCheck sub-properties are not supported by ROS ALIYUN::SLB::Listener.
+      ServerGroupId: !Ref McsServerGroup
 
   # ── Private DNS ──────────────────────────────────────────────────────────────
 
@@ -597,13 +643,16 @@ Resources:
         - VpcId: !Ref Vpc
           RegionId: !Ref Region
 
+  # api / api-int point at the NLB via CNAME (not A) — NLB has per-zone ENI
+  # IPs and uses its DNS name to distribute traffic across zones.  Using A
+  # against a single zone IP would lose cross-zone HA.
   ApiRecord:
     Type: ALIYUN::PVTZ::ZoneRecord
     Properties:
       ZoneId: !Ref PrivateZone
       Rr: api
-      Type: A
-      Value: !GetAtt ApiSLB.IpAddress
+      Type: CNAME
+      Value: !GetAtt ApiNLB.DNSName
       Ttl: 60
 
   ApiIntRecord:
@@ -611,8 +660,8 @@ Resources:
     Properties:
       ZoneId: !Ref PrivateZone
       Rr: api-int
-      Type: A
-      Value: !GetAtt ApiSLB.IpAddress
+      Type: CNAME
+      Value: !GetAtt ApiNLB.DNSName
       Ttl: 60
 
   AppsRecord:
@@ -781,26 +830,46 @@ Resources:
         - Key: openshift-node-role
           Value: master
 
-  # Register all 3 control plane nodes as SLB backend servers.
-  # This must exist before installation completes so that api-int.<cluster>.<domain>
-  # (which resolves to the SLB) can reach the API server and MCS.
-  ControlPlaneSLBAttachment:
-    Type: ALIYUN::SLB::BackendServerAttachment
-    DependsOn:
-      - ApiSLBListener
-      - McsListener
+  # Register all 3 control plane nodes as NLB backends (one attachment per
+  # ServerGroup / port).  Must exist before installation completes so that
+  # api-int.<cluster>.<domain> can reach the API server and MCS.
+  ApiServerGroupAttachment:
+    Type: ALIYUN::NLB::ServerGroupServerAttachment
+    DependsOn: ApiNLBListener
     Properties:
-      LoadBalancerId: !Ref ApiSLB
-      BackendServers:
+      ServerGroupId: !Ref ApiServerGroup
+      Servers:
         - ServerId: !Ref RendezvousInstance
+          ServerType: Ecs
+          Port: 6443
           Weight: 100
-          Type: ecs
         - ServerId: !Ref ControlPlaneInstance2
+          ServerType: Ecs
+          Port: 6443
           Weight: 100
-          Type: ecs
         - ServerId: !Ref ControlPlaneInstance3
+          ServerType: Ecs
+          Port: 6443
           Weight: 100
-          Type: ecs
+
+  McsServerGroupAttachment:
+    Type: ALIYUN::NLB::ServerGroupServerAttachment
+    DependsOn: McsNLBListener
+    Properties:
+      ServerGroupId: !Ref McsServerGroup
+      Servers:
+        - ServerId: !Ref RendezvousInstance
+          ServerType: Ecs
+          Port: 22623
+          Weight: 100
+        - ServerId: !Ref ControlPlaneInstance2
+          ServerType: Ecs
+          Port: 22623
+          Weight: 100
+        - ServerId: !Ref ControlPlaneInstance3
+          ServerType: Ecs
+          Port: 22623
+          Weight: 100
 
   WorkerInstanceGroup:
     Type: ALIYUN::ECS::InstanceGroup
@@ -1154,9 +1223,9 @@ Outputs:
     Value: !Ref PrivateVSwitch
     Description: Primary VSwitch ID — needed for CCM cloud.conf
 
-  ApiSLBIp:
-    Value: !GetAtt ApiSLB.IpAddress
-    Description: API Server SLB internal IP — use as controlPlaneEndpoint in install-config.yaml
+  ApiLBEndpoint:
+    Value: !GetAtt ApiNLB.DNSName
+    Description: API Server NLB intranet DNS name (resolves to per-zone NLB ENI IPs inside the VPC)
 
   PrivateZoneName:
     Value: !Sub '${ClusterName}.${BaseDomain}'

@@ -488,7 +488,7 @@
           ros_stack_id: ''
           vpc_id: ''
           private_vswitch: ''
-          api_slb_ip: ''
+          api_lb_endpoint: ''
           worker_sg: ''
           node_ram_role: ''
           jump_host_ip: ''

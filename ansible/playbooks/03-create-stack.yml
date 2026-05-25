@@ -654,7 +654,7 @@
       ansible.builtin.set_fact:
         vpc_id:           "{{ (outputs | selectattr('OutputKey', 'equalto', 'VpcId')              | list | first).OutputValue }}"
         private_vswitch:  "{{ (outputs | selectattr('OutputKey', 'equalto', 'VSwitchId')          | list | first).OutputValue }}"
-        api_slb_ip:       "{{ (outputs | selectattr('OutputKey', 'equalto', 'ApiSLBIp')           | list | first).OutputValue }}"
+        api_lb_endpoint:  "{{ (outputs | selectattr('OutputKey', 'equalto', 'ApiLBEndpoint')     | list | first).OutputValue }}"
         install_config:   "{{ (outputs | selectattr('OutputKey', 'equalto', 'InstallConfig')      | list | first).OutputValue }}"
         dynamic_manifest: "{{ (outputs | selectattr('OutputKey', 'equalto', 'DynamicCustomManifest')| list | first).OutputValue }}"
         _worker_sg_from_output:   "{{ (outputs | selectattr('OutputKey', 'equalto', 'WorkerSecurityGroup') | list | map(attribute='OutputValue') | list | first | default('')) }}"
@@ -853,7 +853,7 @@
           ros_stack_id: "{{ ros_stack_id }}"
           vpc_id: "{{ vpc_id }}"
           private_vswitch: "{{ private_vswitch }}"
-          api_slb_ip: "{{ api_slb_ip }}"
+          api_lb_endpoint: "{{ api_lb_endpoint }}"
           worker_sg: "{{ worker_sg }}"
           node_ram_role: "{{ node_ram_role }}"
           dynamic_manifest_file: "{{ output_dir }}/alibaba-ccm-config.yaml"
@@ -888,7 +888,7 @@
         msg: |
           ✓ Stack ready.
 
-          API SLB IP : {{ api_slb_ip }}
+          API NLB    : {{ api_lb_endpoint }}
           {% if jump_host_ip | default('') | length > 0 %}
           Jump host  : {{ jump_host_ip }}
 

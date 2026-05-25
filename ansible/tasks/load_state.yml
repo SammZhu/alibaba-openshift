@@ -1,7 +1,7 @@
 ---
 # Load pipeline state from state.yml if present.
 # Variables set: cluster_id, infra_env_id, iso_path, ecs_image_id,
-#                ros_stack_id, vpc_id, private_vswitch, api_slb_ip,
+#                ros_stack_id, vpc_id, private_vswitch, api_lb_endpoint,
 #                worker_sg, node_ram_role, jump_host_ip, kubeconfig_path
 - name: Check whether state file exists
   ansible.builtin.stat:

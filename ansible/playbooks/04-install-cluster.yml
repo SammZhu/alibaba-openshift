@@ -338,6 +338,8 @@
         - cluster_poll.json.status in ['pending-for-input', 'installing-pending-user-action', 'error', 'cancelled']
 
     # ── Install ───────────────────────────────────────────────────────────
+    # (No SLB self-loop hack needed — ROS template uses NLB, which supports
+    #  hairpin / backend → VIP loopback natively.)
     - name: Trigger install
       ansible.builtin.uri:
         url: "{{ assisted_api }}/clusters/{{ cluster_id }}/actions/install"
