@@ -20,6 +20,11 @@ compute_count:        0       # 0 = compact (masters schedule workloads)
 compute_type:         ecs.g7.xlarge
 system_disk_category: cloud_essd
 system_disk_size:     120
+# Size (GB) of the /dev/vdb install target.  Must be >= 100 — OpenShift
+# rejects smaller install disks ("Disk is too small … 100 GB required").
+# RHCOS uses ~5 GB; the rest is unused but provides headroom and is
+# never copied by the vdb→vda clone hook (sector-bounded dd).
+install_disk_size:    100
 
 # ── Network ──────────────────────────────────────────────────────────────────
 vpc_cidr:             10.0.0.0/16

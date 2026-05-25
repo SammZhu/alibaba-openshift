@@ -333,6 +333,7 @@
           - {ParameterKey: ComputeInstanceType,      ParameterValue: "{{ compute_type }}"}
           - {ParameterKey: SystemDiskCategory,       ParameterValue: "{{ system_disk_category }}"}
           - {ParameterKey: SystemDiskSize,           ParameterValue: "{{ system_disk_size | string }}"}
+          - {ParameterKey: InstallDiskSize,          ParameterValue: "{{ install_disk_size | default(100) | string }}"}
           - {ParameterKey: InstallationMethod,       ParameterValue: "{{ installation_method }}"}
           - {ParameterKey: ImageId,                  ParameterValue: "{{ ecs_image_id | default('') }}"}
           - {ParameterKey: RendezvousIp,             ParameterValue: "{{ rendezvous_ip }}"}

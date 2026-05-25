@@ -92,12 +92,16 @@ Parameters:
   # Data disk attached at /dev/vdb.  coreos-installer writes RHCOS here,
   # then a systemd ExecStop hook clones vdb → vda before reboot, so the
   # ECS boots from the cloned RHCOS on /dev/vda on next start.  See
-  # ansible/files/clone-vdb-to-vda.{sh,service} for the hook.  40 GB is
-  # plenty — RHCOS install footprint is ~3–5 GB; only used sectors get
-  # dd'd, not full disk size.
+  # ansible/files/clone-vdb-to-vda.{sh,service} for the hook.
+  #
+  # 100 GB is OpenShift's minimum eligible-disk size — AI marks anything
+  # smaller as "Disk is too small (… X GB, but 100 GB are required)".
+  # Only the first ~5 GB actually holds RHCOS partitions; the dd step
+  # copies just up to the last used sector, so disk size > 100 GB only
+  # affects OSS cost, not clone time.
   InstallDiskSize:
     Type: Number
-    Default: 40
+    Default: 100
 
   InstallationMethod:
     Type: String
