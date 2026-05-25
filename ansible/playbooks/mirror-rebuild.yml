@@ -57,9 +57,11 @@
           - -o
           - StrictHostKeyChecking=no
           - -o
+          - UserKnownHostsFile=/dev/null
+          - -o
           - ConnectTimeout=10
           - -o
-          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -W %h:%p root@{{ jump_host_ip }}"
+          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
           - "root@{{ mirror_private_ip }}"
           - "test -f /var/lib/mirror-ready && curl -ksf https://{{ mirror_private_ip }}:8443/health/instance"
       register: mirror_ping
@@ -78,7 +80,9 @@
           - -o
           - StrictHostKeyChecking=no
           - -o
-          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -W %h:%p root@{{ jump_host_ip }}"
+          - UserKnownHostsFile=/dev/null
+          - -o
+          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
           - "root@{{ mirror_private_ip }}"
           - bash
           - -lc
@@ -105,7 +109,9 @@
           - -o
           - StrictHostKeyChecking=no
           - -o
-          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -W %h:%p root@{{ jump_host_ip }}"
+          - UserKnownHostsFile=/dev/null
+          - -o
+          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
           - "root@{{ mirror_private_ip }}"
           - bash
           - -lc
