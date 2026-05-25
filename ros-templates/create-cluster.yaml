@@ -778,17 +778,21 @@ Resources:
 
   # First control plane node. In Agent-based mode gets a fixed private IP so
   # rendezvousIP in agent-config.yaml is known before ISO generation.
+  # NOTE: all 3 masters live in zone2 (PrivateVSwitch2) because
+  # cn-wulanchabu zone-a often runs out of 8-vCPU c-series stock.
+  # rendezvous_ip in all.yml must therefore fall within
+  # private_subnet_cidr2 (default 10.0.32.0/20, e.g. 10.0.32.5).
   RendezvousInstance:
     Type: ALIYUN::ECS::Instance
     DependsOn:
-      - NatSNATEntry
+      - NatSNATEntry2
       - RolePolicyAttachment
     Properties:
       InstanceName: !Sub '${ClusterName}-master-1'
       InstanceType: !Ref ControlPlaneInstanceType
       ImageId: !Ref ImageId
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
-      VSwitchId: !Ref PrivateVSwitch
+      VSwitchId: !Ref PrivateVSwitch2
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
       # /dev/vdb — install target for coreos-installer.  Cloned to vda
