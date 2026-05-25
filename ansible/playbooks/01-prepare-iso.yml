@@ -255,23 +255,59 @@
           insecure = true
       when: mirror_enabled | default(false) | bool
 
-    - name: Build ignition config override JSON
+    # ── Inject vdb→vda clone hook (Alibaba ECS install workaround) ───────
+    # See ansible/files/clone-vdb-to-vda.{sh,service} for details.
+    # Runs on EVERY Alibaba install (mirror or not) because the underlying
+    # constraint is the same — ECS boots from vda which holds the ISO.
+    - name: Slurp clone hook script
+      ansible.builtin.slurp:
+        src: "{{ playbook_dir }}/../files/clone-vdb-to-vda.sh"
+      register: clone_sh_slurp
+
+    - name: Slurp clone hook systemd unit
+      ansible.builtin.slurp:
+        src: "{{ playbook_dir }}/../files/clone-vdb-to-vda.service"
+      register: clone_unit_slurp
+
+    # Build the ignition override unconditionally (clone hook is always
+    # needed on Alibaba).  Mirror's registries.conf is merged in only
+    # when mirror_enabled.  Ignition spec 3.1.0 schema:
+    #   storage.files[]  — write a file
+    #   systemd.units[]  — install + enable a systemd unit
+    - name: Build ignition file list — base (clone hook always)
+      ansible.builtin.set_fact:
+        _ignition_files:
+          - path: /usr/local/bin/clone-vdb-to-vda.sh
+            mode: 493            # 0755
+            overwrite: true
+            contents:
+              source: "data:text/plain;base64,{{ clone_sh_slurp.content }}"
+
+    - name: Append registries.conf to ignition files (mirror mode)
+      ansible.builtin.set_fact:
+        _ignition_files: >-
+          {{ _ignition_files + [{
+            'path': '/etc/containers/registries.conf',
+            'mode': 420,
+            'overwrite': true,
+            'contents': {
+              'source': 'data:text/plain;base64,' + (_registries_conf | b64encode)
+            }
+          }] }}
+      when: mirror_enabled | default(false) | bool
+
+    - name: Build ignition config override JSON (clone hook + optional mirror)
       ansible.builtin.set_fact:
         _ignition_override: >-
           {{ {
             'ignition': {'version': '3.1.0'},
-            'storage': {
-              'files': [{
-                'path': '/etc/containers/registries.conf',
-                'mode': 420,
-                'overwrite': true,
-                'contents': {
-                  'source': 'data:text/plain;base64,' + (_registries_conf | b64encode)
-                }
-              }]
-            }
+            'storage': {'files': _ignition_files},
+            'systemd': {'units': [{
+              'name': 'clone-vdb-to-vda.service',
+              'enabled': true,
+              'contents': clone_unit_slurp.content | b64decode
+            }]}
           } | to_json }}
-      when: mirror_enabled | default(false) | bool
 
     - name: Build base infra-env body
       ansible.builtin.set_fact:
@@ -288,13 +324,11 @@
       no_log: true
       when: infra_env_id is not defined or infra_env_id | length == 0
 
-    - name: Build infra-env body (with mirror override if enabled)
+    - name: Build infra-env body (clone hook always; mirror conf when enabled)
       ansible.builtin.set_fact:
         _infra_body: >-
           {{ (_infra_body_base
-                | combine({'ignition_config_override': _ignition_override})
-              if (mirror_enabled | default(false) | bool)
-              else _infra_body_base)
+                | combine({'ignition_config_override': _ignition_override}))
              | to_json }}
       no_log: true
       when: infra_env_id is not defined or infra_env_id | length == 0

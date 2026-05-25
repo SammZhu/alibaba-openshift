@@ -83,9 +83,21 @@ Parameters:
     Default: cloud_essd
     AllowedValues: [cloud_essd, cloud_ssd, cloud_efficiency]
 
+  # System disk holds the Discovery ISO (~1.3 GB ISO + headroom for live
+  # rootfs RAM image).  40 GB is plenty — vdb is the real install target.
   SystemDiskSize:
     Type: Number
-    Default: 120
+    Default: 40
+
+  # Data disk attached at /dev/vdb.  coreos-installer writes RHCOS here,
+  # then a systemd ExecStop hook clones vdb → vda before reboot, so the
+  # ECS boots from the cloned RHCOS on /dev/vda on next start.  See
+  # ansible/files/clone-vdb-to-vda.{sh,service} for the hook.  40 GB is
+  # plenty — RHCOS install footprint is ~3–5 GB; only used sectors get
+  # dd'd, not full disk size.
+  InstallDiskSize:
+    Type: Number
+    Default: 40
 
   InstallationMethod:
     Type: String
@@ -697,6 +709,12 @@ Resources:
       VSwitchId: !Ref PrivateVSwitch
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
+      # /dev/vdb — install target for coreos-installer.  Cloned to vda
+      # before reboot so ECS boots from vda's RHCOS copy.
+      DiskMappings:
+        - Category: !Ref SystemDiskCategory
+          Size: !Ref InstallDiskSize
+          DiskName: !Sub '${ClusterName}-master-1-install'
       AllocatePublicIP: false
       PrivateIpAddress: !If [IsAgentBased, !Ref RendezvousIp, !Ref 'ALIYUN::NoValue']
       RamRoleName: !Ref NodeRamRole
@@ -721,6 +739,10 @@ Resources:
       VSwitchId: !Ref PrivateVSwitch
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
+      DiskMappings:
+        - Category: !Ref SystemDiskCategory
+          Size: !Ref InstallDiskSize
+          DiskName: !Sub '${ClusterName}-master-2-install'
       AllocatePublicIP: false
       RamRoleName: !Ref NodeRamRole
       Tags:
@@ -743,6 +765,10 @@ Resources:
       VSwitchId: !Ref PrivateVSwitch2
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
+      DiskMappings:
+        - Category: !Ref SystemDiskCategory
+          Size: !Ref InstallDiskSize
+          DiskName: !Sub '${ClusterName}-master-3-install'
       AllocatePublicIP: false
       RamRoleName: !Ref NodeRamRole
       Tags:
@@ -786,7 +812,11 @@ Resources:
       SecurityGroupId: !Ref WorkerSecurityGroup
       VSwitchId: !Ref PrivateVSwitch
       SystemDiskCategory: !Ref SystemDiskCategory
-      SystemDiskSize: 100
+      SystemDiskSize: !Ref SystemDiskSize
+      DiskMappings:
+        - Category: !Ref SystemDiskCategory
+          Size: !Ref InstallDiskSize
+          DiskName: !Sub '${ClusterName}-worker-install'
       AllocatePublicIP: false
       MaxAmount: !Ref ComputeCount
       MinAmount: !Ref ComputeCount

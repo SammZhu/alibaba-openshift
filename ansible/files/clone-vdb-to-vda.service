@@ -1,0 +1,26 @@
+[Unit]
+Description=Clone /dev/vdb to /dev/vda before reboot (Alibaba ECS install workaround)
+# Run during shutdown sequence, after multi-user but before unmounts.
+# DefaultDependencies=no avoids being torn down too early; explicit
+# Before= clauses pin us ahead of the actual reboot/halt/poweroff.
+DefaultDependencies=no
+After=multi-user.target
+Before=shutdown.target reboot.target halt.target poweroff.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+# This is the actual work.  ExecStop fires when systemd stops this
+# service during shutdown — and because of Before=shutdown.target the
+# reboot is blocked until this completes (or TimeoutStopSec hits).
+ExecStop=/usr/local/bin/clone-vdb-to-vda.sh
+TimeoutStopSec=30min
+# StandardOutput=journal+console so the dd progress is visible on the
+# ECS serial console if anything goes wrong.
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

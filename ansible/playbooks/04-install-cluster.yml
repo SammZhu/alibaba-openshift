@@ -152,60 +152,95 @@
     # ── Refresh token (poll may have taken >15min) ────────────────────────
     - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
 
-    # ── Set hostnames via AI API ──────────────────────────────────────────
-    # RHCOS falls back to MAC address when PTR lookup fails.  Setting the
-    # hostname explicitly via the AI API is more reliable than relying on
-    # reverse-DNS and works even when PTR records are missing.
-    # Matches hosts to FQDNs by IP address (from state.yml master_ip1/2/3).
-    - name: Build IP → FQDN map for hostname assignment
+    # ── Build per-host facts table (IP-driven, filters stale hosts) ──────
+    # Past bug: looping over all hosts_resp.json and assigning master to
+    # "first N by API response order" was fragile — stale historical hosts
+    # in the infra-env got picked up first, leaving the actual master ECS
+    # hosts as workers (or unbound), and hostname PATCHes landed on the
+    # wrong hosts.  Fix: filter to hosts currently bound to THIS cluster
+    # with non-empty inventory, then key everything off the host's actual
+    # IP — masters are exactly those matching state.yml's master_ipN.
+    - name: Build per-host facts (id, ip, role, hostname, install disk)
       ansible.builtin.set_fact:
-        ip_to_fqdn:
-          "{{ master_ip1 | default('') }}": "{{ cluster_name }}-master-1.{{ cluster_name }}.{{ base_domain }}"
-          "{{ master_ip2 | default('') }}": "{{ cluster_name }}-master-2.{{ cluster_name }}.{{ base_domain }}"
-          "{{ master_ip3 | default('') }}": "{{ cluster_name }}-master-3.{{ cluster_name }}.{{ base_domain }}"
-      when: master_ip1 | default('') | length > 0
+        cluster_hosts: |
+          {%- set out = [] -%}
+          {%- set master_ips = [master_ip1|default(''), master_ip2|default(''), master_ip3|default('')] -%}
+          {%- for h in hosts_resp.json -%}
+            {%- if h.cluster_id|default('') == cluster_id and h.inventory|default('')|length > 0 -%}
+              {%- set inv = h.inventory | from_json -%}
+              {%- set ip_cidr = inv.interfaces | map(attribute='ipv4_addresses') | flatten | first | default('') -%}
+              {%- set ip = ip_cidr.split('/')[0] -%}
+              {#- /dev/vdb in the host's disk inventory.  AI's
+                  disks_selected_config wants the disk *id* (typically a
+                  /dev/disk/by-path/... path), not the device name. -#}
+              {%- set vdb = (inv.disks | default([]) | selectattr('name','equalto','vdb') | list | first) | default({}) -%}
+              {%- set master_idx = master_ips.index(ip) + 1 if ip in master_ips else 0 -%}
+              {%- set _ = out.append({
+                  'id': h.id,
+                  'ip': ip,
+                  'is_master': (master_idx > 0),
+                  'role': ('master' if master_idx > 0 else 'worker'),
+                  'hostname': (cluster_name + '-master-' + (master_idx|string) + '.' + cluster_name + '.' + base_domain) if master_idx > 0 else '',
+                  'install_disk_id': vdb.id | default('')
+              }) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ out }}
 
-    - name: Set hostname for each host via AI API (IP-based match)
+    - name: Show host plan
+      ansible.builtin.debug:
+        msg: |
+          Host plan for cluster {{ cluster_id }}:
+          {% for h in cluster_hosts %}
+            {{ h.ip }}  →  role={{ h.role }}  hostname={{ h.hostname or '(default)' }}  install_disk={{ h.install_disk_id or '(default vda)' }}
+          {% endfor %}
+
+    - name: Sanity — exactly {{ control_plane_count }} masters identified by IP
+      ansible.builtin.assert:
+        that:
+          - cluster_hosts | selectattr('is_master', 'equalto', true) | list | length == (control_plane_count | int)
+        fail_msg: |
+          Expected {{ control_plane_count }} master IP matches but found
+          {{ cluster_hosts | selectattr('is_master', 'equalto', true) | list | length }}.
+          state.yml master_ip{1,2,3} = {{ [master_ip1|default(''), master_ip2|default(''), master_ip3|default('')] }}
+          Current host IPs            = {{ cluster_hosts | map(attribute='ip') | list }}
+          Likely a ROS / state drift — check state.yml or re-run Phase 03.
+
+    # ── Set hostname for each master via AI API ──────────────────────────
+    # Workers stay with AI's default hostname (MAC-derived) — they get
+    # renamed by the kubelet bootstrap based on the providerID anyway.
+    - name: PATCH hostname for masters
       ansible.builtin.uri:
         url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts/{{ item.id }}"
         method: PATCH
         headers:
           Authorization: "Bearer {{ ai_access_token }}"
           Content-Type: application/json
-        body: >-
-          {{ {'hostname': ip_to_fqdn[
-                ((item.inventory | from_json).interfaces
-                 | map(attribute='ipv4_addresses') | flatten | first | default('')
-                ).split('/')[0]
-              ]} | to_json }}
+        body: "{{ {'host_name': item.hostname} | to_json }}"
         body_format: raw
         status_code: [200, 201]
-      loop: "{{ hosts_resp.json }}"
-      loop_control:
-        label: >-
-          {{ ((item.inventory | from_json).interfaces
-              | map(attribute='ipv4_addresses') | flatten | first | default('?')
-             ).split('/')[0] }}
-      when:
-        - ip_to_fqdn is defined
-        - item.inventory is defined
-        - item.inventory | length > 0
-        - >-
-          ((item.inventory | from_json).interfaces
-           | map(attribute='ipv4_addresses') | flatten | first | default('')
-          ).split('/')[0] in ip_to_fqdn
+      loop: "{{ cluster_hosts | selectattr('is_master', 'equalto', true) | list }}"
+      loop_control: { label: "{{ item.ip }} → {{ item.hostname }}" }
 
-    # ── Assign roles (first N as master, rest worker) ─────────────────────
-    - name: Compute role assignments
-      ansible.builtin.set_fact:
-        host_role_map: |
-          {%- set out = [] -%}
-          {%- for h in hosts_resp.json -%}
-            {%- set _ = out.append({'id': h.id,
-                                     'role': 'master' if loop.index <= (control_plane_count | int) else 'worker'}) -%}
-          {%- endfor -%}
-          {{ out }}
+    # ── Pin coreos-installer to /dev/vdb (Alibaba ECS install workaround) ──
+    # /dev/vda holds the Discovery ISO and can't be written (busy
+    # partitions).  ansible/files/clone-vdb-to-vda.{sh,service} (injected
+    # via 01-prepare-iso ignition_config_override) clones vdb → vda just
+    # before the post-install reboot, so ECS boots from the vda clone.
+    - name: PATCH installation disk to /dev/vdb for every host
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts/{{ item.id }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ ai_access_token }}"
+          Content-Type: application/json
+        body: "{{ {'disks_selected_config': [{'id': item.install_disk_id, 'role': 'install'}]} | to_json }}"
+        body_format: raw
+        status_code: [200, 201]
+      loop: "{{ cluster_hosts | selectattr('install_disk_id', 'ne', '') | list }}"
+      loop_control: { label: "{{ item.ip }} → install on {{ item.install_disk_id }}" }
 
+    # ── Assign roles (IP-driven, not order-driven) ────────────────────────
     - name: PATCH host roles
       ansible.builtin.uri:
         url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts/{{ item.id }}"
@@ -216,8 +251,8 @@
         body: "{{ {'host_role': item.role} | to_json }}"
         body_format: raw
         status_code: [200, 201]
-      loop: "{{ host_role_map }}"
-      loop_control: { label: "{{ item.id }} -> {{ item.role }}" }
+      loop: "{{ cluster_hosts }}"
+      loop_control: { label: "{{ item.ip }} → {{ item.role }}" }
 
     # ── Upload custom manifests ───────────────────────────────────────────
     # Root cause: AI backend DELETE removes the logical record but NOT the
