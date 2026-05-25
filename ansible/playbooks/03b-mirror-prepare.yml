@@ -341,16 +341,42 @@
       no_log: true
 
     # ── Step 8: import the image tarball via oc-mirror standalone ──────────
+    # Our tarball is *double-tarred*: build-mirror-tarball.sh runs
+    #   oc-mirror --config=isc.yaml file://./openshift-mirror
+    # which produces mirror_seq1_000000.tar, _000001.tar, _000002.tar (v1
+    # archive chunks) inside ./openshift-mirror/, then wraps the *directory*
+    # in one outer tar for OSS upload.  oc-mirror v1 import expects --from
+    # to point at a v1 chunk file OR a directory containing the chunks — it
+    # does NOT unwrap an outer wrapper tar.  So we must extract first.
+    - name: Extract outer tar wrapper (idempotent — skip if already extracted)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        EXTRACTED=/var/lib/quay-storage/extracted
+        # Idempotent: if mirror_seq1_000000.tar already there and >1 GB, skip.
+        if [ -s "$EXTRACTED/mirror_seq1_000000.tar" ] && \
+           [ "$(stat -c %s "$EXTRACTED/mirror_seq1_000000.tar")" -gt 1073741824 ]; then
+          echo "=== $(date -Iseconds) outer tar already extracted, skipping ==="
+          exit 0
+        fi
+        mkdir -p "$EXTRACTED"
+        echo "=== $(date -Iseconds) extracting outer tar (~3-5 min) ==="
+        tar xf /var/lib/quay-storage/mirror-tarball.tar -C "$EXTRACTED"
+        echo "=== $(date -Iseconds) extract complete ==="
+        ls -lh "$EXTRACTED"/mirror_seq1_*.tar
+        REMOTE
+      when: already_ready.rc != 0
+
     - name: Import image tarball into mirror-registry (~15-20 min)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
         export HOME=/root
         echo "=== $(date -Iseconds) importing tarball into mirror-registry ==="
-        # --v1 is mandatory starting oc-mirror 4.21; our tarball is v1 format
-        # (built by scripts/build-mirror-tarball.sh via oc-mirror v1 imageset-config).
-        oc-mirror --v1 --from=/var/lib/quay-storage/mirror-tarball.tar \
-          "docker://{{ mirror_private_ip }}:8443"
+        # --v1 mandatory since oc-mirror 4.21.  --from=DIR makes oc-mirror
+        # auto-discover the mirror_seq1_*.tar chunks in sequence order.
+        cd /var/lib/quay-storage/extracted
+        oc-mirror --v1 --from=. "docker://{{ mirror_private_ip }}:8443"
         echo "=== $(date -Iseconds) import complete ==="
         REMOTE
       when: already_ready.rc != 0
