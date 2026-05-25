@@ -269,12 +269,23 @@
         src: "{{ playbook_dir }}/../files/clone-vdb-to-vda.service"
       register: clone_unit_slurp
 
+    # Relaxed signature policy for the discovery agent.  RHCOS default
+    # policy.json requires GPG signatures on registry.redhat.io images,
+    # but mirrored copies don't carry the upstream signatures — agent
+    # rejects pulls with "A signature was required, but no signature
+    # exists" during AI's pre-install image-availability check.
+    # Trusting the mirror by config is safe — we control its contents.
+    - name: Slurp relaxed container signature policy
+      ansible.builtin.slurp:
+        src: "{{ playbook_dir }}/../files/policy.json"
+      register: policy_slurp
+
     # Build the ignition override unconditionally (clone hook is always
     # needed on Alibaba).  Mirror's registries.conf is merged in only
     # when mirror_enabled.  Ignition spec 3.1.0 schema:
     #   storage.files[]  — write a file
     #   systemd.units[]  — install + enable a systemd unit
-    - name: Build ignition file list — base (clone hook always)
+    - name: Build ignition file list — base (clone hook + signature policy)
       ansible.builtin.set_fact:
         _ignition_files:
           - path: /usr/local/bin/clone-vdb-to-vda.sh
@@ -282,6 +293,11 @@
             overwrite: true
             contents:
               source: "data:text/plain;base64,{{ clone_sh_slurp.content }}"
+          - path: /etc/containers/policy.json
+            mode: 420            # 0644
+            overwrite: true
+            contents:
+              source: "data:text/plain;base64,{{ policy_slurp.content }}"
 
     - name: Append registries.conf to ignition files (mirror mode)
       ansible.builtin.set_fact:
