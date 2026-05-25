@@ -82,10 +82,10 @@
             [{'zone': zone,  'type': compute_type,         'role': 'compute (workers)'}]
               if (compute_count | int) > 0 else []
           ) + (
-            [{'zone': zone,  'type': jump_host_type,       'role': 'jump host'}]
+            [{'zone': zone,  'type': jump_host_type | default(''),       'role': 'jump host'}]
               if (enable_jump_host | default(false) | bool) else []
           ) + (
-            [{'zone': zone,  'type': mirror_instance_type, 'role': 'mirror registry'}]
+            [{'zone': zone,  'type': mirror_instance_type | default(''), 'role': 'mirror registry'}]
               if (mirror_enabled | default(false) | bool) else []
           ) }}
 
