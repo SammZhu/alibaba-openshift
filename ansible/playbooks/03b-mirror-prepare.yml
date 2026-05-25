@@ -413,6 +413,12 @@
         src: "{{ output_dir }}/mirror-ca.crt"
       register: mirror_ca_slurp
 
+    # oc-mirror v1 publishes upstream sources to shorter destination
+    # paths than the source.  These mappings come straight from
+    # oc-mirror's own generated imageContentSourcePolicy.yaml:
+    #   quay.io/openshift-release-dev/ocp-release      -> openshift/release-images
+    #   quay.io/openshift-release-dev/ocp-v4.0-art-dev -> openshift/release
+    #   registry.redhat.io/rhai                        -> rhai (unchanged)
     - name: Build install_config_overrides JSON (imageDigestSources + CA)
       ansible.builtin.set_fact:
         _install_config_overrides_json: >-
@@ -424,11 +430,6 @@
                'mirrors': [mirror_private_ip + ':8443/rhai/assisted-installer-rhel9']},
               {'source': 'registry.redhat.io/rhai/assisted-installer-controller-rhel9',
                'mirrors': [mirror_private_ip + ':8443/rhai/assisted-installer-controller-rhel9']},
-              # oc-mirror v1 publishes OCP release into shorter paths than
-              # the upstream source — these mappings come straight from
-              # oc-mirror's own generated imageContentSourcePolicy.yaml:
-              #   quay.io/openshift-release-dev/ocp-release      → openshift/release-images
-              #   quay.io/openshift-release-dev/ocp-v4.0-art-dev → openshift/release
               {'source': 'quay.io/openshift-release-dev/ocp-release',
                'mirrors': [mirror_private_ip + ':8443/openshift/release-images']},
               {'source': 'quay.io/openshift-release-dev/ocp-v4.0-art-dev',
