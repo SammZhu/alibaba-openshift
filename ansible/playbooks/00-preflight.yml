@@ -52,18 +52,22 @@
       changed_when: false
       failed_when: ali_check.rc != 0
 
-    - name: Verify aliyun-cli has VPC, SLB, RAM, ROS, PVTZ access
+    # NLB is a separate service from SLB; AliyunNLBFullAccess is easy to
+    # miss and otherwise surfaces only halfway through Phase 03 as
+    # "Forbidden.NoPermission" on the ApiNLB resource.
+    - name: Verify aliyun-cli has VPC, SLB, NLB, RAM, ROS, PVTZ access
       ansible.builtin.command:
         argv: "{{ item }}"
       register: svc_check
       changed_when: false
       failed_when: svc_check.rc != 0
       loop:
-        - [aliyun, vpc, DescribeVpcs,    --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
-        - [aliyun, slb, DescribeLoadBalancers, --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
-        - [aliyun, ram, ListRoles,       --profile, "{{ aliyun_profile }}"]
-        - [aliyun, ros, DescribeRegions, --profile, "{{ aliyun_profile }}"]
-        - [aliyun, pvtz, DescribeZones,  --profile, "{{ aliyun_profile }}"]
+        - [aliyun, vpc, DescribeVpcs,           --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
+        - [aliyun, slb, DescribeLoadBalancers,  --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
+        - [aliyun, nlb, ListLoadBalancers,      --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
+        - [aliyun, ram, ListRoles,              --profile, "{{ aliyun_profile }}"]
+        - [aliyun, ros, DescribeRegions,        --profile, "{{ aliyun_profile }}"]
+        - [aliyun, pvtz, DescribeZones,         --profile, "{{ aliyun_profile }}"]
       loop_control:
         label: "{{ item[1] }} {{ item[2] }}"
 

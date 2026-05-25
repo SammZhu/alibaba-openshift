@@ -114,10 +114,33 @@ Post-install:
 
 | Item | Notes |
 |------|-------|
-| Alibaba Cloud account | RAM admin permissions for ROS stack creation |
+| Alibaba Cloud account | RAM user with the managed policies listed below |
 | Red Hat account | OpenShift subscription + pull secret |
 | `oc` CLI | Any version compatible with your OCP release |
 | `openshift-install` | Agent-based only — download from [mirror.openshift.com](https://mirror.openshift.com/pub/openshift-v4/clients/ocp/) |
+
+### Required RAM managed policies
+
+Attach all of these to the RAM user whose AK/SK lives in `~/.aliyun/config.json`
+(the `aliyun_profile` in `group_vars/all.yml`).  `AliyunNLBFullAccess` is
+easy to miss because NLB is a separate service from classic SLB — without
+it Phase 03 fails with `Forbidden.NoPermission` when ROS tries to create
+the API load balancer.
+
+| Managed policy | Used by |
+|---|---|
+| `AliyunECSFullAccess` | ROS provisions ECS instances + disks; ImportImage |
+| `AliyunVPCFullAccess` | VPC / VSwitch / NAT / EIP / SG |
+| `AliyunNLBFullAccess` | **API server load balancer (NLB, not classic SLB)** |
+| `AliyunSLBFullAccess` | CCM-managed LoadBalancer Services (post-install) |
+| `AliyunRAMFullAccess` | ROS creates node RAM role + attaches policy |
+| `AliyunROSFullAccess` | Stack CRUD |
+| `AliyunPvtzFullAccess` | PrivateZone (`api`, `api-int`, `*.apps`, etcd records) |
+| `AliyunOSSFullAccess` | Upload Discovery ISO + mirror tarball |
+| `AliyunSTSAssumeRoleAccess` | Required by ImportImage's service-linked role |
+
+Shortcut for non-production accounts: `AdministratorAccess` covers all of the
+above.  For least-privilege, attach the individual policies.
 
 ---
 
