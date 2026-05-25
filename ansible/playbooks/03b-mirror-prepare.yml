@@ -304,16 +304,26 @@
       failed_when: false
       when: already_ready.rc != 0
 
-    - name: Run mirror-registry install (with IP-SAN cert)
+    - name: Run mirror-registry install (with IP-SAN cert, blobs on data disk)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
         export HOME=/root
         export USER=root
         echo "=== $(date -Iseconds) installing mirror-registry ==="
+        # --quayRoot   : where mirror-registry stores its config / scripts
+        # --quayStorage: where Quay puts blob storage (image layers).  Without
+        #                this flag Quay uses a podman *named volume*, which
+        #                lives at /var/lib/containers/storage/volumes/... on
+        #                the ROOT disk.  After a full OCP mirror that's ~21 GB
+        #                and easily fills the 40 GB system disk.  Pointing it
+        #                here keeps everything on the 100 GB data disk (vdb,
+        #                mounted at /var/lib/quay-storage by cloud-init).
+        mkdir -p /var/lib/quay-storage/datastorage
         /opt/mirror-registry install \
           --quayHostname "{{ mirror_private_ip }}" \
           --quayRoot /var/lib/quay-storage \
+          --quayStorage /var/lib/quay-storage/datastorage \
           --initUser "{{ mirror_init_user }}" \
           --initPassword "{{ mirror_init_password }}" \
           --sslCert /etc/quay-config/ssl.cert \
@@ -394,6 +404,20 @@
         # nothing to do" — leaving Quay empty.
         oc-mirror --v1 --from=. --skip-metadata-check "docker://{{ mirror_private_ip }}:8443"
         echo "=== $(date -Iseconds) import complete ==="
+        REMOTE
+      when: already_ready.rc != 0
+
+    # Free ~42 GB on the data disk: the import is complete, so neither the
+    # outer tarball nor the extracted mirror_seq1_*.tar chunks are needed
+    # anymore.  oc-mirror workspace + the v1 archive files were the source
+    # of truth for the just-finished push; deleting them is safe.
+    - name: Reclaim disk after import (drop tarball + extracted chunks)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        rm -f  /var/lib/quay-storage/mirror-tarball.tar
+        rm -rf /var/lib/quay-storage/extracted
+        df -h /var/lib/quay-storage
         REMOTE
       when: already_ready.rc != 0
 
