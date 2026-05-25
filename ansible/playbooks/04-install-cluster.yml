@@ -49,12 +49,21 @@
         return_content: true
       register: cluster_pre
 
+    # Do NOT reset a cluster that is currently mid-install or already done.
+    # Only states that signal "needs operator action to make forward progress"
+    # belong here:
+    #   error                            — bootkube / etcd / etc. failed
+    #   cancelled                        — operator cancelled previously
+    #   installing-pending-user-action   — install paused, waiting for input
+    # ('installing', 'finalizing', 'installed' were here by mistake — a
+    # transient ansible crash + re-run would otherwise cancel a healthy
+    # install or wipe an already-installed cluster.  If you genuinely want
+    # to rebuild, run 99-teardown first.)
     - name: Set needs_reset flag
       ansible.builtin.set_fact:
         needs_reset: >-
           {{ cluster_pre.json.status in [
-               'error', 'cancelled', 'installed',
-               'installing', 'installing-pending-user-action', 'finalizing'
+               'error', 'cancelled', 'installing-pending-user-action'
              ] }}
 
     - name: Cancel installation (AI)
@@ -360,9 +369,15 @@
           register: install_poll
           retries: 60
           delay: 60
-          until: install_poll.json.status == 'installed'
+          # AI's GET /clusters/{id} occasionally returns a response body
+          # missing the top-level 'status' field (transient).  Without
+          # `default('')` the `until:` expression throws
+          # "'dict object' has no attribute 'status'" and aborts the
+          # whole polling loop — which then leaves a healthy ongoing
+          # install with no operator following it.
+          until: install_poll.json.status | default('') == 'installed'
           failed_when:
-            - install_poll.json.status is defined
+            - install_poll.json.status | default('') != ''
             - install_poll.json.status in ['error', 'cancelled', 'pending-for-input', 'installing-pending-user-action']
 
     # ── Download credentials ──────────────────────────────────────────────
