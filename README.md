@@ -142,6 +142,19 @@ the API load balancer.
 Shortcut for non-production accounts: `AdministratorAccess` covers all of the
 above.  For least-privilege, attach the individual policies.
 
+### One-time NLB service-linked role
+
+If you've never used NLB on this account before, create its service-linked
+role once — otherwise Phase 03 fails with `OperationDenied.ServiceLinkedRoleNotExist`:
+
+```bash
+aliyun ram CreateServiceLinkedRole --ServiceName nlb.aliyuncs.com \
+  --profile <your-profile>
+```
+
+Phase 00 (`00-preflight.yml`) checks for this role and fails fast with the
+exact command above if it's missing.
+
 ---
 
 ## Step-by-Step: Assisted Installer

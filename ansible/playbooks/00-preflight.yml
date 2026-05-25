@@ -55,6 +55,11 @@
     # NLB is a separate service from SLB; AliyunNLBFullAccess is easy to
     # miss and otherwise surfaces only halfway through Phase 03 as
     # "Forbidden.NoPermission" on the ApiNLB resource.
+    #
+    # NLB also requires a service-linked role (AliyunServiceRoleForNlb)
+    # to be created once per account.  We check for it below; the
+    # alternative is a confusing CREATE_FAILED in Phase 03 with
+    # "OperationDenied.ServiceLinkedRoleNotExist".
     - name: Verify aliyun-cli has VPC, SLB, NLB, RAM, ROS, PVTZ access
       ansible.builtin.command:
         argv: "{{ item }}"
@@ -70,6 +75,23 @@
         - [aliyun, pvtz, DescribeZones,         --profile, "{{ aliyun_profile }}"]
       loop_control:
         label: "{{ item[1] }} {{ item[2] }}"
+
+    - name: Verify NLB service-linked role exists (account-level, one-time)
+      ansible.builtin.command:
+        argv: [aliyun, ram, GetRole, --RoleName, AliyunServiceRoleForNlb, --profile, "{{ aliyun_profile }}"]
+      register: nlb_slr
+      changed_when: false
+      failed_when: false
+
+    - name: Fail with actionable message if NLB SLR is missing
+      ansible.builtin.fail:
+        msg: |
+          AliyunServiceRoleForNlb is missing — NLB cannot be created until
+          this account-level service-linked role exists.  Create it once:
+
+            aliyun ram CreateServiceLinkedRole --ServiceName nlb.aliyuncs.com \
+              --profile {{ aliyun_profile }}
+      when: nlb_slr.rc != 0
 
     # ── ECS instance-type stock check (avoid wasting Phase 03 time on stockouts) ──
     # ROS CreateStack returns ResourceNoStock at the end of its provisioning
