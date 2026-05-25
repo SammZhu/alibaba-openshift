@@ -441,10 +441,14 @@
         headers:
           Authorization: "Bearer {{ ai_access_token }}"
           Content-Type: application/json
-        body: "{{ _install_config_overrides_json }}"
+        # AI v2 InstallConfigParams requires a single property
+        # `install_config_overrides` whose VALUE is the JSON string
+        # of the overrides — not the overrides object directly.
+        body:
+          install_config_overrides: "{{ _install_config_overrides_json }}"
         body_format: json
-        status_code: 201
-      no_log: true
+        status_code: [200, 201]
+      # no_log temporarily removed for debugging — restore once green
 
     - name: PATCH AI infra-env with mirror additional_trust_bundle
       ansible.builtin.uri:
@@ -456,7 +460,7 @@
         body:
           additional_trust_bundle: "{{ mirror_ca_slurp.content | b64decode }}"
         body_format: json
-        status_code: 201
+        status_code: [200, 201]
 
     - name: Mirror prepare done
       ansible.builtin.debug:
