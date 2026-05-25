@@ -377,32 +377,24 @@
         REMOTE
       when: already_ready.rc != 0
 
-    - name: Import image tarball into mirror-registry (~15-20 min)
+    - name: Import image tarball into mirror-registry — oc-mirror v2 (~15-20 min)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
         export HOME=/root
         echo "=== $(date -Iseconds) importing tarball into mirror-registry ==="
         cd /var/lib/quay-storage/extracted
-        # oc-mirror writes per-source workspace state under ./oc-mirror-workspace
-        # and ./.oc-mirror.log.  After a stack rebuild, the mirror ECS / Quay
-        # data disk is fresh (empty registry) but if these files come back —
-        # e.g. they get re-created by a prior run within the same fresh
-        # mirror — oc-mirror sees "current sequence == last published" and
-        # noops silently with "No diff from previous mirror".  Quay would
-        # then stay empty and Phase 04 image pulls would fail.
-        # Wipe both so oc-mirror always treats the push as first-time.
-        rm -rf ./oc-mirror-workspace ./.oc-mirror.log
-        # --v1 mandatory since oc-mirror 4.21.  --from=DIR makes oc-mirror
-        # auto-discover the mirror_seq1_*.tar chunks in sequence order.
-        #
-        # --skip-metadata-check is REQUIRED here.  Our mirror tarball is
-        # built with --ignore-history so each rebuild gets the same
-        # publish/.metadata.json sequence number; without this flag
-        # oc-mirror reads that metadata, decides "sequence is the same",
-        # and silently exits in ~1 s with "No diff from previous mirror,
-        # nothing to do" — leaving Quay empty.
-        oc-mirror --v1 --from=. --skip-metadata-check "docker://{{ mirror_private_ip }}:8443"
+        # oc-mirror v2 disk-to-mirror syntax:
+        #   oc-mirror -c <isc> --from file://<dir> docker://<reg> --v2
+        # The imageset-config.yaml is inside the tarball (added by builder
+        # in v2 mode); if missing, write a minimal stub so v2 can still run.
+        ISC=imageset-config.yaml
+        [ -s "$ISC" ] || cat > "$ISC" <<'YAML'
+        apiVersion: mirror.openshift.io/v2alpha1
+        kind: ImageSetConfiguration
+        mirror: {}
+        YAML
+        oc-mirror -c "$ISC" --from file://. "docker://{{ mirror_private_ip }}:8443" --v2
         echo "=== $(date -Iseconds) import complete ==="
         REMOTE
       when: already_ready.rc != 0
@@ -523,29 +515,18 @@
     #   quay.io/openshift-release-dev/ocp-v4.0-art-dev -> openshift/release
     #   registry.redhat.io/rhai                        -> rhai (unchanged)
     #
-    # Why imageContentSources (deprecated) not imageDigestSources (newer):
-    #
-    #   - imageDigestSources → AI writes image-digest-mirror-set.yaml (IDMS)
-    #     and registries.conf with mirror-by-digest-only=true.  Two failures:
-    #     (a) bootkube's `oc adm release info --idms-file=...` hits a known
-    #         bug: manifest fetch goes via mirror, but layer iteration uses
-    #         the source URL → direct quay.io pull → fails in cn-* region.
-    #     (b) Pre-install image_availability_check pulls some images by
-    #         tag (release:4.20.22-x86_64); mirror-by-digest-only=true
-    #         skips redirect for tag pulls → fails.
-    #
-    #   - imageContentSources → AI writes image-content-source-policy.yaml
-    #     (ICSP) and registries.conf with mirror-by-digest-only=false.
-    #     bootkube prefers ICSP over IDMS and uses `--icsp-file` which
-    #     redirects both manifest AND layer pulls.  Tag pulls also work.
-    #
-    # imageContentSources is deprecated in 4.20 but still accepted.  When
-    # it's finally removed (4.25+?), switch to ImageTagMirrorSet.
-    - name: Build install_config_overrides JSON (imageContentSources + CA)
+    # Use imageDigestSources (IDMS) — paired with oc-mirror v2:
+    #   - v2 emits IDMS as its native cluster-resource (idms-oc-mirror.yaml)
+    #   - the cluster honours mirrorSourcePolicy: NeverContactSource so
+    #     upstream registries can't be reached at all (fail fast instead
+    #     of cdn01.quay.io timeouts in cn-* regions).
+    #   - the v1-era bootkube IDMS bug (manifest via mirror, layers via
+    #     upstream) is fixed in 4.18+; we're on 4.20, safe.
+    - name: Build install_config_overrides JSON (imageDigestSources + CA)
       ansible.builtin.set_fact:
         _install_config_overrides_json: >-
           {{ {
-            'imageContentSources': [
+            'imageDigestSources': [
               {'source': 'registry.redhat.io/rhai/assisted-installer-agent-rhel9',
                'mirrors': [mirror_private_ip + ':8443/rhai/assisted-installer-agent-rhel9']},
               {'source': 'registry.redhat.io/rhai/assisted-installer-rhel9',
@@ -562,7 +543,7 @@
           } | to_json }}
       no_log: true
 
-    - name: PATCH AI cluster install-config (imageContentSources + CA)
+    - name: PATCH AI cluster install-config (imageDigestSources + CA)
       ansible.builtin.uri:
         url: "{{ assisted_api }}/clusters/{{ cluster_id }}/install-config"
         method: PATCH

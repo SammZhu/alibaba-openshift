@@ -138,17 +138,21 @@ fi
 # Make pull-secret discoverable by oc-mirror
 export DOCKER_CONFIG="$(dirname "$PULL_SECRET")"
 
-# ── Generate ImageSetConfiguration ────────────────────────────────────────────
-echo "[2/6] Writing ImageSetConfiguration..."
+# ── Generate ImageSetConfiguration (oc-mirror v2 schema) ─────────────────────
+# v2 is mandatory from oc-mirror 4.21 onwards; v1 generates state files
+# (publish/.metadata.json) that make every re-push a silent noop unless
+# you pass --skip-metadata-check, and even then it's prone to incomplete
+# pushes.  v2 has clean state semantics + emits IDMS natively (with
+# mirrorSourcePolicy: NeverContactSource) so the cluster enforces
+# mirror-only at the kube-level.
+echo "[2/6] Writing ImageSetConfiguration (v2)..."
 cat > imageset-config.yaml <<EOF
-apiVersion: mirror.openshift.io/v1alpha2
+apiVersion: mirror.openshift.io/v2alpha1
 kind: ImageSetConfiguration
-archiveSize: 10                                   # split into 10 GB chunks
-storageConfig:
-  local:
-    path: ./mirror-data
 mirror:
   platform:
+    architectures:
+      - amd64
     channels:
       - name: stable-${OPENSHIFT_VERSION}
         type: ocp
@@ -171,18 +175,23 @@ if [[ -n "${OPERATOR_CATALOGS:-}" ]]; then
   echo "[2b/8] Adding operator catalogs: $OPERATOR_CATALOGS"
   echo "  operators:" >> imageset-config.yaml
   IFS=',' read -ra _CATS <<< "$OPERATOR_CATALOGS"
-  for cat in "${_CATS[@]}"; do
+  for c in "${_CATS[@]}"; do
     cat >> imageset-config.yaml <<EOF
-    - catalog: registry.redhat.io/redhat/${cat}-index:v${OPENSHIFT_VERSION}
+    - catalog: registry.redhat.io/redhat/${c}-index:v${OPENSHIFT_VERSION}
 EOF
   done
 fi
 
-# ── Run oc-mirror (the slow step — pulls ~25-30 GB from quay.io) ──────────────
-echo "[3/6] Running oc-mirror (will take 15-60 min depending on link speed)..."
-oc-mirror --config=imageset-config.yaml file://./openshift-mirror
+# ── Run oc-mirror v2 (the slow step — pulls ~25-30 GB from quay.io) ──────────
+# v2 syntax: oc-mirror -c <cfg> file://<dir> --v2
+# Output layout differs from v1:
+#   openshift-mirror/working-dir/      — staging, contains cluster-resources/
+#   openshift-mirror/mirror_*.tar      — image chunks
+echo "[3/6] Running oc-mirror v2 (will take 15-60 min depending on link speed)..."
+oc-mirror -c imageset-config.yaml file://./openshift-mirror --v2
 
-# Collect all generated tarballs into one combined archive
+# Collect everything into one tarball; on the receive side the entire
+# directory tree gets handed back to oc-mirror via `--from file://...`.
 echo "[4/6] Packaging mirror data into single tarball..."
 TARBALL_PATH="$WORK_DIR/$TARBALL_NAME"
 tar -cf "$TARBALL_PATH" -C ./openshift-mirror .
