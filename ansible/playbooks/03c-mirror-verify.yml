@@ -54,14 +54,14 @@
       register: health_check
       changed_when: false
 
-    # ── Quay catalog (list of pushed repos) ───────────────────────────────
-    # The Docker Distribution /v2/_catalog endpoint requires a token-flow
-    # auth that mirror-registry's bundled Quay doesn't expose cleanly, so
-    # we go through Quay's native /api/v1 with basic auth instead.
-    # The repos created by oc-mirror live under TWO namespaces:
-    #   - openshift  (release + release-images, mirrored from OCP)
-    #   - rhai       (assisted-installer-*, mirrored from registry.redhat.io)
-    - name: List repos in each mirrored namespace
+    # ── Per-repo existence check via Docker Distribution v2 ──────────────
+    # Both Quay's /api/v1/repository and /v2/_catalog hide cross-user
+    # namespaces (openshift, rhai) from mirror-admin's view, so neither
+    # gives us a usable repo listing.  Instead we hit /v2/<repo>/tags/list
+    # for each expected repo via the standard bearer-token flow — this is
+    # the same path the cluster nodes use when pulling, so a 200 here
+    # means a 200 from a real node too.
+    - name: Probe each required repo with Docker v2 bearer-token flow
       ansible.builtin.command:
         argv:
           - ssh
@@ -74,72 +74,51 @@
           - -o
           - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
           - "root@{{ mirror_private_ip }}"
-          - "curl -ks -u '{{ mirror_init_user }}:{{ mirror_init_password }}' 'https://{{ mirror_private_ip }}:8443/api/v1/repository?namespace={{ item }}'"
+          - >-
+            TOKEN=$(curl -ks -u '{{ mirror_init_user }}:{{ mirror_init_password }}'
+            "https://{{ mirror_private_ip }}:8443/v2/auth?service={{ mirror_private_ip }}:8443&scope=repository:{{ item }}:pull"
+            | jq -r .token);
+            curl -ks -o /dev/null -w '%{http_code}'
+            -H "Authorization: Bearer $TOKEN"
+            "https://{{ mirror_private_ip }}:8443/v2/{{ item }}/tags/list"
       loop:
-        - openshift
-        - rhai
-      register: ns_repos
+        - rhai/assisted-installer-agent-rhel9
+        - rhai/assisted-installer-rhel9
+        - rhai/assisted-installer-controller-rhel9
+        - openshift/release
+        - openshift/release-images
+      register: repo_probes
       changed_when: false
       no_log: true   # mirror password is in argv
 
-    - name: Aggregate repository list as namespace/name strings
-      ansible.builtin.set_fact:
-        _mirror_repos: >-
-          {{ ns_repos.results
-             | map(attribute='stdout')
-             | map('from_json')
-             | map(attribute='repositories')
-             | map('default', [])
-             | flatten
-             | map(attribute='namespace')
-             | zip(ns_repos.results
-                   | map(attribute='stdout')
-                   | map('from_json')
-                   | map(attribute='repositories')
-                   | map('default', [])
-                   | flatten
-                   | map(attribute='name'))
-             | map('join', '/')
-             | list }}
-
-    - name: Show mirror catalog summary
+    - name: Show mirror probe summary
       ansible.builtin.debug:
         msg: |
           ✓ Mirror reachable at https://{{ mirror_private_ip }}:8443
-          ✓ Repositories in mirror: {{ _mirror_repos | length }} total
-
-          {% for r in _mirror_repos %}
-            - {{ r }}
+          Per-repo HTTP probe (200 = present, 404 = missing):
+          {% for r in repo_probes.results %}
+            {{ r.stdout }}  {{ r.item }}
           {% endfor %}
 
-    # ── Verify the critical AI component images are present ──────────────
-    - name: Verify required AI agent repo exists in mirror
+    - name: Verify all required repos returned HTTP 200
       ansible.builtin.assert:
         that:
-          - "'rhai/assisted-installer-agent-rhel9' in _mirror_repos"
-          - "'rhai/assisted-installer-rhel9' in _mirror_repos"
-          - "'rhai/assisted-installer-controller-rhel9' in _mirror_repos"
+          - repo_probes.results | selectattr('stdout', 'equalto', '200') | list | length
+            == repo_probes.results | length
         fail_msg: |
-          Mirror is reachable but is missing one or more critical AI components.
-          Repos found: {{ _mirror_repos | length }}
-          rhai/* entries: {{ _mirror_repos | select('match', '^rhai/') | list }}
+          Mirror is missing one or more required repos.  Phase 04 will fail
+          because cluster nodes won't be able to pull these images.
+
+          Missing repos:
+          {% for r in repo_probes.results %}
+          {% if r.stdout != '200' %}
+            - {{ r.item }} (HTTP {{ r.stdout }})
+          {% endif %}
+          {% endfor %}
 
           Re-run scripts/build-mirror-tarball.sh on your build host (the
-          OFFLINE_TOKEN_FILE auto-discovery includes all 3), upload to OSS,
-          then `ansible-playbook ansible/playbooks/mirror-rebuild.yml`.
-
-    - name: Verify OpenShift release repos exist in mirror
-      ansible.builtin.assert:
-        that:
-          # oc-mirror v1 publishes both under the `openshift` namespace:
-          #   openshift/release         ← ocp-v4.0-art-dev contents
-          #   openshift/release-images  ← ocp-release contents
-          - "'openshift/release' in _mirror_repos"
-          - "'openshift/release-images' in _mirror_repos"
-        fail_msg: |
-          Mirror has no openshift/release* repos — Phase 04 will fail
-          when bootstrap tries to pull the release image.
-          Re-run scripts/build-mirror-tarball.sh with a valid OPENSHIFT_VERSION.
+          OFFLINE_TOKEN_FILE auto-discovery includes all 3 rhai images),
+          upload to OSS, then `ansible-playbook ansible/playbooks/mirror-rebuild.yml`.
 
     - name: All checks passed
       ansible.builtin.debug:
