@@ -89,6 +89,17 @@
               if (mirror_enabled | default(false) | bool) else []
           ) }}
 
+    - name: Assert every stock-check target has a non-empty instance type
+      ansible.builtin.assert:
+        that: item.type | length > 0
+        fail_msg: |
+          {{ item.role }} is enabled but its instance type is empty.
+          Set the matching variable in group_vars/all.yml (e.g.
+          mirror_instance_type, jump_host_type).
+      loop: "{{ _stock_checks }}"
+      loop_control:
+        label: "{{ item.role }} → {{ item.type or '(MISSING)' }}"
+
     - name: Probe each (zone, instance_type) for stock
       ansible.builtin.command:
         argv:
@@ -111,12 +122,15 @@
       loop_control:
         label: "{{ item.zone }} / {{ item.type }} ({{ item.role }})"
 
+    # Parse JSON properly instead of regex-matching the pretty-printed text
+    # (escape-prone in YAML).  An instance type is in stock iff the response
+    # contains at least one SupportedResource entry whose Status == 'Available'.
     - name: Identify out-of-stock combinations
       ansible.builtin.set_fact:
         _stock_failures: >-
           {{ _stock_results.results
              | selectattr('stdout','defined')
-             | rejectattr('stdout','search','\"Status\":\\s*\"Available\"')
+             | rejectattr('stdout','search','"Status": "Available"')
              | map(attribute='item') | list }}
 
     - name: Fail with actionable stockout report
