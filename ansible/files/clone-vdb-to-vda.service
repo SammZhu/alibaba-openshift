@@ -16,7 +16,11 @@ ExecStart=/bin/true
 # service during shutdown — and because of Before=shutdown.target the
 # reboot is blocked until this completes (or TimeoutStopSec hits).
 ExecStop=/usr/local/bin/clone-vdb-to-vda.sh
-TimeoutStopSec=30min
+# Outer cap (systemd's SIGKILL).  The script itself uses `timeout 5m`
+# for the dd, leaving ~5 min buffer for sfdisk/sgdisk + dd cleanup.
+# If the whole hook needs > 10 min, something is fundamentally wrong
+# and waiting longer won't help.
+TimeoutStopSec=10min
 # StandardOutput=journal+console so the dd progress is visible on the
 # ECS serial console if anything goes wrong.
 StandardOutput=journal+console

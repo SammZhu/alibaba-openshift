@@ -35,9 +35,27 @@ MB=$(( COUNT * BS / 1024 / 1024 ))
 
 echo "Cloning first ${MB} MB of /dev/vdb → /dev/vda (last partition end sector ${LAST_SECTOR})"
 sync
-dd if=/dev/vdb of=/dev/vda bs="$BS" count="$COUNT" \
-   conv=fsync,notrunc status=progress
+
+# Hard cap: 5 min is ~10x the expected ~25 sec for 5 GB on ESSD.  If dd
+# isn't done by then, the underlying IO is wedged — fail fast so systemd
+# doesn't block reboot for the full ExecStop timeout.  Without --foreground
+# `timeout` won't actually deliver SIGTERM in time on busy hosts; pair
+# with --kill-after to guarantee SIGKILL 30 s after that.
+#
+# dd's status=progress prints throughput once per second to the journal +
+# serial console, so live progress is visible even though we don't poll
+# from this script.
+timeout --foreground --kill-after=30s 5m \
+  dd if=/dev/vdb of=/dev/vda bs="$BS" count="$COUNT" \
+     conv=fsync,notrunc status=progress
+RC=$?
 sync
+
+if [ "$RC" -ne 0 ]; then
+  echo "dd failed or timed out (rc=$RC) — reboot will proceed but vda likely incomplete"
+  echo "Investigate via aliyun ECS console or boot the next attempt fresh"
+  exit "$RC"
+fi
 
 # vda may be larger than vdb (or equal).  If larger, GPT backup header
 # inherited from vdb points at the wrong sector for vda's actual end.
