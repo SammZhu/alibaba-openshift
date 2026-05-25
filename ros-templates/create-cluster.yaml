@@ -806,19 +806,23 @@ Resources:
         - Key: openshift-node-role
           Value: master
 
-  # Second control plane node (split from InstanceGroup so all 3 can be
-  # individually registered as SLB backend servers).
+  # Second control plane node — placed in zone2 to spread the control plane
+  # across AZs.  Also DependsOn RendezvousInstance so ROS creates masters
+  # serially rather than batching a single RunInstances(Amount=2) call,
+  # which Aliyun cn-wulanchabu frequently rejects with ResourceNoStock
+  # even when single-instance stock is available.
   ControlPlaneInstance2:
     Type: ALIYUN::ECS::Instance
     DependsOn:
-      - NatSNATEntry
+      - NatSNATEntry2
       - RolePolicyAttachment
+      - RendezvousInstance
     Properties:
       InstanceName: !Sub '${ClusterName}-master-2'
       InstanceType: !Ref ControlPlaneInstanceType
       ImageId: !Ref ImageId
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
-      VSwitchId: !Ref PrivateVSwitch
+      VSwitchId: !Ref PrivateVSwitch2
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
       DiskMappings:
@@ -833,12 +837,13 @@ Resources:
         - Key: openshift-node-role
           Value: master
 
-  # Third control plane node.
+  # Third control plane node — also in zone2, serialized after master-2.
   ControlPlaneInstance3:
     Type: ALIYUN::ECS::Instance
     DependsOn:
-      - NatSNATEntry
+      - NatSNATEntry2
       - RolePolicyAttachment
+      - ControlPlaneInstance2
     Properties:
       InstanceName: !Sub '${ClusterName}-master-3'
       InstanceType: !Ref ControlPlaneInstanceType
