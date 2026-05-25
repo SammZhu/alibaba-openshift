@@ -373,9 +373,18 @@
         set -euxo pipefail
         export HOME=/root
         echo "=== $(date -Iseconds) importing tarball into mirror-registry ==="
+        cd /var/lib/quay-storage/extracted
+        # oc-mirror writes per-source workspace state under ./oc-mirror-workspace
+        # and ./.oc-mirror.log.  After a stack rebuild, the mirror ECS / Quay
+        # data disk is fresh (empty registry) but if these files come back —
+        # e.g. they get re-created by a prior run within the same fresh
+        # mirror — oc-mirror sees "current sequence == last published" and
+        # noops silently with "No diff from previous mirror".  Quay would
+        # then stay empty and Phase 04 image pulls would fail.
+        # Wipe both so oc-mirror always treats the push as first-time.
+        rm -rf ./oc-mirror-workspace ./.oc-mirror.log
         # --v1 mandatory since oc-mirror 4.21.  --from=DIR makes oc-mirror
         # auto-discover the mirror_seq1_*.tar chunks in sequence order.
-        cd /var/lib/quay-storage/extracted
         oc-mirror --v1 --from=. "docker://{{ mirror_private_ip }}:8443"
         echo "=== $(date -Iseconds) import complete ==="
         REMOTE
