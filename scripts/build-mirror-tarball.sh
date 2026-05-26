@@ -204,9 +204,11 @@ echo "[3/6] Running oc-mirror v2 (will take 15-60 min depending on link speed)..
 echo "      cache dir : ${OC_MIRROR_CACHE_DIR:-$HOME/.oc-mirror}"
 echo "      retries   : ${OC_MIRROR_RETRIES:-10}"
 OC_MIRROR_LOG="$WORK_DIR/oc-mirror.log"
+# Note: --workspace is rejected in mirrorToDisk (file://) mode —
+# oc-mirror always uses <destination>/working-dir there.  Only set it
+# for mirrorToMirror / diskToMirror flows.
 oc-mirror \
   -c imageset-config.yaml \
-  --workspace "file://$WORK_DIR/openshift-mirror" \
   --cache-dir "${OC_MIRROR_CACHE_DIR:-$HOME/.oc-mirror}" \
   --retry-times "${OC_MIRROR_RETRIES:-10}" \
   --retry-delay "${OC_MIRROR_RETRY_DELAY:-5s}" \
