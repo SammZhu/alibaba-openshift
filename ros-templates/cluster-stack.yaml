@@ -1,0 +1,622 @@
+ROSTemplateFormatVersion: '2015-09-01'
+Description: |
+  OpenShift on Alibaba Cloud — SHORT-LIVED (cluster) stack.
+
+  Provisions everything that gets torn down on each cluster rebuild:
+    * Security Groups (control plane + worker + cross-SG ingress rules)
+    * API NLB + 2 ServerGroups (6443, 22623) + 2 Listeners
+    * PrivateZone + records (api / api-int / *.apps / etcd-N)
+    * Reverse PrivateZones for PTR records
+    * 3 control plane ECS instances (split, not InstanceGroup, so each
+      can be individually attached to the NLB ServerGroup)
+    * Worker InstanceGroup (conditional on ComputeCount > 0)
+
+  Companion template: mirror-stack.yaml — the PERSISTENT stack that
+  owns the VPC, NAT, RAM roles, optional jump host, and the
+  mirror-registry ECS.  This stack takes mirror-stack's outputs as
+  parameters (VpcId, VSwitchIds, NodeRamRoleName,
+  JumpHostSecurityGroupId, MirrorPrivateIp).
+
+  Workflow:
+    1. Create mirror-stack    (one-time)
+    2. Run 03b-mirror-prepare (one-time)
+    3. Create cluster-stack   (this template; per-cluster)
+    4. Run 04-install-cluster (per-cluster)
+    5. Delete cluster-stack   (per-cluster; mirror-stack survives)
+    6. Repeat 3-5 freely
+
+Parameters:
+  # ── References to mirror-stack outputs (operator passes these in) ────────
+  # When invoked by ansible (03-create-cluster-stack.yml) these come
+  # straight from state.yml; for manual ROS-console creation, copy the
+  # values from the mirror-stack outputs page.
+  VpcId:
+    Type: String
+    Description: VPC ID — from mirror-stack output VpcId
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: VPC CIDR — must match mirror-stack VpcCidr
+  PrivateVSwitchId:
+    Type: String
+    Description: Primary private VSwitch (zone1) — from mirror-stack PrivateVSwitchId
+  PrivateVSwitch2Id:
+    Type: String
+    Description: Secondary private VSwitch (zone2) — from mirror-stack PrivateVSwitch2Id
+  ZoneId:
+    Type: String
+    Description: Primary zone — from mirror-stack ZoneId
+  ZoneId2:
+    Type: String
+    Description: Secondary zone — from mirror-stack ZoneId2
+  NodeRamRoleName:
+    Type: String
+    Default: openshift-node-role
+    Description: Node RAM role name — from mirror-stack NodeRamRoleName
+  JumpHostSecurityGroupId:
+    Type: String
+    Default: ""
+    Description: |
+      Optional jump-host SG ID — from mirror-stack JumpHostSecurityGroupId
+      output (only present when mirror-stack had EnableJumpHost=true).
+      When non-empty, this stack adds SSH ingress rules to the master /
+      worker SGs allowing core@ from the jump host.
+
+  # ── Cluster identity ────────────────────────────────────────────────────
+  ClusterName:
+    Type: String
+    Description: OpenShift cluster name (must match Red Hat console entry)
+    AllowedPattern: '[a-z0-9][a-z0-9-]{1,20}[a-z0-9]'
+
+  BaseDomain:
+    Type: String
+    Description: Base domain (e.g. example.com). PrivateZone will be <ClusterName>.<BaseDomain>.
+
+  Region:
+    Type: String
+    Default: cn-wulanchabu
+
+  # ── Compute sizing ──────────────────────────────────────────────────────
+  ControlPlaneCount:
+    Type: Number
+    Default: 3
+    AllowedValues: [3]
+  ControlPlaneInstanceType:
+    Type: String
+    Default: ecs.c7.2xlarge
+  ComputeCount:
+    Type: Number
+    Default: 0
+    MinValue: 0
+  ComputeInstanceType:
+    Type: String
+    Default: ecs.c7.xlarge
+
+  SystemDiskCategory:
+    Type: String
+    Default: cloud_essd
+    AllowedValues: [cloud_essd, cloud_ssd, cloud_efficiency]
+  SystemDiskSize:
+    Type: Number
+    Default: 40
+  InstallDiskSize:
+    Type: Number
+    Default: 100
+    Description: |
+      Size in GB of /dev/vdb on each control plane node.  OpenShift
+      requires ≥ 100 GB ("Disk is too small … 100 GB required").
+      Cloned to /dev/vda before reboot via clone-vdb-to-vda hook.
+
+  InstallationMethod:
+    Type: String
+    Default: Assisted
+    AllowedValues: [Assisted, Agent-based]
+
+  ImageId:
+    Type: String
+    Description: |
+      Custom ECS image ID imported from the OpenShift Discovery ISO.
+      Produced by ansible Phase 02 (02-import-image.yml).
+
+  RendezvousIp:
+    Type: String
+    Default: 10.0.32.5
+    Description: |
+      Agent-based only.  Fixed private IP for the rendezvous node.
+      Must live inside the VSwitch matching the master placement (all
+      3 masters live in PrivateVSwitch2 / zone2 by default, so the
+      rendezvous IP must fall within PrivateSubnetCidr2 — typically
+      10.0.32.0/20).
+
+  IngressVip:
+    Type: String
+    Default: 10.0.16.6
+    Description: |
+      Placeholder IP for the *.apps wildcard PrivateZone record
+      required by Assisted Installer's host DNS validation.  After
+      install, the ingress operator creates a real SLB via CCM; update
+      the *.apps record to that SLB IP.
+
+  SshPublicKey:
+    Type: String
+    Default: ""
+    Description: |
+      SSH public key (informational; RHCOS gets its key via ignition,
+      not from this parameter).
+
+Conditions:
+  IsAgentBased: !Equals [!Ref InstallationMethod, Agent-based]
+  IsAssisted:   !Equals [!Ref InstallationMethod, Assisted]
+  HasWorkers:   !Not [!Equals [!Ref ComputeCount, 0]]
+  HasJumpHost:  !Not [!Equals [!Ref JumpHostSecurityGroupId, ""]]
+
+Resources:
+  # ── Security Groups ──────────────────────────────────────────────────────
+  ControlPlaneSecurityGroup:
+    Type: ALIYUN::ECS::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      SecurityGroupName: !Sub '${ClusterName}-master-sg'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          PortRange: 6443/6443
+          SourceCidrIp: !Ref VpcCidr
+          Description: Kubernetes API (VPC-internal only; exposed via NLB)
+        - IpProtocol: tcp
+          PortRange: 22623/22623
+          SourceCidrIp: !Ref VpcCidr
+          Description: Machine Config Server
+        - IpProtocol: tcp
+          PortRange: 2379/2380
+          SourceCidrIp: !Ref VpcCidr
+          Description: etcd
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+
+  WorkerSecurityGroup:
+    Type: ALIYUN::ECS::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      SecurityGroupName: !Sub '${ClusterName}-worker-sg'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          PortRange: 80/80
+          SourceCidrIp: 0.0.0.0/0
+          Description: Ingress HTTP
+        - IpProtocol: tcp
+          PortRange: 443/443
+          SourceCidrIp: 0.0.0.0/0
+          Description: Ingress HTTPS
+        - IpProtocol: tcp
+          PortRange: 30000/32767
+          SourceCidrIp: !Ref VpcCidr
+          Description: NodePort services (SLB health-check + VPC-internal)
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+
+  CPSGFromWorkers:
+    Type: ALIYUN::ECS::SecurityGroupIngress
+    DependsOn: [ControlPlaneSecurityGroup, WorkerSecurityGroup]
+    Properties:
+      SecurityGroupId: !Ref ControlPlaneSecurityGroup
+      IpProtocol: all
+      PortRange: -1/-1
+      NicType: intranet
+      SourceGroupId: !Ref WorkerSecurityGroup
+      Description: From workers (kubelet → API, OVN Geneve overlay)
+
+  WorkerSGFromMasters:
+    Type: ALIYUN::ECS::SecurityGroupIngress
+    DependsOn: [ControlPlaneSecurityGroup, WorkerSecurityGroup]
+    Properties:
+      SecurityGroupId: !Ref WorkerSecurityGroup
+      IpProtocol: all
+      PortRange: -1/-1
+      NicType: intranet
+      SourceGroupId: !Ref ControlPlaneSecurityGroup
+      Description: From masters (Geneve UDP 6081 + kubelet)
+
+  # Cross-stack SG ingress (uses JumpHostSecurityGroupId from mirror-stack)
+  CPSGSSHFromJumpHost:
+    Type: ALIYUN::ECS::SecurityGroupIngress
+    Condition: HasJumpHost
+    DependsOn: ControlPlaneSecurityGroup
+    Properties:
+      SecurityGroupId: !Ref ControlPlaneSecurityGroup
+      IpProtocol: tcp
+      PortRange: 22/22
+      NicType: intranet
+      SourceGroupId: !Ref JumpHostSecurityGroupId
+      Description: SSH from jump host (mirror-stack) to master nodes
+
+  WorkerSGSSHFromJumpHost:
+    Type: ALIYUN::ECS::SecurityGroupIngress
+    Condition: HasJumpHost
+    DependsOn: WorkerSecurityGroup
+    Properties:
+      SecurityGroupId: !Ref WorkerSecurityGroup
+      IpProtocol: tcp
+      PortRange: 22/22
+      NicType: intranet
+      SourceGroupId: !Ref JumpHostSecurityGroupId
+      Description: SSH from jump host (mirror-stack) to worker nodes
+
+  # ── API Server NLB ──────────────────────────────────────────────────────
+  ApiNLB:
+    Type: ALIYUN::NLB::LoadBalancer
+    Properties:
+      LoadBalancerName: !Sub '${ClusterName}-api'
+      LoadBalancerType: Network
+      AddressType: Intranet
+      AddressIpVersion: Ipv4
+      VpcId: !Ref VpcId
+      ZoneMappings:
+        - ZoneId: !Ref ZoneId
+          VSwitchId: !Ref PrivateVSwitchId
+        - ZoneId: !Ref ZoneId2
+          VSwitchId: !Ref PrivateVSwitch2Id
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+
+  # 6443 — Kubernetes API server (Servers inline; NLB has no SG attachment resource)
+  ApiServerGroup:
+    Type: ALIYUN::NLB::ServerGroup
+    Properties:
+      ServerGroupName: !Sub '${ClusterName}-api-6443'
+      ServerGroupType: Instance
+      VpcId: !Ref VpcId
+      Protocol: TCP
+      Scheduler: Wrr
+      HealthCheckConfig:
+        HealthCheckEnabled: true
+        HealthCheckType: Tcp
+        HealthCheckConnectPort: 6443
+        HealthCheckInterval: 10
+        HealthyThreshold: 2
+        UnhealthyThreshold: 2
+      Servers:
+        - ServerId: !Ref RendezvousInstance
+          ServerType: Ecs
+          Port: 6443
+          Weight: 100
+        - ServerId: !Ref ControlPlaneInstance2
+          ServerType: Ecs
+          Port: 6443
+          Weight: 100
+        - ServerId: !Ref ControlPlaneInstance3
+          ServerType: Ecs
+          Port: 6443
+          Weight: 100
+
+  ApiNLBListener:
+    Type: ALIYUN::NLB::Listener
+    Properties:
+      LoadBalancerId: !Ref ApiNLB
+      ListenerProtocol: TCP
+      ListenerPort: 6443
+      ServerGroupId: !Ref ApiServerGroup
+
+  # 22623 — Machine Config Server (ignition fetch during install)
+  McsServerGroup:
+    Type: ALIYUN::NLB::ServerGroup
+    Properties:
+      ServerGroupName: !Sub '${ClusterName}-mcs-22623'
+      ServerGroupType: Instance
+      VpcId: !Ref VpcId
+      Protocol: TCP
+      Scheduler: Wrr
+      HealthCheckConfig:
+        HealthCheckEnabled: true
+        HealthCheckType: Tcp
+        HealthCheckConnectPort: 22623
+        HealthCheckInterval: 10
+        HealthyThreshold: 2
+        UnhealthyThreshold: 2
+      Servers:
+        - ServerId: !Ref RendezvousInstance
+          ServerType: Ecs
+          Port: 22623
+          Weight: 100
+        - ServerId: !Ref ControlPlaneInstance2
+          ServerType: Ecs
+          Port: 22623
+          Weight: 100
+        - ServerId: !Ref ControlPlaneInstance3
+          ServerType: Ecs
+          Port: 22623
+          Weight: 100
+
+  McsNLBListener:
+    Type: ALIYUN::NLB::Listener
+    Properties:
+      LoadBalancerId: !Ref ApiNLB
+      ListenerProtocol: TCP
+      ListenerPort: 22623
+      ServerGroupId: !Ref McsServerGroup
+
+  # ── Private DNS ─────────────────────────────────────────────────────────
+  PrivateZone:
+    Type: ALIYUN::PVTZ::Zone
+    Properties:
+      ZoneName: !Sub '${ClusterName}.${BaseDomain}'
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+
+  PrivateZoneVpcBinding:
+    Type: ALIYUN::PVTZ::ZoneVpcBinder
+    Properties:
+      ZoneId: !Ref PrivateZone
+      Vpcs:
+        - VpcId: !Ref VpcId
+          RegionId: !Ref Region
+
+  # api / api-int CNAME → NLB DNSName (per-zone HA)
+  ApiRecord:
+    Type: ALIYUN::PVTZ::ZoneRecord
+    Properties:
+      ZoneId: !Ref PrivateZone
+      Rr: api
+      Type: CNAME
+      Value: !GetAtt ApiNLB.DNSName
+      Ttl: 60
+
+  ApiIntRecord:
+    Type: ALIYUN::PVTZ::ZoneRecord
+    Properties:
+      ZoneId: !Ref PrivateZone
+      Rr: api-int
+      Type: CNAME
+      Value: !GetAtt ApiNLB.DNSName
+      Ttl: 60
+
+  AppsRecord:
+    Type: ALIYUN::PVTZ::ZoneRecord
+    Properties:
+      ZoneId: !Ref PrivateZone
+      Rr: '*.apps'
+      Type: A
+      Value: !Ref IngressVip
+      Ttl: 60
+
+  # etcd-N A records → master private IPs
+  EtcdRecord0:
+    Type: ALIYUN::PVTZ::ZoneRecord
+    DependsOn: [RendezvousInstance, PrivateZone]
+    Properties:
+      ZoneId: !Ref PrivateZone
+      Rr: etcd-0
+      Type: A
+      Value: !GetAtt RendezvousInstance.PrivateIp
+      Ttl: 60
+
+  EtcdRecord1:
+    Type: ALIYUN::PVTZ::ZoneRecord
+    DependsOn: [ControlPlaneInstance2, PrivateZone]
+    Properties:
+      ZoneId: !Ref PrivateZone
+      Rr: etcd-1
+      Type: A
+      Value: !GetAtt ControlPlaneInstance2.PrivateIp
+      Ttl: 60
+
+  EtcdRecord2:
+    Type: ALIYUN::PVTZ::ZoneRecord
+    DependsOn: [ControlPlaneInstance3, PrivateZone]
+    Properties:
+      ZoneId: !Ref PrivateZone
+      Rr: etcd-2
+      Type: A
+      Value: !GetAtt ControlPlaneInstance3.PrivateIp
+      Ttl: 60
+
+  # ── Reverse DNS zones (PTR records added by Phase 03 post-creation) ──────
+  ReverseZone1:
+    Type: ALIYUN::PVTZ::Zone
+    Properties:
+      ZoneName: 16.0.10.in-addr.arpa
+
+  ReverseZone1VpcBinding:
+    Type: ALIYUN::PVTZ::ZoneVpcBinder
+    DependsOn: ReverseZone1
+    Properties:
+      ZoneId: !Ref ReverseZone1
+      Vpcs:
+        - VpcId: !Ref VpcId
+          RegionId: !Ref Region
+
+  ReverseZone2:
+    Type: ALIYUN::PVTZ::Zone
+    Properties:
+      ZoneName: 32.0.10.in-addr.arpa
+
+  ReverseZone2VpcBinding:
+    Type: ALIYUN::PVTZ::ZoneVpcBinder
+    DependsOn: ReverseZone2
+    Properties:
+      ZoneId: !Ref ReverseZone2
+      Vpcs:
+        - VpcId: !Ref VpcId
+          RegionId: !Ref Region
+
+  # ── ECS Instances (all in zone2 to avoid c-series stockout in zone1) ─────
+  # Serialised via DependsOn chain so ROS does not batch a single
+  # RunInstances(Amount=2+) call that Aliyun cn-wulanchabu often rejects
+  # atomically even when per-instance stock is available.
+  RendezvousInstance:
+    Type: ALIYUN::ECS::Instance
+    Properties:
+      InstanceName: !Sub '${ClusterName}-master-1'
+      InstanceType: !Ref ControlPlaneInstanceType
+      ImageId: !Ref ImageId
+      SecurityGroupId: !Ref ControlPlaneSecurityGroup
+      VSwitchId: !Ref PrivateVSwitch2Id
+      SystemDiskCategory: !Ref SystemDiskCategory
+      SystemDiskSize: !Ref SystemDiskSize
+      DiskMappings:
+        - Category: !Ref SystemDiskCategory
+          Size: !Ref InstallDiskSize
+          DiskName: !Sub '${ClusterName}-master-1-install'
+      AllocatePublicIP: false
+      PrivateIpAddress: !If [IsAgentBased, !Ref RendezvousIp, !Ref 'ALIYUN::NoValue']
+      RamRoleName: !Ref NodeRamRoleName
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+        - Key: openshift-node-role
+          Value: master
+
+  ControlPlaneInstance2:
+    Type: ALIYUN::ECS::Instance
+    DependsOn: RendezvousInstance
+    Properties:
+      InstanceName: !Sub '${ClusterName}-master-2'
+      InstanceType: !Ref ControlPlaneInstanceType
+      ImageId: !Ref ImageId
+      SecurityGroupId: !Ref ControlPlaneSecurityGroup
+      VSwitchId: !Ref PrivateVSwitch2Id
+      SystemDiskCategory: !Ref SystemDiskCategory
+      SystemDiskSize: !Ref SystemDiskSize
+      DiskMappings:
+        - Category: !Ref SystemDiskCategory
+          Size: !Ref InstallDiskSize
+          DiskName: !Sub '${ClusterName}-master-2-install'
+      AllocatePublicIP: false
+      RamRoleName: !Ref NodeRamRoleName
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+        - Key: openshift-node-role
+          Value: master
+
+  ControlPlaneInstance3:
+    Type: ALIYUN::ECS::Instance
+    DependsOn: ControlPlaneInstance2
+    Properties:
+      InstanceName: !Sub '${ClusterName}-master-3'
+      InstanceType: !Ref ControlPlaneInstanceType
+      ImageId: !Ref ImageId
+      SecurityGroupId: !Ref ControlPlaneSecurityGroup
+      VSwitchId: !Ref PrivateVSwitch2Id
+      SystemDiskCategory: !Ref SystemDiskCategory
+      SystemDiskSize: !Ref SystemDiskSize
+      DiskMappings:
+        - Category: !Ref SystemDiskCategory
+          Size: !Ref InstallDiskSize
+          DiskName: !Sub '${ClusterName}-master-3-install'
+      AllocatePublicIP: false
+      RamRoleName: !Ref NodeRamRoleName
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+        - Key: openshift-node-role
+          Value: master
+
+  WorkerInstanceGroup:
+    Type: ALIYUN::ECS::InstanceGroup
+    Condition: HasWorkers
+    Properties:
+      InstanceName: !Sub '${ClusterName}-worker'
+      InstanceType: !Ref ComputeInstanceType
+      ImageId: !Ref ImageId
+      SecurityGroupId: !Ref WorkerSecurityGroup
+      VSwitchId: !Ref PrivateVSwitchId
+      SystemDiskCategory: !Ref SystemDiskCategory
+      SystemDiskSize: !Ref SystemDiskSize
+      DiskMappings:
+        - Category: !Ref SystemDiskCategory
+          Size: !Ref InstallDiskSize
+          DiskName: !Sub '${ClusterName}-worker-install'
+      AllocatePublicIP: false
+      MaxAmount: !Ref ComputeCount
+      MinAmount: !Ref ComputeCount
+      RamRoleName: !Ref NodeRamRoleName
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+        - Key: openshift-node-role
+          Value: worker
+
+Outputs:
+  ApiLBEndpoint:
+    Value: !GetAtt ApiNLB.DNSName
+    Description: API Server NLB intranet DNS name
+  PrivateZoneName:
+    Value: !Sub '${ClusterName}.${BaseDomain}'
+  RendezvousInstanceId:
+    Value: !Ref RendezvousInstance
+  MasterIp1:
+    Value: !GetAtt RendezvousInstance.PrivateIp
+  MasterIp2:
+    Value: !GetAtt ControlPlaneInstance2.PrivateIp
+  MasterIp3:
+    Value: !GetAtt ControlPlaneInstance3.PrivateIp
+  WorkerSecurityGroup:
+    Value: !Ref WorkerSecurityGroup
+  ReverseZoneId1:
+    Value: !Ref ReverseZone1
+  ReverseZoneId2:
+    Value: !Ref ReverseZone2
+  InstallConfig:
+    Description: install-config.yaml (paste into Red Hat console or save for agent-create)
+    Value: !Sub |
+      apiVersion: v1
+      metadata:
+        name: ${ClusterName}
+      baseDomain: ${BaseDomain}
+      networking:
+        clusterNetwork:
+          - cidr: 10.128.0.0/14
+            hostPrefix: 23
+        networkType: OVNKubernetes
+        machineNetwork:
+          - cidr: ${VpcCidr}
+        serviceNetwork:
+          - 172.30.0.0/16
+      compute:
+        - architecture: amd64
+          hyperthreading: Enabled
+          name: worker
+          replicas: ${ComputeCount}
+      controlPlane:
+        architecture: amd64
+        hyperthreading: Enabled
+        name: master
+        replicas: ${ControlPlaneCount}
+      platform:
+        external:
+          platformName: AlibabaCloud
+          cloudControllerManager: External
+      pullSecret: '<replace-with-pull-secret>'
+      sshKey: '<replace-with-ssh-public-key>'
+  AgentConfig:
+    Description: agent-config.yaml (Agent-based only)
+    Value: !Sub |
+      apiVersion: v1alpha1
+      kind: AgentConfig
+      metadata:
+        name: ${ClusterName}
+      rendezvousIP: ${RendezvousIp}
+      hosts: []
+  DynamicCustomManifest:
+    Description: alibaba-ccm-config.yaml
+    Value: !Sub |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: alibaba-cloud-config
+        namespace: alibaba-cloud-controller-manager
+      data:
+        cloud.conf: |
+          [Global]
+          cluster-id=${ClusterName}
+          region=${Region}
+          vpcid=${VpcId}
+          zoneid=${ZoneId}
+          vswitchid=${PrivateVSwitchId}
+
+          [LoadBalancer]
+          address-type=intranet
