@@ -313,12 +313,13 @@
         echo "=== $(date -Iseconds) installing mirror-registry ==="
         # --quayRoot   : where mirror-registry stores its config / scripts
         # --quayStorage: where Quay puts blob storage (image layers).  Without
-        #                this flag Quay uses a podman *named volume*, which
+        #                this flag Quay uses a podman named volume, which
         #                lives at /var/lib/containers/storage/volumes/... on
-        #                the ROOT disk.  After a full OCP mirror that's ~21 GB
-        #                and easily fills the 40 GB system disk.  Pointing it
-        #                here keeps everything on the 100 GB data disk (vdb,
-        #                mounted at /var/lib/quay-storage by cloud-init).
+        #                the ROOT disk.  After a full OCP mirror that is
+        #                ~21 GB and easily fills the 40 GB system disk.
+        #                Pointing it here keeps everything on the 100 GB
+        #                data disk (vdb, mounted at /var/lib/quay-storage
+        #                by cloud-init).
         mkdir -p /var/lib/quay-storage/datastorage
         /opt/mirror-registry install \
           --quayHostname "{{ mirror_private_ip }}" \
