@@ -1,0 +1,18 @@
+# Pre-commit hooks for this repo.  Install once:
+#
+#   pip install pre-commit
+#   pre-commit install
+#
+# Then every `git commit` runs these checks automatically.  Add the
+# scripts/lint-ansible-quotes.py hook because we kept burning an entire
+# 03b cycle on the "single apostrophe in a comment breaks ansible"
+# class of bug.
+repos:
+  - repo: local
+    hooks:
+      - id: ansible-shell-quote-balance
+        name: ansible.builtin.shell heredoc — single-quote balance
+        entry: scripts/lint-ansible-quotes.py
+        language: system
+        files: ^ansible/.*\.ya?ml$
+        pass_filenames: true

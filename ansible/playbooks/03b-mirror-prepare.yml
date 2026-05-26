@@ -19,7 +19,14 @@
   hosts: local
   gather_facts: false
   vars:
-    _ssh_common_args: "-i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+    # ServerAliveInterval/ServerAliveCountMax force ssh to send keepalive
+    # probes every 30 s and disconnect after 6 missed (= 3 min silent).
+    # Without these, long-running remote commands (25 GB OSS download,
+    # 10-min oc-mirror import) can leave a stale TCP socket that never
+    # gets FIN/RST after the remote process dies — ansible then waits
+    # forever.  TCPKeepAlive is the OS-level fallback.
+    _ssh_keepalive: "-o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes"
+    _ssh_common_args: "-i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {{ _ssh_keepalive }}"
     _ssh_proxy_args: "-o ProxyCommand='ssh {{ _ssh_common_args }} -W %h:%p root@{{ jump_host_ip }}'"
     _ssh_root_mirror: "ssh {{ _ssh_common_args }} {{ _ssh_proxy_args }} root@{{ mirror_private_ip }}"
   tasks:
@@ -404,6 +411,22 @@
         ls -lh "$EXTRACTED"/mirror_*.tar
         REMOTE
       when: already_ready.rc != 0
+
+    # Reclaim ~25 GB BEFORE the import phase — the outer tarball is no
+    # longer needed once extracted/mirror_*.tar is on disk, and oc-mirror
+    # v2 d2m will rebuild a ~24 GB cache under oc-mirror-cache/.  Leaving
+    # the original tarball around blows the 100 GB data disk budget
+    # (tarball 25 + extracted 25 + cache 24 + datastorage 20 + swap 8
+    # = 102 GB).  Reclaim here, not in the post-import block (too late).
+    - name: Reclaim tarball BEFORE import (frees ~25 GB)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        rm -f /var/lib/quay-storage/mirror-tarball.tar
+        df -h /var/lib/quay-storage
+        REMOTE
+      when: already_ready.rc != 0
+      changed_when: true
 
     - name: Import image tarball into mirror-registry — oc-mirror v2 (~15-20 min)
       ansible.builtin.shell: |

@@ -107,12 +107,23 @@ Parameters:
 
   MirrorInstanceType:
     Type: String
-    Default: ecs.g7.large
+    Default: ecs.g7.xlarge
+    Description: |
+      ECS type for mirror-registry.  oc-mirror v2 d2m needs ~6-8 GB RAM
+      headroom on top of Quay-app's ~3 GB resident set; smaller types
+      (g7.large 8 GB, c7.large 4 GB) get OOM-killed during chunk extract.
+      g7.xlarge (4 vCPU / 16 GB) is the smallest that completes reliably.
+      Override only if you have measured a smaller type working with
+      --parallel-images 1 --parallel-layers 1.
 
   MirrorDataDiskSize:
     Type: Number
-    Default: 100
-    Description: Size in GB of the cloud_essd data disk mounted at /var/lib/quay-storage.
+    Default: 200
+    Description: |
+      Size in GB of the cloud_essd data disk mounted at /var/lib/quay-storage.
+      Peak runtime usage (tarball + extracted + oc-mirror-cache + datastorage
+      + swap) is ~100-110 GB for a full OCP release.  200 GB leaves comfortable
+      headroom for re-runs without manual cleanup.
 
 Conditions:
   HasJumpHost: !Equals [!Ref EnableJumpHost, true]
