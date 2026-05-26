@@ -160,12 +160,29 @@ mirror:
         maxVersion: ${OPENSHIFT_PATCH_VERSION}
 EOF
 
-cat >> imageset-config.yaml <<EOF
-  additionalImages:
-    - name: ${AI_AGENT_IMAGE}
-    - name: ${AI_INSTALLER_IMAGE}
-    - name: ${AI_CONTROLLER_IMAGE}
-EOF
+# Pin additionalImages to digest form.
+#
+# oc-mirror v2 has a known foot-gun where tag-form additionalImages
+# (e.g. registry.redhat.io/rhai/foo:abc123) get silently skipped for
+# some images in the same imageset — we observed only 1 of 3 rhai
+# images actually being mirrored, with no error in the log.  Resolving
+# the tags to digests up-front sidesteps the whole class.
+#
+# skopeo inspect needs the registry-redhat-io creds; pull-secret JSON
+# has them base64-encoded under .auths["registry.redhat.io"].auth.
+_REDHAT_CREDS=$(jq -r '.auths["registry.redhat.io"].auth' "$PULL_SECRET" | base64 -d)
+echo "  additionalImages:" >> imageset-config.yaml
+for IMG in "$AI_AGENT_IMAGE" "$AI_INSTALLER_IMAGE" "$AI_CONTROLLER_IMAGE"; do
+  REPO="${IMG%:*}"   # strip tag
+  DIGEST=$(skopeo inspect --no-tags --creds "$_REDHAT_CREDS" "docker://$IMG" 2>/dev/null \
+             | jq -r .Digest)
+  if [[ -z "$DIGEST" || "$DIGEST" == "null" ]]; then
+    echo "ERROR: skopeo inspect failed for $IMG — can't resolve digest." >&2
+    exit 1
+  fi
+  echo "    - name: ${REPO}@${DIGEST}" >> imageset-config.yaml
+  echo "    → pinned ${IMG##*:} → ${DIGEST}"
+done
 
 # Optional: mirror operator catalogs (post-install OperatorHub) so installing
 # any operator from those catalogs also works fully offline.
