@@ -353,20 +353,21 @@
 
     # ── Step 8: import the image tarball via oc-mirror standalone ──────────
     # Our tarball is *double-tarred*: build-mirror-tarball.sh runs
-    #   oc-mirror --config=isc.yaml file://./openshift-mirror
-    # which produces mirror_seq1_000000.tar, _000001.tar, _000002.tar (v1
-    # archive chunks) inside ./openshift-mirror/, then wraps the *directory*
-    # in one outer tar for OSS upload.  oc-mirror v1 import expects --from
-    # to point at a v1 chunk file OR a directory containing the chunks — it
-    # does NOT unwrap an outer wrapper tar.  So we must extract first.
+    #   oc-mirror -c isc.yaml file://./openshift-mirror --v2
+    # which produces mirror_000001.tar (and 000002 etc. for very large
+    # imagesets) plus a working-dir/ tree inside ./openshift-mirror/,
+    # then wraps the *directory* in one outer tar for OSS upload.
+    # oc-mirror v2 disk-to-mirror import expects --from file://<dir> to
+    # point at that directory — it does NOT unwrap an outer wrapper tar.
+    # So we must extract first.
     - name: Extract outer tar wrapper (idempotent — skip if already extracted)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
         EXTRACTED=/var/lib/quay-storage/extracted
-        # Idempotent: if mirror_seq1_000000.tar already there and >1 GB, skip.
-        if [ -s "$EXTRACTED/mirror_seq1_000000.tar" ] && \
-           [ "$(stat -c %s "$EXTRACTED/mirror_seq1_000000.tar")" -gt 1073741824 ]; then
+        # Idempotent: if any v2 chunk file already there and >1 GB, skip.
+        if ls "$EXTRACTED"/mirror_*.tar >/dev/null 2>&1 && \
+           [ "$(stat -c %s "$EXTRACTED"/mirror_*.tar | sort -n | tail -1)" -gt 1073741824 ]; then
           echo "=== $(date -Iseconds) outer tar already extracted, skipping ==="
           exit 0
         fi
@@ -374,7 +375,7 @@
         echo "=== $(date -Iseconds) extracting outer tar (~3-5 min) ==="
         tar xf /var/lib/quay-storage/mirror-tarball.tar -C "$EXTRACTED"
         echo "=== $(date -Iseconds) extract complete ==="
-        ls -lh "$EXTRACTED"/mirror_seq1_*.tar
+        ls -lh "$EXTRACTED"/mirror_*.tar
         REMOTE
       when: already_ready.rc != 0
 
@@ -408,8 +409,8 @@
     # build-side "✓ 192/192 + ✓ 3/3" check from oc-mirror v2.)
 
     # Free ~42 GB on the data disk: the import is complete, so neither the
-    # outer tarball nor the extracted mirror_seq1_*.tar chunks are needed
-    # anymore.  oc-mirror workspace + the v1 archive files were the source
+    # outer tarball nor the extracted mirror_*.tar chunks are needed
+    # anymore.  oc-mirror workspace + the v2 archive files were the source
     # of truth for the just-finished push; deleting them is safe.
     - name: Reclaim disk after import (drop tarball + extracted chunks)
       ansible.builtin.shell: |
