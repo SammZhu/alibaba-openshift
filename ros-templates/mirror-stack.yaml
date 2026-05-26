@@ -1,0 +1,572 @@
+ROSTemplateFormatVersion: '2015-09-01'
+Description: |
+  OpenShift on Alibaba Cloud — PERSISTENT (mirror) stack.
+
+  Provisions the infrastructure that should outlive cluster rebuilds:
+    * VPC + subnets (private x 2 zones, public) + NAT + EIP
+    * Node RAM role (shared by all cluster nodes)
+    * Optional SSH jump host (testing convenience)
+    * Mirror-registry ECS + data disk + dedicated Security Group
+
+  Companion template: cluster-stack.yaml — the SHORT-LIVED stack that
+  references this stack's outputs (VpcId / VSwitchIds / RAM role /
+  jump-host SG / mirror IP) and creates everything that gets torn down
+  on each cluster rebuild (NLB, PrivateZone, masters, workers, etc.).
+
+  Workflow:
+    1. ROS create mirror-stack (one-time, ~15 min)
+    2. ansible-playbook 03b-mirror-prepare.yml (one-time, ~30 min)
+    3. ROS create cluster-stack  (per-cluster, ~10 min)
+    4. ansible-playbook 04-install-cluster.yml (per-cluster, ~45-60 min)
+    5. teardown cluster-stack    (per-cluster, ~5 min)
+    6. repeat 3-5 freely; mirror-stack stays up
+
+  Cost optimisation: after step 2 succeeds, take an ECS image snapshot
+  of the mirror instance (see ansible/playbooks/02c-snapshot-mirror.yml)
+  so a future mirror-stack rebuild boots from a pre-warmed image
+  (~5 min instead of ~30 min mirror-prepare time).
+
+Parameters:
+  ClusterName:
+    Type: String
+    Description: |
+      Used only for resource naming/tagging (vpc, subnets, NAT, mirror, jump host).
+      Cluster-specific resources (NLB, PrivateZone, masters) live in cluster-stack.
+      If you intend to share one mirror-stack across multiple clusters, use a
+      neutral name here (e.g. "shared") and a distinct ClusterName in each
+      cluster-stack invocation.
+    AllowedPattern: '[a-z0-9][a-z0-9-]{1,20}[a-z0-9]'
+
+  Region:
+    Type: String
+    Default: cn-wulanchabu
+    Description: Alibaba Cloud region
+
+  ZoneId:
+    Type: String
+    Description: Availability zone for primary private VSwitch (e.g. cn-wulanchabu-a)
+
+  ZoneId2:
+    Type: String
+    Description: Availability zone for secondary private VSwitch (e.g. cn-wulanchabu-b)
+
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+
+  PrivateSubnetCidr:
+    Type: String
+    Default: 10.0.16.0/20
+
+  PrivateSubnetCidr2:
+    Type: String
+    Default: 10.0.32.0/20
+
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.0.0.0/20
+
+  RamRoleName:
+    Type: String
+    Default: openshift-node-role
+    Description: |
+      RAM Role name to bind to all cluster ECS nodes (Instance Principal for
+      CCM/CAPA).  Created here so cluster-stack can reference it by name —
+      avoids tearing down + recreating the role on every cluster rebuild.
+
+  # ── Testing-only: SSH jump host into the VPC ─────────────────────────────────
+  EnableJumpHost:
+    Type: Boolean
+    Default: false
+    Description: Provision a public SSH jump host with pre-installed cluster tools (testing only)
+
+  JumpHostInstanceType:
+    Type: String
+    Default: ecs.t6-c1m1.large
+
+  SshPublicKey:
+    Type: String
+    Default: ""
+    Description: |
+      SSH public key authorised on the jump host AND the mirror ECS.
+      Required only when EnableJumpHost=true OR mirror is provisioned.
+
+  SshPrivateKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: |
+      base64-encoded SSH private key dropped at /root/.ssh/openshift_ed25519
+      on the jump host (so it can SSH to cluster nodes as `core`).
+
+  # ── Mirror registry ECS ────────────────────────────────────────────────────
+  MirrorPrivateIp:
+    Type: String
+    Default: 10.0.16.4
+    Description: Static private IP for the mirror ECS (must live in PrivateSubnetCidr).
+
+  MirrorInstanceType:
+    Type: String
+    Default: ecs.g7.large
+
+  MirrorDataDiskSize:
+    Type: Number
+    Default: 100
+    Description: Size in GB of the cloud_essd data disk mounted at /var/lib/quay-storage.
+
+Conditions:
+  HasJumpHost: !Equals [!Ref EnableJumpHost, true]
+
+Resources:
+  # ── Networking ───────────────────────────────────────────────────────────────
+  Vpc:
+    Type: ALIYUN::ECS::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      VpcName: !Sub '${ClusterName}-vpc'
+      Tags:
+        - Key: !Sub 'openshift.io/mirror-stack/${ClusterName}'
+          Value: owned
+
+  PrivateVSwitch:
+    Type: ALIYUN::ECS::VSwitch
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnetCidr
+      ZoneId: !Ref ZoneId
+      VSwitchName: !Sub '${ClusterName}-private-vsw-1'
+
+  PrivateVSwitch2:
+    Type: ALIYUN::ECS::VSwitch
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnetCidr2
+      ZoneId: !Ref ZoneId2
+      VSwitchName: !Sub '${ClusterName}-private-vsw-2'
+
+  PublicVSwitch:
+    Type: ALIYUN::ECS::VSwitch
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnetCidr
+      ZoneId: !Ref ZoneId
+      VSwitchName: !Sub '${ClusterName}-public-vsw'
+
+  NatGateway:
+    Type: ALIYUN::VPC::NatGateway
+    Properties:
+      VpcId: !Ref Vpc
+      VSwitchId: !Ref PublicVSwitch
+      NatGatewayName: !Sub '${ClusterName}-nat'
+      NatType: Enhanced
+
+  EIP:
+    Type: ALIYUN::VPC::EIP
+    Properties:
+      Bandwidth: 100
+      InternetChargeType: PayByTraffic
+
+  EIPAssociation:
+    Type: ALIYUN::VPC::EIPAssociation
+    Properties:
+      AllocationId: !Ref EIP
+      InstanceId: !Ref NatGateway
+
+  NatSNATEntry:
+    Type: ALIYUN::VPC::SnatEntry
+    DependsOn: EIPAssociation
+    Properties:
+      SnatTableId: !GetAtt NatGateway.SNatTableId
+      SourceCIDR: !Ref PrivateSubnetCidr
+      SnatIp: !GetAtt EIP.EipAddress
+
+  NatSNATEntry2:
+    Type: ALIYUN::VPC::SnatEntry
+    DependsOn: EIPAssociation
+    Properties:
+      SnatTableId: !GetAtt NatGateway.SNatTableId
+      SourceCIDR: !Ref PrivateSubnetCidr2
+      SnatIp: !GetAtt EIP.EipAddress
+
+  # ── Shared node RAM role (used by cluster-stack instances) ─────────────────
+  # Lives here so the role itself + its policy survive cluster rebuilds —
+  # cluster-stack only references it by name (NodeRamRoleName output).
+  NodeRamRole:
+    Type: ALIYUN::RAM::Role
+    Properties:
+      RoleName: !Ref RamRoleName
+      Description: RAM Role for OpenShift cluster nodes (CCM / CAPA / CSI)
+      AssumeRolePolicyDocument:
+        Version: '1'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs.aliyuncs.com
+            Action: sts:AssumeRole
+
+  NodeRamPolicy:
+    Type: ALIYUN::RAM::ManagedPolicy
+    Properties:
+      PolicyName: !Sub '${ClusterName}-node-policy'
+      Description: Permissions for OpenShift CCM, CAPA, and Alibaba Cloud CSI Driver
+      PolicyDocument:
+        Version: '1'
+        Statement:
+          # ── ECS lifecycle (CCM + CAPA) ──────────────────────────────────────
+          - Effect: Allow
+            Action:
+              - ecs:DescribeInstances
+              - ecs:DescribeInstanceTypes
+              - ecs:DescribeRegions
+              - ecs:DescribeZones
+              - ecs:RunInstances
+              - ecs:StopInstance
+              - ecs:DeleteInstance
+              - ecs:StartInstance
+              - ecs:TagResources
+              - ecs:ListTagResources
+            Resource: ['*']
+          # ── SLB (CCM LoadBalancer service) ──────────────────────────────────
+          - Effect: Allow
+            Action:
+              - slb:CreateLoadBalancer
+              - slb:DeleteLoadBalancer
+              - slb:DescribeLoadBalancers
+              - slb:AddBackendServers
+              - slb:RemoveBackendServers
+              - slb:CreateLoadBalancerTCPListener
+              - slb:StartLoadBalancerListener
+              - slb:StopLoadBalancerListener
+              - slb:DescribeLoadBalancerAttribute
+              - slb:SetLoadBalancerDeleteProtection
+            Resource: ['*']
+          # ── VPC / VSwitch (CCM + CAPA network) ──────────────────────────────
+          - Effect: Allow
+            Action:
+              - vpc:DescribeVpcs
+              - vpc:DescribeVSwitches
+              - vpc:DescribeRouteTableList
+            Resource: ['*']
+          # ── PrivateZone DNS (CCM) ──────────────────────────────────────────
+          - Effect: Allow
+            Action:
+              - pvtz:DescribeZones
+              - pvtz:DescribeZoneRecords
+            Resource: ['*']
+          # ── ECS Disk (CSI) ──────────────────────────────────────────────────
+          - Effect: Allow
+            Action:
+              - ecs:AttachDisk
+              - ecs:DetachDisk
+              - ecs:DescribeDisks
+              - ecs:CreateDisk
+              - ecs:DeleteDisk
+              - ecs:ResizeDisk
+              - ecs:ModifyDiskAttribute
+              - ecs:CreateSnapshot
+              - ecs:DeleteSnapshot
+              - ecs:DescribeSnapshots
+              - ecs:CreateAutoSnapshotPolicy
+              - ecs:ApplyAutoSnapshotPolicy
+              - ecs:DeleteAutoSnapshotPolicy
+              - ecs:DescribeAutoSnapshotPolicyEx
+            Resource: ['*']
+          # ── NAS (CSI ReadWriteMany) ─────────────────────────────────────────
+          - Effect: Allow
+            Action:
+              - nas:DescribeFileSystems
+              - nas:CreateFileSystem
+              - nas:DeleteFileSystem
+              - nas:ModifyFileSystem
+              - nas:DescribeMountTargets
+              - nas:CreateMountTarget
+              - nas:DeleteMountTarget
+              - nas:ModifyMountTarget
+              - nas:DescribeAccessGroups
+              - nas:CreateAccessGroup
+              - nas:DeleteAccessGroup
+              - nas:DescribeAccessRules
+              - nas:CreateAccessRule
+              - nas:DeleteAccessRule
+              - nas:DescribeZones
+            Resource: ['*']
+
+  NodeRolePolicyAttachment:
+    Type: ALIYUN::RAM::AttachPolicyToRole
+    Properties:
+      RoleName: !Ref NodeRamRole
+      PolicyName: !GetAtt NodeRamPolicy.PolicyName
+      PolicyType: Custom
+
+  # ── Optional SSH jump host ─────────────────────────────────────────────────
+  JumpHostImageLookup:
+    Type: DATASOURCE::ECS::Images
+    Condition: HasJumpHost
+    Properties:
+      OSType: linux
+      Architecture: x86_64
+      ImageName: aliyun_3_x64_20G_alibase_*
+      Status: Available
+
+  JumpHostSecurityGroup:
+    Type: ALIYUN::ECS::SecurityGroup
+    Condition: HasJumpHost
+    Properties:
+      VpcId: !Ref Vpc
+      SecurityGroupName: !Sub '${ClusterName}-jumphost-sg'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          PortRange: 22/22
+          SourceCidrIp: 0.0.0.0/0
+          Description: SSH from anywhere (testing)
+
+  JumpHostInstance:
+    Type: ALIYUN::ECS::Instance
+    Condition: HasJumpHost
+    DependsOn:
+      - NatSNATEntry
+    Properties:
+      InstanceName: !Sub '${ClusterName}-jumphost'
+      InstanceType: !Ref JumpHostInstanceType
+      ImageId: !Select [0, !GetAtt JumpHostImageLookup.ImageIds]
+      SecurityGroupId: !Ref JumpHostSecurityGroup
+      VSwitchId: !Ref PublicVSwitch
+      SystemDiskCategory: cloud_essd
+      SystemDiskSize: 20
+      AllocatePublicIP: true
+      InternetMaxBandwidthOut: 1
+      InternetChargeType: PayByTraffic
+      PasswordInherit: true
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #!/bin/bash
+            set -euxo pipefail
+            exec > /var/log/userdata.log 2>&1
+
+            # SSH access + node-jump key
+            mkdir -p /root/.ssh && chmod 700 /root/.ssh
+            echo "${SshPublicKey}" >> /root/.ssh/authorized_keys
+            chmod 600 /root/.ssh/authorized_keys
+            echo "${SshPrivateKey}" | base64 -d > /root/.ssh/openshift_ed25519
+            chmod 600 /root/.ssh/openshift_ed25519
+            cat > /root/.ssh/config <<'SSHCONF'
+            Host 10.0.*.*
+              User core
+              IdentityFile /root/.ssh/openshift_ed25519
+              StrictHostKeyChecking no
+              UserKnownHostsFile /dev/null
+            SSHCONF
+            chmod 600 /root/.ssh/config
+
+            # MOTD pointing at the mirror + clusters in the VPC
+            mkdir -p /etc/update-motd.d
+            cat > /etc/update-motd.d/99-openshift <<'ENDSCRIPT'
+            #!/bin/bash
+            echo ""
+            echo "──────────────────────────────────────────────────────────"
+            echo " OpenShift on Alibaba Cloud — Shared Jump Host"
+            echo " Mirror   : https://${MirrorPrivateIp}:8443"
+            echo " Tools    : oc / kubectl / openshift-install / kustomize / aliyun"
+            echo " Workflow : ssh core@10.0.x.x  (private IP of any cluster node)"
+            echo "──────────────────────────────────────────────────────────"
+            ENDSCRIPT
+            chmod 0755 /etc/update-motd.d/99-openshift
+            /etc/update-motd.d/99-openshift > /etc/motd
+
+            # OS packages + tooling
+            yum install -y --setopt=tsflags=nodocs git tar gzip jq curl bash-completion
+            cd /tmp
+            curl -sL -O https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest-4.20/openshift-client-linux-amd64-rhel8.tar.gz
+            tar -xzf openshift-client-linux-amd64-rhel8.tar.gz
+            install -m 0755 oc kubectl /usr/local/bin/
+            rm -f openshift-client-linux-amd64-rhel8.tar.gz oc kubectl README.md
+            curl -sL -O https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest-4.20/openshift-install-linux.tar.gz
+            tar -xzf openshift-install-linux.tar.gz
+            install -m 0755 openshift-install /usr/local/bin/
+            rm -f openshift-install-linux.tar.gz openshift-install README.md
+            curl -sL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.5.0/kustomize_v5.5.0_linux_amd64.tar.gz" \
+              | tar -xz -C /usr/local/bin/
+            chmod 0755 /usr/local/bin/kustomize
+            curl -sL -o /tmp/aliyun-cli.tgz https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz
+            tar -xzf /tmp/aliyun-cli.tgz -C /usr/local/bin/
+            rm /tmp/aliyun-cli.tgz
+
+            mkdir -p /root/openshift-alibaba && cd /root/openshift-alibaba
+            git clone https://github.com/SammZhu/alibaba-openshift.git || true
+            git clone https://github.com/SammZhu/alibaba-cloud-csi-operator.git || true
+            git clone https://github.com/SammZhu/openshift-capi-alicloud.git || true
+
+            touch /var/log/userdata.done
+
+  # ── Mirror registry ECS ────────────────────────────────────────────────────
+  MirrorImageLookup:
+    Type: DATASOURCE::ECS::Images
+    Properties:
+      OSType: linux
+      Architecture: x86_64
+      ImageName: aliyun_3_x64_20G_alibase_*
+      Status: Available
+
+  MirrorRamRole:
+    Type: ALIYUN::RAM::Role
+    Properties:
+      RoleName: !Sub '${ClusterName}-mirror-role'
+      Description: RAM Role for mirror-registry ECS (OSS pull via Instance Principal)
+      AssumeRolePolicyDocument:
+        Version: '1'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs.aliyuncs.com
+            Action: sts:AssumeRole
+
+  MirrorRamPolicy:
+    Type: ALIYUN::RAM::ManagedPolicy
+    Properties:
+      PolicyName: !Sub '${ClusterName}-mirror-policy'
+      Description: Read-only OSS access for mirror-registry tarball download
+      PolicyDocument:
+        Version: '1'
+        Statement:
+          - Effect: Allow
+            Action:
+              - oss:GetObject
+              - oss:HeadObject
+              - oss:ListObjects
+              - oss:ListBuckets
+            Resource: ['*']
+
+  MirrorRamAttach:
+    Type: ALIYUN::RAM::AttachPolicyToRole
+    Properties:
+      RoleName: !Ref MirrorRamRole
+      PolicyName: !GetAtt MirrorRamPolicy.PolicyName
+      PolicyType: Custom
+
+  # Dedicated SG for the mirror ECS — decoupled from cluster-stack's
+  # ControlPlane / Worker SGs.  Ingress is VPC-wide on 8443 (image pulls)
+  # and 22 (ansible/jump host SSH).  Egress is open by default.
+  MirrorSecurityGroup:
+    Type: ALIYUN::ECS::SecurityGroup
+    Properties:
+      VpcId: !Ref Vpc
+      SecurityGroupName: !Sub '${ClusterName}-mirror-sg'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          PortRange: 8443/8443
+          SourceCidrIp: !Ref VpcCidr
+          Description: Quay HTTPS (VPC-internal pulls from cluster nodes)
+        - IpProtocol: tcp
+          PortRange: 22/22
+          SourceCidrIp: !Ref VpcCidr
+          Description: SSH from jump host / ansible (VPC-internal only)
+
+  MirrorRegistryInstance:
+    Type: ALIYUN::ECS::Instance
+    DependsOn:
+      - NatSNATEntry
+      - MirrorRamAttach
+    Properties:
+      InstanceName: !Sub '${ClusterName}-mirror-registry'
+      HostName: !Sub '${ClusterName}-mirror'
+      InstanceType: !Ref MirrorInstanceType
+      ImageId: !Select [0, !GetAtt MirrorImageLookup.ImageIds]
+      SecurityGroupId: !Ref MirrorSecurityGroup
+      VSwitchId: !Ref PrivateVSwitch
+      PrivateIpAddress: !Ref MirrorPrivateIp
+      SystemDiskCategory: cloud_essd
+      SystemDiskSize: 40
+      DiskMappings:
+        - Category: cloud_essd
+          Size: !Ref MirrorDataDiskSize
+          Device: /dev/xvdb
+          DiskName: !Sub '${ClusterName}-mirror-data'
+      AllocatePublicIP: false
+      RamRoleName: !GetAtt MirrorRamRole.RoleName
+      PasswordInherit: true
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #!/bin/bash
+            # MINIMAL bootstrap — just make the host SSH-able and disk-mounted.
+            # 03b-mirror-prepare.yml does the rest (mirror-registry install,
+            # oc-mirror import, PATCH Assisted Installer).
+            set -euxo pipefail
+            exec > /var/log/mirror-bootstrap.log 2>&1
+            echo "=== $(date -Iseconds) bootstrap started ==="
+
+            mkdir -p /root/.ssh && chmod 700 /root/.ssh
+            echo "${SshPublicKey}" >> /root/.ssh/authorized_keys
+            chmod 600 /root/.ssh/authorized_keys
+
+            DATA_DISK=/dev/vdb
+            for i in $(seq 1 60); do [ -b "$DATA_DISK" ] && break; sleep 2; done
+            mkfs.xfs -f "$DATA_DISK"
+            mkdir -p /var/lib/quay-storage
+            mount "$DATA_DISK" /var/lib/quay-storage
+            echo "$DATA_DISK /var/lib/quay-storage xfs defaults 0 0" >> /etc/fstab
+
+            dnf install -y podman tar curl jq
+            curl -fLO https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz
+            tar xzf aliyun-cli-linux-latest-amd64.tgz
+            install -m 0755 aliyun /usr/local/bin/
+            rm -f aliyun-cli-linux-latest-amd64.tgz aliyun
+
+            echo "$(date -Iseconds) BOOTSTRAP_READY" > /var/lib/mirror-bootstrap-ready
+            echo "=== $(date -Iseconds) bootstrap complete ==="
+      Tags:
+        - Key: !Sub 'openshift.io/mirror-stack/${ClusterName}'
+          Value: owned
+        - Key: role
+          Value: mirror-registry
+
+Outputs:
+  # ── Wire-up outputs (consumed by cluster-stack as Parameters) ──────────────
+  VpcId:
+    Value: !Ref Vpc
+    Description: VPC ID — pass to cluster-stack.VpcId
+  VpcCidr:
+    Value: !Ref VpcCidr
+    Description: VPC CIDR — pass to cluster-stack.VpcCidr
+  PrivateVSwitchId:
+    Value: !Ref PrivateVSwitch
+    Description: Primary private VSwitch (ZoneId) — pass to cluster-stack.PrivateVSwitchId
+  PrivateVSwitch2Id:
+    Value: !Ref PrivateVSwitch2
+    Description: Secondary private VSwitch (ZoneId2) — pass to cluster-stack.PrivateVSwitch2Id
+  PublicVSwitchId:
+    Value: !Ref PublicVSwitch
+    Description: Public VSwitch — referenced by future workloads, not by cluster-stack
+  ZoneId:
+    Value: !Ref ZoneId
+    Description: Pass through to cluster-stack.ZoneId
+  ZoneId2:
+    Value: !Ref ZoneId2
+    Description: Pass through to cluster-stack.ZoneId2
+  NodeRamRoleName:
+    Value: !Ref NodeRamRole
+    Description: RAM role name — pass to cluster-stack.NodeRamRoleName
+
+  # ── Jump host (conditional) ────────────────────────────────────────────────
+  JumpHostPublicIp:
+    Condition: HasJumpHost
+    Value: !GetAtt JumpHostInstance.PublicIp
+    Description: Jump host public IP — SSH target for operator access
+  JumpHostSecurityGroupId:
+    Condition: HasJumpHost
+    Value: !Ref JumpHostSecurityGroup
+    Description: Jump host SG ID — pass to cluster-stack.JumpHostSecurityGroupId so cluster SGs allow SSH from jump
+
+  # ── Mirror registry ────────────────────────────────────────────────────────
+  MirrorRegistryIp:
+    Value: !Ref MirrorPrivateIp
+    Description: Static private IP of the mirror-registry ECS (https://<ip>:8443)
+  MirrorRegistryInstanceId:
+    Value: !Ref MirrorRegistryInstance
+    Description: ECS instance ID of the mirror-registry node
+  MirrorSecurityGroupId:
+    Value: !Ref MirrorSecurityGroup
+    Description: SG containing the mirror ECS (cluster nodes egress is open by default; informational)
