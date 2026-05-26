@@ -303,7 +303,13 @@ echo "    ✓ oc-mirror output looks complete (${CHUNK_COUNT} chunk(s), ${CHUNK_
 
 # Collect everything into one tarball; on the receive side the entire
 # directory tree gets handed back to oc-mirror via `--from file://...`.
+# IMPORTANT: copy imageset-config.yaml *into* ./openshift-mirror/ first.
+# oc-mirror v2 d2m requires -c <isc>; if the file is missing the
+# downstream 03b falls back to a `mirror: {}` stub and the d2m exits
+# with "No images to mirror".  Shipping the real isc inside the tarball
+# guarantees the d2m sees the same image set the m2d built.
 echo "[4/6] Packaging mirror data into single tarball..."
+cp -f imageset-config.yaml ./openshift-mirror/imageset-config.yaml
 TARBALL_PATH="$WORK_DIR/$TARBALL_NAME"
 tar -cf "$TARBALL_PATH" -C ./openshift-mirror .
 
