@@ -263,27 +263,29 @@ if grep -nEi '^(ERRO|error|failed|FATAL)|image .* failed|unable to (pull|copy)' 
   echo "  fix the network / pull-secret / image-set config and re-run."
   exit 1
 fi
-# Check 3: expected v2 output artefacts exist
-for f in openshift-mirror/working-dir/cluster-resources/idms-oc-mirror.yaml \
-         openshift-mirror/working-dir/cluster-resources; do
-  if [[ ! -e "$f" ]]; then
-    echo "ERROR: missing expected v2 artefact: $f"
-    echo "  oc-mirror likely didn't complete a full mirror.  Aborting."
-    exit 1
-  fi
-done
-# Check 4: rough size sanity (OCP 4.20 full release ≥ ~18 GB compressed
-# image content; anything noticeably smaller means many images missing).
-MIRROR_BYTES=$(du -sb ./openshift-mirror 2>/dev/null | awk '{print $1}')
-MIRROR_GB=$(( MIRROR_BYTES / 1024 / 1024 / 1024 ))
-MIN_GB="${MIRROR_MIN_GB:-18}"   # override for partial mirrors
-if (( MIRROR_GB < MIN_GB )); then
-  echo "ERROR: mirror content is only ${MIRROR_GB} GB, below threshold ${MIN_GB} GB."
-  echo "  This usually means oc-mirror skipped images silently."
-  echo "  If you intentionally built a partial mirror, set MIRROR_MIN_GB=<N>."
+# Check 3: at least one mirror chunk tarball got produced.  In v2's
+# mirrorToDisk mode there is no working-dir/cluster-resources/idms-*.yaml
+# (those are only emitted during the disk-to-mirror push); the source of
+# truth is the mirror_NNNNNN.tar chunk files inside openshift-mirror/.
+CHUNK_COUNT=$(ls openshift-mirror/mirror_*.tar 2>/dev/null | wc -l)
+if (( CHUNK_COUNT == 0 )); then
+  echo "ERROR: oc-mirror produced no mirror_*.tar chunks under openshift-mirror/"
   exit 1
 fi
-echo "    ✓ oc-mirror output looks complete (${MIRROR_GB} GB, idms generated, no error lines)"
+# Check 4: combined chunk size sanity.  oc-mirror v2 reuses blobs from
+# the cache between runs, so the *new* tar chunks can be small if most
+# blobs were already cached — but a real full mirror still always
+# produces several GB of chunks.  Anything under 5 GB suggests the run
+# barely did anything.  Override via MIRROR_MIN_GB if needed.
+CHUNK_BYTES=$(du -cb openshift-mirror/mirror_*.tar 2>/dev/null | awk 'END{print $1}')
+CHUNK_GB=$(( CHUNK_BYTES / 1024 / 1024 / 1024 ))
+MIN_GB="${MIRROR_MIN_GB:-5}"
+if (( CHUNK_GB < MIN_GB )); then
+  echo "ERROR: combined chunk size is only ${CHUNK_GB} GB, below threshold ${MIN_GB} GB."
+  echo "  oc-mirror likely produced an incomplete mirror.  Aborting."
+  exit 1
+fi
+echo "    ✓ oc-mirror output looks complete (${CHUNK_COUNT} chunk(s), ${CHUNK_GB} GB, no error lines)"
 
 # Collect everything into one tarball; on the receive side the entire
 # directory tree gets handed back to oc-mirror via `--from file://...`.
