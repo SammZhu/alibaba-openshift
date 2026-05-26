@@ -1,5 +1,17 @@
 # OpenShift on Alibaba Cloud — 端到端 QUICKSTART
 
+> ⚠️ **本指南示范的是 LEGACY 单 stack 流程**（`create-cluster-LEGACY.yaml` +
+> `03-create-stack-LEGACY.yml` + 老 `99-teardown` 的 `teardown_from` 参数）。
+> 新的 split 流程（mirror-stack + cluster-stack 解耦，频繁重建更快）见
+> [README.md → "Two flows: monolithic vs split"](README.md#two-flows-monolithic-vs-split-mirrorcluster-decoupled)。
+>
+> 命令对照速查：
+>
+> | LEGACY | SPLIT |
+> |---|---|
+> | `03-create-stack-LEGACY.yml` | `03-create-mirror-stack.yml` + `06-create-cluster-stack.yml` |
+> | `99-teardown-LEGACY.yml -e teardown_from=3` | `99-teardown.yml -e teardown_target=cluster` |
+
 从零开始安装一套 OpenShift 集群到阿里云，包含 CCM、CSI、CAPI、备份四层，
 **约 90–120 分钟**。
 
@@ -523,29 +535,29 @@ ansible-playbook playbooks/07-install-cluster.yml
 # ── 重建栈但保留 image（节省 ~30 min 重新导入，最常用的 teardown）────
 # keep_image=true（默认）：AI 记录 + image 同时保留（凭证配对，缺一不可）
 # 删栈 → 重建栈 → Phase 04 auto-reset 重装
-ansible-playbook playbooks/99-teardown.yml -e teardown_from=3
+ansible-playbook playbooks/99-teardown-LEGACY.yml -e teardown_from=3
 ansible-playbook playbooks/03-create-stack-LEGACY.yml
 ansible-playbook playbooks/07-install-cluster.yml
 
 # ── 完整销毁（删 AI + image + 栈），需要全部重新跑 ────────────────────
-ansible-playbook playbooks/99-teardown.yml -e teardown_from=3 -e keep_image=false
+ansible-playbook playbooks/99-teardown-LEGACY.yml -e teardown_from=3 -e keep_image=false
 ansible-playbook playbooks/01-prepare-iso.yml
 ansible-playbook playbooks/02-import-image.yml
 ansible-playbook playbooks/03-create-stack-LEGACY.yml
 ansible-playbook playbooks/07-install-cluster.yml
 
 # ── 集群已安装，含应用层清理，然后完整重建 ──────────────────────────
-ansible-playbook playbooks/99-teardown.yml -e teardown_from=4 -e keep_image=false
+ansible-playbook playbooks/99-teardown-LEGACY.yml -e teardown_from=4 -e keep_image=false
 # （然后同上，Phase 01 → 04）
 
 # ── CI/CD 无交互完整销毁 ─────────────────────────────────────────────
-ansible-playbook playbooks/99-teardown.yml -e teardown_confirmed=true -e teardown_from=3 -e keep_image=false
+ansible-playbook playbooks/99-teardown-LEGACY.yml -e teardown_confirmed=true -e teardown_from=3 -e keep_image=false
 
 # ── 仅清 AI 记录（teardown_from=1）──────────────────────────────────
 # 删掉 AI cluster + infra-env；ECS 镜像 + 栈不动
 # 注意：infra-env 已删，ECS image 凭证失效，必须完整重建
 # 用途：清理孤儿 AI 记录，之后跑完整流程 01 → 02 → 03 → 04
-ansible-playbook playbooks/99-teardown.yml -e teardown_from=1
+ansible-playbook playbooks/99-teardown-LEGACY.yml -e teardown_from=1
 ```
 
 ---
@@ -556,7 +568,7 @@ ansible-playbook playbooks/99-teardown.yml -e teardown_from=1
 
 ```sh
 # Ansible
-ansible-playbook ansible/playbooks/99-teardown.yml
+ansible-playbook ansible/playbooks/99-teardown-LEGACY.yml
 
 # 或 shell
 ./scripts/99-teardown.sh

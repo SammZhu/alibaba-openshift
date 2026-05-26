@@ -94,7 +94,7 @@ alibaba-openshift/
 ├── scripts/
 │   └── build-mirror-tarball.sh             # ✦ 在境外构建主机跑
 ├── ros-templates/
-│   └── create-cluster.yaml                  # 含 MirrorRegistryInstance 等 6 个资源
+│   └── create-cluster-LEGACY.yaml                  # 含 MirrorRegistryInstance 等 6 个资源
 │                                            # （Condition: MirrorEnabled）
 ├── ansible/
 │   ├── group_vars/
@@ -220,7 +220,7 @@ ansible-playbook ansible/playbooks/07-install-cluster.yml     # ~30 min
 - 不再等 cloud-init 跑完整套，不再 scp / PATCH——这些都搬到 03b
 - ~5 分钟完成，不再是 ~40 分钟
 
-**Phase 03b mirror-prepare.yml 实际改变**（新增的独立 playbook）：
+**Phase 04 prepare-mirror.yml 实际改变**（新增的独立 playbook）：
 
 - SSH 进 mirror ECS（经 jump host）
 - 11 步幂等流程：bootstrap-ready → 检查 mirror-ready 早退 → 下 OSS artefacts → 装 mirror-registry → import 22 GB tarball → CA cert → 写 ready 信号 → 拉 CA 回本地 → save_state → **PATCH `/v2/clusters/{id}/install-config`** + **PATCH `/v2/infra-envs/{id}` additional_trust_bundle**

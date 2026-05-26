@@ -168,7 +168,7 @@ This repo ships two flows for provisioning the infrastructure.
 
 ### Flow A — Monolithic (legacy, single ROS stack)
 
-One `create-cluster.yaml` stack contains everything (VPC + RAM +
+One `create-cluster-LEGACY.yaml` stack contains everything (VPC + RAM +
 optional jump host + mirror ECS + masters + NLB + PrivateZone).
 Simpler to reason about; **tearing the cluster down also tears down
 the mirror**, so each cluster rebuild re-runs the ~30 min mirror
@@ -450,7 +450,7 @@ oc scale machinedeployment <cluster>-workers --replicas=5 -n openshift-cluster-a
 ```
 alibaba-openshift/
 ├── ros-templates/
-│   └── create-cluster.yaml              # Main infrastructure stack
+│   └── create-cluster-LEGACY.yaml       # Legacy monolithic stack
 │                                        # Key output: DynamicCustomManifest
 │                                        #   → save as alibaba-ccm-config.yaml
 ├── custom_manifests/
