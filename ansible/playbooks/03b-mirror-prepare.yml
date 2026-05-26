@@ -91,6 +91,32 @@
         msg: "mirror-registry is already ready (/var/lib/mirror-ready exists). Skipping install + import + PATCH still runs."
       when: already_ready.rc == 0
 
+    # ── Step 2.5: ensure swap exists on small mirror instance types ──────────
+    # oc-mirror v2 import allocates several GB at peak.  On ecs.c7.large
+    # (4 GB physical) Quay-app alone uses ~3 GB so the v2 process gets
+    # OOM-killed within 1 s of starting (rc=137).  Drop in an 8 GB swap
+    # file on the data disk (idempotent) so the kernel has spillover room.
+    # On bigger instance types (g7.xlarge etc.) this is harmless and unused.
+    - name: Ensure 8 GB swap on mirror ECS (prevents OOM during v2 import)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        if swapon --show | grep -q swapfile; then
+          echo "swap already present, skipping"
+          exit 0
+        fi
+        # Use data disk so we do not blow the 40 GB root partition.
+        dd if=/dev/zero of=/var/lib/quay-storage/swapfile bs=1M count=8192 status=none
+        chmod 600 /var/lib/quay-storage/swapfile
+        mkswap /var/lib/quay-storage/swapfile
+        swapon /var/lib/quay-storage/swapfile
+        grep -q "/var/lib/quay-storage/swapfile" /etc/fstab || \
+          echo "/var/lib/quay-storage/swapfile none swap sw 0 0" >> /etc/fstab
+        free -h
+        REMOTE
+      when: already_ready.rc != 0
+      changed_when: true
+
     # ── Step 3: download mirror-registry installer from OSS ──────────────────
     - name: Check if mirror-registry installer already extracted
       ansible.builtin.shell: |

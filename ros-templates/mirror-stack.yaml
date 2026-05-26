@@ -509,6 +509,20 @@ Resources:
             mount "$DATA_DISK" /var/lib/quay-storage
             echo "$DATA_DISK /var/lib/quay-storage xfs defaults 0 0" >> /etc/fstab
 
+            # Add 8 GB swap on the data disk so oc-mirror v2 import does
+            # not get OOM-killed on small mirror instance types
+            # (ecs.c7.large = 4 GB physical; Quay-app alone uses ~3 GB,
+            # leaving < 1 GB for oc-mirror which needs several GB more).
+            # Swap on cloud_essd is acceptable for the few minutes import
+            # takes and is far cheaper than upsizing to ecs.g7.xlarge.
+            if ! swapon --show | grep -q swapfile; then
+              dd if=/dev/zero of=/var/lib/quay-storage/swapfile bs=1M count=8192 status=none
+              chmod 600 /var/lib/quay-storage/swapfile
+              mkswap /var/lib/quay-storage/swapfile
+              swapon /var/lib/quay-storage/swapfile
+              echo "/var/lib/quay-storage/swapfile none swap sw 0 0" >> /etc/fstab
+            fi
+
             dnf install -y podman tar curl jq
             curl -fLO https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz
             tar xzf aliyun-cli-linux-latest-amd64.tgz
