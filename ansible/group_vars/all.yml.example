@@ -79,10 +79,28 @@ teardown_confirmed: false    # true = skip "Type yes to proceed" prompt (set tru
 mirror_enabled:         false
 mirror_oss_object:      "mirror-tarballs/{{ cluster_name }}-{{ openshift_version }}.tar"
 mirror_private_ip:      "10.0.16.4"           # static IP in private_subnet_cidr
-mirror_instance_type:   "ecs.g7.large"        # 2vCPU/8GB is enough for single-cluster
-mirror_data_disk_size:  100                   # GB for /var/lib/quay-storage
+# Mirror ECS sizing — see docs/MIRROR.md.  g7.xlarge (4vCPU/16GB) is the
+# documented minimum; g7.large (8GB) walks a memory tightrope during
+# oc-mirror v2 d2m; c7.large (4GB) is impossible without manual swap.
+mirror_instance_type:   "ecs.g7.xlarge"
+# 100 GB peak runtime usage; 200 GB leaves room for re-runs.
+mirror_data_disk_size:  200
 mirror_init_user:       "mirror-admin"
 mirror_init_password:   ""                    # leave empty to auto-generate
+
+# ── State.yml fields written by ansible (DO NOT set manually) ────────────
+# Both architectures populate distinct fields so they do not collide:
+#
+# Flow A (monolithic, legacy):
+#   ros_stack_id           single stack created by 03-create-stack.yml
+#
+# Flow B (split, mirror/cluster decoupled):
+#   mirror_stack_id        persistent stack from 02b-create-mirror-stack.yml
+#   cluster_stack_id       short-lived stack from 03-create-cluster-stack.yml
+#   mirror_vpc_id, mirror_private_vsw_1/2, mirror_node_ram_role, ...
+#                          mirror-stack outputs consumed by cluster-stack
+#
+# Pick a flow per README "Two flows".  Do not mix.
 
 # ── Internal: endpoints (don't change unless instructed) ─────────────────────
 assisted_api:  https://api.openshift.com/api/assisted-install/v2

@@ -160,6 +160,79 @@ during the chunk-extract phase of `oc-mirror v2 d2m`.  See
 [docs/MIRROR.md → "附录 A — oc-mirror v1 → v2 迁移踩坑笔记"](docs/MIRROR.md#附录-a--oc-mirror-v1--v2-迁移踩坑笔记2026-05)
 for the full failure-mode table and recovery cookbook.
 
+---
+
+## Two flows: monolithic vs split (mirror/cluster decoupled)
+
+This repo ships two flows for provisioning the infrastructure.
+
+### Flow A — Monolithic (legacy, single ROS stack)
+
+One `create-cluster.yaml` stack contains everything (VPC + RAM +
+optional jump host + mirror ECS + masters + NLB + PrivateZone).
+Simpler to reason about; **tearing the cluster down also tears down
+the mirror**, so each cluster rebuild re-runs the ~30 min mirror
+preparation.
+
+```bash
+ansible-playbook ansible/playbooks/00-preflight.yml
+ansible-playbook ansible/playbooks/01-prepare-iso.yml
+ansible-playbook ansible/playbooks/02-import-image.yml
+ansible-playbook ansible/playbooks/03-create-stack.yml          # ← monolithic stack
+ansible-playbook ansible/playbooks/03b-mirror-prepare.yml
+ansible-playbook ansible/playbooks/04-install-cluster.yml
+
+# teardown:
+ansible-playbook ansible/playbooks/99-teardown.yml \
+  -e teardown_from=3 -e teardown_confirmed=true
+```
+
+### Flow B — Split (mirror-stack + cluster-stack)
+
+Two ROS stacks: `mirror-stack.yaml` (VPC, RAM, jump host, mirror
+ECS — persistent) and `cluster-stack.yaml` (SGs, NLB, PrivateZone,
+masters, workers — short-lived).  Cluster-stack reads mirror-stack
+outputs (VpcId, VSwitches, NodeRamRoleName, JumpHostSGId, MirrorIp)
+as parameters.
+
+**Tearing down the cluster does not touch the mirror**, so the next
+install skips the 30-min mirror prep entirely.
+
+```bash
+# One-time:
+ansible-playbook ansible/playbooks/00-preflight.yml
+ansible-playbook ansible/playbooks/01-prepare-iso.yml
+ansible-playbook ansible/playbooks/02-import-image.yml
+ansible-playbook ansible/playbooks/02b-create-mirror-stack.yml    # ← persistent
+ansible-playbook ansible/playbooks/03b-mirror-prepare.yml         # ← one-time
+ansible-playbook ansible/playbooks/03-create-cluster-stack.yml    # ← short-lived
+ansible-playbook ansible/playbooks/04-install-cluster.yml
+
+# Cluster rebuild only (mirror survives, ~30 min faster):
+ansible-playbook ansible/playbooks/99-teardown-split.yml \
+  -e teardown_target=cluster -e teardown_confirmed=true
+ansible-playbook ansible/playbooks/03-create-cluster-stack.yml
+ansible-playbook ansible/playbooks/04-install-cluster.yml
+
+# Full teardown (also removes mirror + AI cluster + ECS image):
+ansible-playbook ansible/playbooks/99-teardown-split.yml \
+  -e teardown_target=both -e teardown_confirmed=true
+```
+
+### Which to pick?
+
+| Use case | Flow |
+|---|---|
+| Single proof-of-concept install | A (monolithic) |
+| Iterating on cluster install (frequent teardown + rebuild) | **B (split)** |
+| Sharing one mirror across multiple clusters | B (split, with distinct ClusterName per cluster-stack) |
+| Limited Aliyun RAM permissions | A — split needs both RAM full access scopes |
+
+The two flows write distinct fields in `state.yml`
+(`ros_stack_id` for A vs `mirror_stack_id` + `cluster_stack_id` for
+B) so they do not collide; teardown playbooks match accordingly
+(`99-teardown.yml` for A, `99-teardown-split.yml` for B).
+
 ### One-time NLB service-linked role
 
 If you've never used NLB on this account before, create its service-linked
