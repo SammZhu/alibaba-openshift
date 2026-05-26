@@ -142,6 +142,24 @@ the API load balancer.
 Shortcut for non-production accounts: `AdministratorAccess` covers all of the
 above.  For least-privilege, attach the individual policies.
 
+### Mirror registry sizing (when `mirror_enabled: true`)
+
+The mirror ECS hosts Quay + Postgres + Redis + oc-mirror's d2m staging
+cache.  Peak runtime memory is 6-8 GB on top of Quay's ~3 GB resident
+set; peak data-disk usage is ~100 GB during the brief window when the
+downloaded tarball, the extracted chunks, the d2m cache, and Quay's
+own datastorage all coexist.
+
+| Resource | Minimum | Default in `mirror-stack.yaml` |
+|---|---|---|
+| Instance type | `ecs.g7.xlarge` (4 vCPU / **16 GB**) | `ecs.g7.xlarge` |
+| Data disk | 200 GB cloud_essd | 200 GB |
+
+Smaller types (`g7.large` 8 GB, `c7.large` 4 GB) get OOM-killed
+during the chunk-extract phase of `oc-mirror v2 d2m`.  See
+[docs/MIRROR.md → "附录 A — oc-mirror v1 → v2 迁移踩坑笔记"](docs/MIRROR.md#附录-a--oc-mirror-v1--v2-迁移踩坑笔记2026-05)
+for the full failure-mode table and recovery cookbook.
+
 ### One-time NLB service-linked role
 
 If you've never used NLB on this account before, create its service-linked
