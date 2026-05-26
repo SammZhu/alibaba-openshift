@@ -192,9 +192,26 @@ fi
 # failed to download (partial-success semantics).  set -e alone won't
 # catch this.  We tee the log and inspect afterwards to fail loudly
 # instead of shipping a half-baked tarball.
+# oc-mirror v2 resume notes:
+#   - Blob cache lives at $OC_MIRROR_CACHE_DIR (default: $HOME/.oc-mirror).
+#     If a run dies mid-download, the next run reuses what's already there —
+#     do NOT rm -rf this between runs.  Across runs, expect it to grow to
+#     ~50-80 GB for a full OCP release.
+#   - Default --retry-times=2 is too low for cross-border links; bump to 10.
+#   - The mirror_*.tar packaging only happens at the end of a successful
+#     run, so an empty mirror_000001.tar mid-run is normal.
 echo "[3/6] Running oc-mirror v2 (will take 15-60 min depending on link speed)..."
+echo "      cache dir : ${OC_MIRROR_CACHE_DIR:-$HOME/.oc-mirror}"
+echo "      retries   : ${OC_MIRROR_RETRIES:-10}"
 OC_MIRROR_LOG="$WORK_DIR/oc-mirror.log"
-oc-mirror -c imageset-config.yaml file://./openshift-mirror --v2 2>&1 | tee "$OC_MIRROR_LOG"
+oc-mirror \
+  -c imageset-config.yaml \
+  --workspace "file://$WORK_DIR/openshift-mirror" \
+  --cache-dir "${OC_MIRROR_CACHE_DIR:-$HOME/.oc-mirror}" \
+  --retry-times "${OC_MIRROR_RETRIES:-10}" \
+  --retry-delay "${OC_MIRROR_RETRY_DELAY:-5s}" \
+  file://./openshift-mirror --v2 \
+  2>&1 | tee "$OC_MIRROR_LOG"
 OCM_RC=${PIPESTATUS[0]}
 
 echo "[3a/6] Validating oc-mirror output..."
