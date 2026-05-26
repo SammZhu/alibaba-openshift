@@ -422,7 +422,15 @@
         kind: ImageSetConfiguration
         mirror: {}
         YAML
-        oc-mirror -c "$ISC" --from file://. "docker://{{ mirror_private_ip }}:8443" --v2
+        # --max-per-registry 1 limits oc-mirror to a single concurrent
+        # push, drastically cutting peak memory.  On ecs.c7.large (4 GB
+        # physical, Quay-app holds 3 GB) the default 6-way concurrency
+        # OOM-kills oc-mirror during the chunk-extraction phase even
+        # with 31 GB swap available, because the kernel can't evict
+        # Quay's pages fast enough to satisfy oc-mirror's burst alloc.
+        # Serial is slower (~2x) but actually completes.
+        oc-mirror -c "$ISC" --from file://. "docker://{{ mirror_private_ip }}:8443" --v2 \
+          --max-per-registry 1
         echo "=== $(date -Iseconds) import complete ==="
         REMOTE
       when: already_ready.rc != 0
