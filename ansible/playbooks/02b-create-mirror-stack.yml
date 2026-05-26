@@ -1,0 +1,145 @@
+---
+# Phase 02b — Create the PERSISTENT mirror-stack via ROS.
+#
+# This is the new "split architecture" entrypoint (paired with the
+# rewritten 03-create-cluster-stack.yml).  Together they replace the
+# old monolithic 03-create-stack.yml + create-cluster.yaml.
+#
+# What this stack contains:
+#   - VPC, subnets, NAT, EIP, SNAT entries
+#   - Node RAM role + policy (shared by future cluster-stack nodes)
+#   - Optional SSH jump host (testing only)
+#   - Mirror-registry ECS + 200 GB data disk + dedicated SG
+#
+# This stack is created ONCE and survives cluster rebuilds.  Run
+# 03b-mirror-prepare.yml afterwards to install Quay + push images.
+
+- name: Create mirror-stack
+  hosts: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
+    - ansible.builtin.include_tasks: ../tasks/mirror_defaults.yml
+
+    - name: Skip when mirror not enabled
+      ansible.builtin.meta: end_play
+      when: not (mirror_enabled | default(false) | bool)
+
+    - name: Resolve mirror init password (auto-generate if blank)
+      ansible.builtin.set_fact:
+        _mirror_init_password_resolved: >-
+          {{ mirror_init_password
+             if (mirror_init_password | default('') | length > 0)
+             else (lookup('password', '/dev/null length=20 chars=ascii_letters,digits')) }}
+      no_log: true
+
+    - name: Read SSH public key
+      ansible.builtin.slurp:
+        src: "{{ ssh_pub_key_file }}"
+      register: _ssh_pub_slurp
+
+    - name: Read SSH private key (base64-encoded for cloud-init)
+      ansible.builtin.slurp:
+        src: "{{ ssh_priv_key_file }}"
+      register: _ssh_priv_slurp
+
+    - name: Build mirror-stack Parameters
+      ansible.builtin.set_fact:
+        _mirror_stack_params:
+          - ParameterKey: ClusterName
+            ParameterValue: "{{ cluster_name }}"
+          - ParameterKey: Region
+            ParameterValue: "{{ region }}"
+          - ParameterKey: ZoneId
+            ParameterValue: "{{ zone }}"
+          - ParameterKey: ZoneId2
+            ParameterValue: "{{ zone2 }}"
+          - ParameterKey: VpcCidr
+            ParameterValue: "{{ vpc_cidr }}"
+          - ParameterKey: PrivateSubnetCidr
+            ParameterValue: "{{ private_subnet_cidr }}"
+          - ParameterKey: PrivateSubnetCidr2
+            ParameterValue: "{{ private_subnet_cidr2 }}"
+          - ParameterKey: PublicSubnetCidr
+            ParameterValue: "{{ public_subnet_cidr }}"
+          - ParameterKey: RamRoleName
+            ParameterValue: "{{ cluster_name }}-node-role"
+          - ParameterKey: EnableJumpHost
+            ParameterValue: "{{ enable_jump_host | default(false) | string | lower }}"
+          - ParameterKey: JumpHostInstanceType
+            ParameterValue: "{{ jump_host_type | default('ecs.t6-c1m1.large') }}"
+          - ParameterKey: SshPublicKey
+            ParameterValue: "{{ _ssh_pub_slurp.content | b64decode | trim }}"
+          - ParameterKey: SshPrivateKey
+            ParameterValue: "{{ _ssh_priv_slurp.content }}"
+          - ParameterKey: MirrorPrivateIp
+            ParameterValue: "{{ mirror_private_ip }}"
+          - ParameterKey: MirrorInstanceType
+            ParameterValue: "{{ mirror_instance_type }}"
+          - ParameterKey: MirrorDataDiskSize
+            ParameterValue: "{{ mirror_data_disk_size | string }}"
+
+    - name: Create / adopt mirror-stack
+      ansible.builtin.include_tasks: ../tasks/create_stack.yml
+      vars:
+        _cs_stack_name: "{{ cluster_name }}-mirror"
+        _cs_template_path: "{{ repo_root }}/ros-templates/mirror-stack.yaml"
+        _cs_parameters: "{{ _mirror_stack_params }}"
+        _cs_state_key_id: "mirror_stack_id"
+        _cs_timeout_minutes: 30
+      no_log: true
+
+    - name: Map mirror-stack outputs to facts
+      ansible.builtin.set_fact:
+        mirror_vpc_id:           "{{ (_cs_outputs | selectattr('OutputKey','equalto','VpcId')           | first).OutputValue }}"
+        mirror_vpc_cidr:         "{{ (_cs_outputs | selectattr('OutputKey','equalto','VpcCidr')         | first).OutputValue }}"
+        mirror_private_vsw_1:    "{{ (_cs_outputs | selectattr('OutputKey','equalto','PrivateVSwitchId')| first).OutputValue }}"
+        mirror_private_vsw_2:    "{{ (_cs_outputs | selectattr('OutputKey','equalto','PrivateVSwitch2Id')|first).OutputValue }}"
+        mirror_public_vsw:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','PublicVSwitchId') | first).OutputValue }}"
+        mirror_zone_id:          "{{ (_cs_outputs | selectattr('OutputKey','equalto','ZoneId')          | first).OutputValue }}"
+        mirror_zone_id2:         "{{ (_cs_outputs | selectattr('OutputKey','equalto','ZoneId2')         | first).OutputValue }}"
+        mirror_node_ram_role:    "{{ (_cs_outputs | selectattr('OutputKey','equalto','NodeRamRoleName') | first).OutputValue }}"
+        mirror_registry_ip:      "{{ (_cs_outputs | selectattr('OutputKey','equalto','MirrorRegistryIp')| first).OutputValue }}"
+        mirror_registry_id:      "{{ (_cs_outputs | selectattr('OutputKey','equalto','MirrorRegistryInstanceId') | first).OutputValue }}"
+        mirror_jump_host_ip:     "{{ (_cs_outputs | selectattr('OutputKey','equalto','JumpHostPublicIp')        | list | map(attribute='OutputValue') | first | default('')) }}"
+        mirror_jump_host_sg_id:  "{{ (_cs_outputs | selectattr('OutputKey','equalto','JumpHostSecurityGroupId') | list | map(attribute='OutputValue') | first | default('')) }}"
+
+    - name: Save mirror-stack facts to state
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        new_state:
+          # The split architecture replaces the monolithic ros_stack_id
+          # with two separately-tracked stacks.
+          mirror_stack_id:        "{{ _cs_stack_id }}"
+          mirror_vpc_id:          "{{ mirror_vpc_id }}"
+          mirror_vpc_cidr:        "{{ mirror_vpc_cidr }}"
+          mirror_private_vsw_1:   "{{ mirror_private_vsw_1 }}"
+          mirror_private_vsw_2:   "{{ mirror_private_vsw_2 }}"
+          mirror_public_vsw:      "{{ mirror_public_vsw }}"
+          mirror_zone_id:         "{{ mirror_zone_id }}"
+          mirror_zone_id2:        "{{ mirror_zone_id2 }}"
+          mirror_node_ram_role:   "{{ mirror_node_ram_role }}"
+          mirror_private_ip:      "{{ mirror_registry_ip }}"
+          mirror_registry_id:     "{{ mirror_registry_id }}"
+          jump_host_ip:           "{{ mirror_jump_host_ip }}"
+          jump_host_sg_id:        "{{ mirror_jump_host_sg_id }}"
+          mirror_init_password:   "{{ _mirror_init_password_resolved }}"
+          mirror_init_user:       "{{ mirror_init_user | default('mirror-admin') }}"
+      no_log: true
+
+    - name: Phase 02b done
+      ansible.builtin.debug:
+        msg: |
+          ✓ mirror-stack ready.
+
+          VPC          : {{ mirror_vpc_id }}
+          Mirror IP    : {{ mirror_registry_ip }}
+          {% if mirror_jump_host_ip | length > 0 %}
+          Jump host    : {{ mirror_jump_host_ip }}
+          {% endif %}
+
+          Next:
+            ansible-playbook ansible/playbooks/03b-mirror-prepare.yml
+            ansible-playbook ansible/playbooks/03-create-cluster-stack.yml
+            ansible-playbook ansible/playbooks/04-install-cluster.yml

@@ -1,0 +1,134 @@
+# Shared "create or adopt a ROS stack" task — invoked by both
+# 02b-create-mirror-stack.yml and 03-create-cluster-stack.yml.
+#
+# Inputs (caller sets via include_tasks vars: { ... }):
+#   _cs_stack_name        Stack name (idempotent identifier)
+#   _cs_template_path     Local path to the YAML template
+#   _cs_parameters        List of {ParameterKey, ParameterValue} dicts
+#   _cs_state_key_id      State.yml field name to write the StackId into
+#                         (e.g. "mirror_stack_id" or "cluster_stack_id")
+#   _cs_timeout_minutes   Stack create timeout (default 60)
+#
+# Outputs (Ansible facts set after this task runs):
+#   _cs_stack_id          The StackId of the created/adopted stack
+#   _cs_outputs           List of {OutputKey, OutputValue, Description}
+#
+# Defensive behaviors:
+#   * Adopts an existing CREATE_COMPLETE stack matching _cs_stack_name
+#     (no re-create + reuse current outputs).
+#   * Aborts loudly on CREATE_FAILED / DELETE_FAILED — operator must
+#     run 99-teardown to clean before re-running.
+#
+# Why this is small (~150 lines) versus the legacy 03-create-stack.yml
+# (~900 lines): this version assumes each stack is single-purpose
+# (mirror OR cluster, not both).  The legacy playbook had to defend
+# against half-deleted monolithic stacks where the RAM role outlived
+# the rest; the split architecture means we delete one stack at a
+# time and don't need that complexity.
+
+- name: "create_stack [{{ _cs_stack_name }}] — look up existing"
+  ansible.builtin.command:
+    argv:
+      - aliyun
+      - ros
+      - ListStacks
+      - --RegionId
+      - "{{ region }}"
+      - --StackName
+      - "[\"{{ _cs_stack_name }}\"]"
+      - --profile
+      - "{{ aliyun_profile }}"
+  register: _cs_existing
+  changed_when: false
+
+- name: "create_stack [{{ _cs_stack_name }}] — pick first existing match"
+  ansible.builtin.set_fact:
+    _cs_existing_stack: >-
+      {{ ((_cs_existing.stdout | from_json).Stacks | default([])) | first | default({}) }}
+
+- name: "create_stack [{{ _cs_stack_name }}] — fail on unrecoverable state"
+  ansible.builtin.fail:
+    msg: >-
+      Stack '{{ _cs_stack_name }}' exists in state
+      '{{ _cs_existing_stack.Status }}' which cannot be reused.
+      Run 99-teardown.yml to clean it up first.
+  when:
+    - _cs_existing_stack.Status is defined
+    - _cs_existing_stack.Status in ['CREATE_FAILED', 'DELETE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE']
+
+- name: "create_stack [{{ _cs_stack_name }}] — write Parameters JSON to temp file"
+  ansible.builtin.copy:
+    dest: "/tmp/{{ _cs_stack_name }}-params.json"
+    content: "{{ _cs_parameters | to_nice_json }}"
+    mode: "0600"
+  when: _cs_existing_stack.Status is not defined
+
+- name: "create_stack [{{ _cs_stack_name }}] — submit CreateStack"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<PYEOF
+    import json, subprocess, sys
+    params = json.load(open("/tmp/{{ _cs_stack_name }}-params.json"))
+    cli_params = []
+    for i, p in enumerate(params):
+        cli_params.extend([
+            f"--Parameters.{i+1}.ParameterKey", p["ParameterKey"],
+            f"--Parameters.{i+1}.ParameterValue", p["ParameterValue"],
+        ])
+    cmd = ["aliyun", "ros", "CreateStack",
+           "--RegionId", "{{ region }}",
+           "--StackName", "{{ _cs_stack_name }}",
+           "--TemplateBody", open("{{ _cs_template_path }}").read(),
+           "--TimeoutInMinutes", "{{ _cs_timeout_minutes | default(60) }}",
+           "--profile", "{{ aliyun_profile }}",
+           *cli_params]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.stderr.write(r.stderr); sys.exit(r.returncode)
+    print(json.loads(r.stdout)["StackId"])
+    PYEOF
+  register: _cs_create_result
+  when: _cs_existing_stack.Status is not defined
+  no_log: true
+
+- name: "create_stack [{{ _cs_stack_name }}] — remove temp params file"
+  ansible.builtin.file:
+    path: "/tmp/{{ _cs_stack_name }}-params.json"
+    state: absent
+  when: _cs_existing_stack.Status is not defined
+
+- name: "create_stack [{{ _cs_stack_name }}] — capture stack ID"
+  ansible.builtin.set_fact:
+    _cs_stack_id: >-
+      {{ _cs_existing_stack.StackId
+         if (_cs_existing_stack.Status is defined)
+         else (_cs_create_result.stdout | trim) }}
+
+- name: "create_stack [{{ _cs_stack_name }}] — save StackId to state ({{ _cs_state_key_id }})"
+  ansible.builtin.include_tasks: ../tasks/save_state.yml
+  vars:
+    new_state: "{{ {_cs_state_key_id: _cs_stack_id} }}"
+
+- name: "create_stack [{{ _cs_stack_name }}] — poll until CREATE_COMPLETE"
+  ansible.builtin.command:
+    argv:
+      - aliyun
+      - ros
+      - GetStack
+      - --RegionId
+      - "{{ region }}"
+      - --StackId
+      - "{{ _cs_stack_id }}"
+      - --profile
+      - "{{ aliyun_profile }}"
+  register: _cs_poll
+  retries: 60
+  delay: 30
+  until: (_cs_poll.stdout | from_json).Status in ['CREATE_COMPLETE','UPDATE_COMPLETE']
+  failed_when: (_cs_poll.stdout | from_json).Status in
+               ['CREATE_FAILED','ROLLBACK_FAILED','ROLLBACK_COMPLETE','DELETE_FAILED']
+  changed_when: false
+
+- name: "create_stack [{{ _cs_stack_name }}] — extract outputs"
+  ansible.builtin.set_fact:
+    _cs_outputs: "{{ (_cs_poll.stdout | from_json).Outputs | default([]) }}"
