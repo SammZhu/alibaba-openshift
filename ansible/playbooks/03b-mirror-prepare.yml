@@ -429,7 +429,14 @@
         # completes.  Bump back to defaults when running on a mirror
         # ECS with >= 8 GB RAM available to the process.
         # (NOTE: --max-per-registry is a v1 flag and does NOT exist in v2.)
+        # --cache-dir on the data disk — default is $HOME (/root) which is on
+        # the 40 GB root partition.  d2m unpacks every blob from the v2
+        # archive into the cache, so an OCP-4.20 mirror (~25 GB unpacked)
+        # blows past root disk.  Data disk has the 100 GB we provisioned
+        # exactly for this.
+        mkdir -p /var/lib/quay-storage/oc-mirror-cache
         oc-mirror -c "$ISC" --from file://. "docker://{{ mirror_private_ip }}:8443" --v2 \
+          --cache-dir /var/lib/quay-storage/oc-mirror-cache \
           --parallel-images 1 --parallel-layers 1
         echo "=== $(date -Iseconds) import complete ==="
         REMOTE
