@@ -205,16 +205,25 @@ echo "      cache dir : ${OC_MIRROR_CACHE_DIR:-$HOME/.oc-mirror}"
 echo "      retries   : ${OC_MIRROR_RETRIES:-10}"
 OC_MIRROR_LOG="$WORK_DIR/oc-mirror.log"
 # Note: --workspace is rejected in mirrorToDisk (file://) mode —
-# oc-mirror always uses <destination>/working-dir there.  Only set it
-# for mirrorToMirror / diskToMirror flows.
+# oc-mirror always uses <destination>/working-dir there.
+#
+# Do NOT pipe oc-mirror through `tee` — v2 detects a non-TTY stdout
+# and silently switches to "non-interactive" mode, suppressing the
+# per-image progress lines we used to see in v1.  Let stdout go
+# straight to the terminal so progress prints live; v2 already
+# writes the same content (and more) to
+#   openshift-mirror/working-dir/logs/oc-mirror.log
+# which our post-run validation reads from.
 oc-mirror \
   -c imageset-config.yaml \
   --cache-dir "${OC_MIRROR_CACHE_DIR:-$HOME/.oc-mirror}" \
   --retry-times "${OC_MIRROR_RETRIES:-10}" \
   --retry-delay "${OC_MIRROR_RETRY_DELAY:-5s}" \
-  file://./openshift-mirror --v2 \
-  2>&1 | tee "$OC_MIRROR_LOG"
-OCM_RC=${PIPESTATUS[0]}
+  file://./openshift-mirror --v2
+OCM_RC=$?
+# Mirror v2's internal log captures everything (with timestamps) for
+# the post-run grep checks below.
+cp -f openshift-mirror/working-dir/logs/oc-mirror.log "$OC_MIRROR_LOG" 2>/dev/null || true
 
 echo "[3a/6] Validating oc-mirror output..."
 # Check 1: explicit exit code
