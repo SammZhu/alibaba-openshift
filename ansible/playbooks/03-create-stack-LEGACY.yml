@@ -5,7 +5,7 @@
   gather_facts: false
   vars:
     stack_name: "openshift-{{ cluster_name }}"
-    template_file: "{{ repo_root }}/ros-templates/create-cluster.yaml"
+    template_file: "{{ repo_root }}/ros-templates/create-cluster-LEGACY.yaml"
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
     - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
@@ -905,11 +905,11 @@
 
           Next step:
           {% if mirror_enabled | default(false) | bool %}
-            ansible-playbook ansible/playbooks/03b-mirror-prepare.yml   # ~25-40 min
-            ansible-playbook ansible/playbooks/03c-mirror-verify.yml    # sanity
-            ansible-playbook ansible/playbooks/04-install-cluster.yml
+            ansible-playbook ansible/playbooks/04-prepare-mirror.yml   # ~25-40 min
+            ansible-playbook ansible/playbooks/05-verify-mirror.yml    # sanity
+            ansible-playbook ansible/playbooks/07-install-cluster.yml
           {% else %}
-            ansible-playbook ansible/playbooks/04-install-cluster.yml
+            ansible-playbook ansible/playbooks/07-install-cluster.yml
           {% endif %}
 
           Or one-shot 00→04:  ansible-playbook ansible/playbooks/site.yml

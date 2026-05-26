@@ -1,14 +1,15 @@
 ---
-# Convenience wrapper: run Phases 00 → 04 in sequence.
-# Phase 05 must run on the jump host (different inventory target).
-# Phase 99 must run with explicit confirmation.
+# Convenience wrapper: run Phases 00 → 07 in sequence (split architecture).
+# Phase 08 (post-install) runs on jump host inventory and is NOT included
+# here.  Phase 99 (teardown) must run with explicit confirmation.
 #
-# 03b/03c are mirror-only playbooks — they end_play harmlessly when
-# mirror_enabled=false, so we can include them unconditionally here.
+# The 04/05 mirror playbooks end_play harmlessly when mirror_enabled=false,
+# so site.yml can include them unconditionally.
 - ansible.builtin.import_playbook: 00-preflight.yml
 - ansible.builtin.import_playbook: 01-prepare-iso.yml
 - ansible.builtin.import_playbook: 02-import-image.yml
-- ansible.builtin.import_playbook: 03-create-stack.yml
-- ansible.builtin.import_playbook: 03b-mirror-prepare.yml   # no-op if mirror_enabled=false
-- ansible.builtin.import_playbook: 03c-mirror-verify.yml    # no-op if mirror_enabled=false
-- ansible.builtin.import_playbook: 04-install-cluster.yml
+- ansible.builtin.import_playbook: 03-create-mirror-stack.yml   # no-op if mirror_enabled=false
+- ansible.builtin.import_playbook: 04-prepare-mirror.yml        # no-op if mirror_enabled=false
+- ansible.builtin.import_playbook: 05-verify-mirror.yml         # no-op if mirror_enabled=false
+- ansible.builtin.import_playbook: 06-create-cluster-stack.yml
+- ansible.builtin.import_playbook: 07-install-cluster.yml

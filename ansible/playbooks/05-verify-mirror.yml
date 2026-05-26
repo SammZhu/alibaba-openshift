@@ -2,9 +2,9 @@
 # Verify the mirror-registry is healthy and contains the expected images.
 #
 # Use cases:
-#   - After Phase 03 completed, sanity-check before Phase 04 trigger.
+#   - After Phase 04 completed, sanity-check before Phase 07 trigger.
 #   - After mirror-rebuild.yml, confirm new tarball was imported.
-#   - Anytime Phase 04 stalls — first thing to check is "can the mirror
+#   - Anytime Phase 07 stalls — first thing to check is "can the mirror
 #     even serve images right now".
 #
 # Usage:
@@ -31,7 +31,7 @@
           - mirror_init_password is defined and mirror_init_password | length > 0
           - jump_host_ip is defined and jump_host_ip | length > 0
         fail_msg: |
-          Missing mirror state in state.yml.  Run Phase 03 (with mirror_enabled=true)
+          Missing mirror state in state.yml.  Run Phase 03 + 04 (with mirror_enabled=true)
           first.
 
     # ── Quay health endpoint ──────────────────────────────────────────────
@@ -106,7 +106,7 @@
           - repo_probes.results | selectattr('stdout', 'equalto', '200') | list | length
             == repo_probes.results | length
         fail_msg: |
-          Mirror is missing one or more required repos.  Phase 04 will fail
+          Mirror is missing one or more required repos.  Phase 07 will fail
           because cluster nodes won't be able to pull these images.
 
           Missing repos:
@@ -124,5 +124,5 @@
       ansible.builtin.debug:
         msg: |
           ✓ Mirror is healthy and contains all critical images.
-          Safe to proceed with Phase 04:
-            ansible-playbook ansible/playbooks/04-install-cluster.yml
+          Safe to proceed with Phase 07:
+            ansible-playbook ansible/playbooks/07-install-cluster.yml

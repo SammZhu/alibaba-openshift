@@ -25,14 +25,14 @@ ansible/
 │   ├── 00-preflight.yml           # CLI + 凭证 + 权限自检
 │   ├── 01-prepare-iso.yml         # Assisted API → Discovery ISO（mirror_enabled 时注入 registries.conf）
 │   ├── 02-import-image.yml        # OSS 上传 + RAM 角色 + ImportImage + 等就绪
-│   ├── 03-create-stack.yml        # ROS 栈 + 等就绪 + 输出（mirror_enabled 时多建 mirror ECS）
-│   ├── 04-install-cluster.yml     # 分配角色 + 上传 manifest + 装集群 + 拉 kubeconfig
-│   ├── 05-deploy-post-install.yml # 跳板上跑，部署 CAPI/CSI
+│   ├── 03-create-stack-LEGACY.yml        # ROS 栈 + 等就绪 + 输出（mirror_enabled 时多建 mirror ECS）
+│   ├── 07-install-cluster.yml     # 分配角色 + 上传 manifest + 装集群 + 拉 kubeconfig
+│   ├── 08-deploy-post-install.yml # 跳板上跑，部署 CAPI/CSI
 │   ├── 99-teardown.yml            # 应用层清理 + 删栈 + 孤儿扫描
 │   ├── site.yml                   # 跑 00-04 一条龙
 │   │
 │   ├── mirror-rebuild.yml         # 【mirror only】刷新 mirror 镜像（不动 cluster）
-│   └── 03c-mirror-verify.yml          # 【mirror only】mirror 健康检查 + 镜像存在验证
+│   └── 05-verify-mirror.yml          # 【mirror only】mirror 健康检查 + 镜像存在验证
 ├── state.yml                      # 流水线状态（gitignored，自动生成）
 └── README.md
 ```
@@ -74,13 +74,13 @@ ansible-playbook playbooks/site.yml
 ansible-playbook playbooks/00-preflight.yml
 ansible-playbook playbooks/01-prepare-iso.yml
 ansible-playbook playbooks/02-import-image.yml
-ansible-playbook playbooks/03-create-stack.yml
-ansible-playbook playbooks/04-install-cluster.yml
+ansible-playbook playbooks/03-create-stack-LEGACY.yml
+ansible-playbook playbooks/07-install-cluster.yml
 
 # 04 完成后会把 kubeconfig scp 到跳板。SSH 进跳板跑 Phase 05：
 ssh -i ~/.ssh/openshift_ed25519 root@$(yq '.jump_host_ip' state.yml)
 cd /root/openshift-alibaba/alibaba-openshift
-ansible-playbook ansible/playbooks/05-deploy-post-install.yml
+ansible-playbook ansible/playbooks/08-deploy-post-install.yml
 
 # 销毁
 ansible-playbook playbooks/99-teardown.yml
@@ -102,9 +102,9 @@ echo 'mirror_oss_object: "mirror-tarballs/aliocp1-4.20.tar"' >> group_vars/all.y
 # 3. 正常跑 01-04，Phase 03 后先 verify 再 Phase 04
 ansible-playbook playbooks/01-prepare-iso.yml
 ansible-playbook playbooks/02-import-image.yml
-ansible-playbook playbooks/03-create-stack.yml    # 多 ~30 min（mirror cloud-init）
-ansible-playbook playbooks/03c-mirror-verify.yml      # 健康检查
-ansible-playbook playbooks/04-install-cluster.yml
+ansible-playbook playbooks/03-create-stack-LEGACY.yml    # 多 ~30 min（mirror cloud-init）
+ansible-playbook playbooks/05-verify-mirror.yml      # 健康检查
+ansible-playbook playbooks/07-install-cluster.yml
 
 # 后续刷新 mirror 镜像（加 operator / 升级版本）
 ansible-playbook playbooks/mirror-rebuild.yml     # 不动 cluster
@@ -137,6 +137,6 @@ ansible-playbook playbooks/mirror-rebuild.yml     # 不动 cluster
 | ROS stack `CREATE_FAILED` | `aliyun ros GetStackResources --StackId ...` 看哪个资源失败 |
 | Hosts 一直不上线 | ECS 实例没启动？登 ECS VNC 看是否进了 Discovery 界面 |
 | 04 卡 ready | `ai_curl GET /clusters/<id>/host-requirements` 看 validation 哪条没过 |
-| 03 卡 "Wait for mirror registry"（mirror 启用时）| 经 jump host SSH 进 mirror ECS `tail /var/log/mirror-setup.log` 看 cloud-init 进度，或 `03c-mirror-verify.yml` 跑健康检查 |
+| 03 卡 "Wait for mirror registry"（mirror 启用时）| 经 jump host SSH 进 mirror ECS `tail /var/log/mirror-setup.log` 看 cloud-init 进度，或 `05-verify-mirror.yml` 跑健康检查 |
 | 04 节点拉 mirror 镜像 401 | `pull_secret` 没有 mirror auth — 重跑 Phase 01 自动注入 |
 | 04 节点拉 mirror 镜像 manifest unknown | tarball 缺这个 image — 重 build + `mirror-rebuild.yml` |

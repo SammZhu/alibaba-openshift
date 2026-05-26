@@ -1,531 +1,256 @@
 ---
-# Phase 99 — clean up resources to zero billing at any phase boundary.
+# Phase 99 (split architecture) — teardown one or both of the
+# split-architecture ROS stacks.
+#
+# Pair with: 03-create-mirror-stack.yml + 06-create-cluster-stack.yml.
+# For the legacy monolithic single-stack flow, use 99-teardown.yml.
 #
 # Usage:
-#   ansible-playbook playbooks/99-teardown.yml                              # full teardown
-#   ansible-playbook playbooks/99-teardown.yml -e teardown_from=3           # stack + AI records (keeps image)
-#   ansible-playbook playbooks/99-teardown.yml -e teardown_from=3 -e keep_image=false  # also delete image
-#   ansible-playbook playbooks/99-teardown.yml -e teardown_from=2           # + image
-#   ansible-playbook playbooks/99-teardown.yml -e teardown_from=1           # AI records only
-#   ansible-playbook playbooks/99-teardown.yml -e teardown_confirmed=true   # no prompt
+#   # Drop only the cluster, keep mirror (the common case — rebuilds fast):
+#   ansible-playbook playbooks/99-teardown.yml \
+#     -e teardown_target=cluster -e teardown_confirmed=true
 #
-# teardown_from levels — cleans resources created UP TO that phase:
-#   1 → Assisted cluster + infra-env records (Red Hat API only, no Aliyun cost)
-#   2 → + ECS custom image
-#   3 → + ROS stack (VPC / ECS nodes / NLB / NAT / EIP / jump host)
-#   4 → + app-layer cleanup first (LoadBalancer SVCs + PVCs), then everything above
-#        (use when OpenShift is installed and CCM/CSI may have created extra resources)
+#   # Drop only the mirror (also auto-drops AI cluster + ECS image since
+#   # they are paired by infra-env ID):
+#   ansible-playbook playbooks/99-teardown.yml \
+#     -e teardown_target=mirror  -e teardown_confirmed=true
 #
-# keep_image (default: true):
-#   true  → when teardown_from >= 3: SKIP deleting AI cluster + infra-env + ECS image + local ISO.
-#            Only the Aliyun stack is deleted.  Next step: Phase 03 → Phase 04 (auto-reset).
-#            The infra-env MUST be kept alongside the image — the discovery agent embedded in
-#            the ECS image calls back to its specific infra-env ID.  Deleting the infra-env
-#            while keeping the image leaves a broken image whose nodes can never register.
-#            when teardown_from < 3: has no effect (image not deleted at these levels anyway).
-#   false → delete AI records + ECS image + local ISO per teardown_from level (full rebuild).
-#            Next step: Phase 01 → 02 → 03 → 04.
+#   # Drop everything (cluster first, then mirror):
+#   ansible-playbook playbooks/99-teardown.yml \
+#     -e teardown_target=both    -e teardown_confirmed=true
+#
+# teardown_target values:
+#   cluster — delete cluster_stack_id, clear cluster_* fields in state.
+#             mirror-stack stays.  Next: re-run 06-create-cluster-stack
+#             + 04-install-cluster.  Saves ~30 min vs full rebuild.
+#   mirror  — delete mirror_stack_id + AI cluster + infra-env + ECS image.
+#             Forces a full rebuild (Phase 01 → 02 → 03 → 04 → 05 → 06 → 07).
+#             Use when changing mirror tarball contents or VPC topology.
+#   both    — do cluster, then mirror.  Equivalent to a hard reset.
 
-- name: Teardown
+- name: Teardown (split architecture)
   hosts: local
   gather_facts: false
   vars:
-    teardown_from: 4        # default: full teardown
+    teardown_target: cluster        # cluster | mirror | both
     teardown_confirmed: false
-    keep_image: true        # default: preserve ECS image across stack rebuilds
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
     - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
 
-    - name: Show teardown scope
-      ansible.builtin.debug:
-        msg: |
-          Teardown scope: phases 1–{{ teardown_from }}{% if keep_image | bool and teardown_from | int >= 3 %}  [keep_image=true: AI records + image preserved]{% endif %}
+    - name: Validate teardown_target
+      ansible.builtin.assert:
+        that: teardown_target in ['cluster', 'mirror', 'both']
+        fail_msg: "teardown_target must be one of: cluster, mirror, both"
 
-          {% if teardown_from | int >= 4 %}  Step 0 : app-layer cleanup (CCM-managed SLBs / PVCs via jump host){% endif %}
-          {% if not (keep_image | bool and teardown_from | int >= 3) %}  Step 1 : Delete Assisted cluster + infra-env records{% else %}  Step 1 : SKIPPED — AI records preserved (keep_image=true; infra-env must match the ECS image){% endif %}
-          {% if teardown_from | int >= 2 and not keep_image | bool %}  Step 2 : Delete ECS custom image + local ISO{% elif teardown_from | int >= 2 %}  Step 2 : SKIPPED — ECS image preserved (keep_image=true){% endif %}
-          {% if teardown_from | int >= 3 %}  Step 3 : Delete ROS stack (VPC / ECS / NLB / NAT / EIP){% endif %}
-            Step 4 : Orphan scan
-          {% if keep_image | bool and teardown_from | int >= 3 %}  Step 5 : Partial state clear (stack IDs reset; AI + image IDs kept → Phase 03 → 04 next){% elif teardown_from | int >= 3 %}  Step 5 : Delete state.yml (full rebuild needed → Phase 01 → 02 → 03 → 04 next){% else %}  Step 5 : Partial state clear (stack preserved){% endif %}
-
-    - name: Confirm teardown (skip with -e teardown_confirmed=true)
+    - name: Show scope + confirm
       ansible.builtin.pause:
-        prompt: >-
-          Teardown phases 1–{{ teardown_from }} for cluster '{{ cluster_name }}'.
+        prompt: |
+
+          Split-architecture teardown for cluster '{{ cluster_name }}':
+            target = {{ teardown_target }}
+            cluster_stack_id = {{ cluster_stack_id | default('(none)') }}
+            mirror_stack_id  = {{ mirror_stack_id  | default('(none)') }}
+            ai cluster_id    = {{ cluster_id       | default('(none)') }}
+            ecs_image_id     = {{ ecs_image_id     | default('(none)') }}
+
           Type 'yes' to proceed
-      register: confirm_input
+      register: _confirm
       when: not teardown_confirmed | bool
 
     - ansible.builtin.assert:
-        that:
-          - teardown_confirmed | bool or confirm_input.user_input == 'yes'
+        that: teardown_confirmed | bool or _confirm.user_input == 'yes'
         fail_msg: "Aborted"
 
-    # ── Step 0: App-layer cleanup (Phase 04+ only) ─────────────────────────
-    # Must run BEFORE stack delete so CCM/CSI can release SLBs and cloud disks.
-    - name: App-layer cleanup via jump host
+    # ── 1. Cluster-stack teardown ────────────────────────────────────────
+    - name: Delete cluster-stack
       when:
-        - teardown_from | int >= 4
-        - jump_host_ip is defined and jump_host_ip | length > 0
+        - teardown_target in ['cluster', 'both']
+        - cluster_stack_id is defined and cluster_stack_id | length > 0
       block:
-        - name: Delete LoadBalancer Services + PVCs on the cluster
+        - name: DeleteStack — cluster
           ansible.builtin.command:
             argv:
-              - ssh
-              - -i
-              - "{{ ssh_priv_key_file }}"
-              - -o
-              - StrictHostKeyChecking=no
-              - -o
-              - ConnectTimeout=10
-              - "root@{{ jump_host_ip }}"
-              - bash
-              - -lc
-              - |
-                set -e
-                export KUBECONFIG=/root/kubeconfig
-                test -f $KUBECONFIG || { echo "no kubeconfig on jump host — skipping"; exit 0; }
-                oc get svc -A --field-selector spec.type=LoadBalancer -o json \
-                  | jq -r '.items[] | "\(.metadata.namespace) \(.metadata.name)"' \
-                  | while read ns name; do
-                      [ -n "$name" ] && oc delete svc -n "$ns" "$name" --wait=false || true
-                    done
-                oc delete pvc --all -A --wait=false 2>/dev/null || true
-                echo "App-layer cleanup done"
+              - aliyun
+              - ros
+              - DeleteStack
+              - --RegionId
+              - "{{ region }}"
+              - --StackId
+              - "{{ cluster_stack_id }}"
+              - --RetainAllResources
+              - "false"
+              - --profile
+              - "{{ aliyun_profile }}"
+          register: _cluster_delete
+          changed_when: _cluster_delete.rc == 0
           failed_when: false
-          register: app_cleanup
 
-        - name: Wait 180 s for CCM / CSI to release Aliyun resources
-          ansible.builtin.pause:
-            seconds: 180
+        - name: Poll cluster-stack until gone
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ros
+              - GetStack
+              - --RegionId
+              - "{{ region }}"
+              - --StackId
+              - "{{ cluster_stack_id }}"
+              - --profile
+              - "{{ aliyun_profile }}"
+          register: _cluster_poll
+          retries: 60
+          delay: 30
+          # GetStack on a deleted stack returns rc!=0 — that is success.
+          until: _cluster_poll.rc != 0 or
+                 (_cluster_poll.stdout | from_json).Status in ['DELETE_COMPLETE']
+          failed_when: false
+          changed_when: false
 
-    # ── Step 1: Delete Assisted cluster + infra-env records ───────────────
-    # Skipped when keep_image=true AND teardown_from >= 3:
-    #   The ECS image bakes in the infra-env discovery token at import time.
-    #   Deleting the infra-env invalidates the image — nodes booting from it
-    #   can no longer register with the Assisted API.  Keeping both lets the
-    #   next Phase 03 create fresh ECS instances from the same image, and
-    #   Phase 04 auto-reset will re-trigger registration + install.
-    - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+        - name: Clear cluster_* fields in state
+          ansible.builtin.include_tasks: ../tasks/save_state.yml
+          vars:
+            new_state:
+              cluster_stack_id: ''
+              api_lb_endpoint: ''
+              worker_sg: ''
+              master_ip1: ''
+              master_ip2: ''
+              master_ip3: ''
+              forward_zone_id: ''
+              reverse_zone_id1: ''
+              reverse_zone_id2: ''
+
+    # ── 2. AI cluster + infra-env + ECS image (only with mirror teardown) ──
+    # These are paired with the mirror image: the discovery ignition
+    # baked into the ECS image references infra_env_id; deleting either
+    # in isolation leaves a broken pair.
+    - name: Delete Assisted cluster + infra-env + ECS image
+      when: teardown_target in ['mirror', 'both']
+      block:
+        - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+          when: cluster_id is defined and cluster_id | length > 0
+
+        - name: AI — delete cluster
+          ansible.builtin.uri:
+            url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
+            method: DELETE
+            headers: { Authorization: "Bearer {{ ai_access_token }}" }
+            status_code: [202, 204, 404]
+          when: cluster_id is defined and cluster_id | length > 0
+          failed_when: false
+
+        - name: AI — delete infra-env
+          ansible.builtin.uri:
+            url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}"
+            method: DELETE
+            headers: { Authorization: "Bearer {{ ai_access_token }}" }
+            status_code: [202, 204, 404]
+          when: infra_env_id is defined and infra_env_id | length > 0
+          failed_when: false
+
+        - name: ECS — delete custom image
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DeleteImage
+              - --RegionId
+              - "{{ region }}"
+              - --ImageId
+              - "{{ ecs_image_id }}"
+              - --Force
+              - "true"
+              - --profile
+              - "{{ aliyun_profile }}"
+          when: ecs_image_id is defined and ecs_image_id | length > 0
+          failed_when: false
+          changed_when: true
+
+    # ── 3. Mirror-stack teardown ─────────────────────────────────────────
+    - name: Delete mirror-stack
       when:
-        - cluster_id is defined and cluster_id | length > 0
-        - not (keep_image | bool and teardown_from | int >= 3)
+        - teardown_target in ['mirror', 'both']
+        - mirror_stack_id is defined and mirror_stack_id | length > 0
+      block:
+        - name: DeleteStack — mirror
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ros
+              - DeleteStack
+              - --RegionId
+              - "{{ region }}"
+              - --StackId
+              - "{{ mirror_stack_id }}"
+              - --RetainAllResources
+              - "false"
+              - --profile
+              - "{{ aliyun_profile }}"
+          changed_when: true
+          failed_when: false
 
-    - name: Delete Assisted cluster record
-      ansible.builtin.uri:
-        url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
-        method: DELETE
-        headers: { Authorization: "Bearer {{ ai_access_token }}" }
-        status_code: [204, 404, 405]
-      when:
-        - cluster_id is defined and cluster_id | length > 0
-        - not (keep_image | bool and teardown_from | int >= 3)
-      failed_when: false
+        - name: Poll mirror-stack until gone
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ros
+              - GetStack
+              - --RegionId
+              - "{{ region }}"
+              - --StackId
+              - "{{ mirror_stack_id }}"
+              - --profile
+              - "{{ aliyun_profile }}"
+          register: _mirror_poll
+          retries: 60
+          delay: 30
+          until: _mirror_poll.rc != 0 or
+                 (_mirror_poll.stdout | from_json).Status in ['DELETE_COMPLETE']
+          failed_when: false
+          changed_when: false
 
-    - name: Delete Assisted infra-env record
-      ansible.builtin.uri:
-        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}"
-        method: DELETE
-        headers: { Authorization: "Bearer {{ ai_access_token }}" }
-        status_code: [204, 404, 405]
-      when:
-        - infra_env_id is defined and infra_env_id | length > 0
-        - not (keep_image | bool and teardown_from | int >= 3)
-      failed_when: false
-
-    - name: Note — AI records preserved (keep_image=true)
-      ansible.builtin.debug:
-        msg: >-
-          AI cluster ({{ cluster_id | default('?') }}) + infra-env
-          ({{ infra_env_id | default('?') }}) preserved alongside ECS image.
-          Next step: Phase 03 (new stack) → Phase 04 (auto-reset + install).
-      when:
-        - teardown_from | int >= 3
-        - keep_image | bool
-
-    # ── Step 2: Delete ECS custom image + local ISO (Phase 02+) ───────────
-    # Skipped when keep_image=true (default) so the image can be reused
-    # after rebuilding the stack without re-running the slow Phase 02 upload.
-    - name: Delete ECS custom image
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - ecs
-          - DeleteImage
-          - --RegionId
-          - "{{ region }}"
-          - --ImageId
-          - "{{ ecs_image_id }}"
-          - --Force
-          - "true"
-          - --profile
-          - "{{ aliyun_profile }}"
-      when:
-        - teardown_from | int >= 2
-        - not keep_image | bool
-        - ecs_image_id is defined and ecs_image_id | length > 0
-      failed_when: false
-
-    - name: Delete local ISO file (forces fresh download on next Phase 01 run)
-      ansible.builtin.file:
-        path: "{{ iso_path }}"
-        state: absent
-      when:
-        - teardown_from | int >= 2
-        - not keep_image | bool
-        - iso_path is defined and iso_path | length > 0
-
-    - name: Note — ECS image preserved (keep_image=true)
-      ansible.builtin.debug:
-        msg: >-
-          ECS image {{ ecs_image_id | default('(unknown)') }} + local ISO kept.
-          AI infra-env also preserved (see Step 1 note above) — image credentials remain valid.
-          Use -e keep_image=false to delete image + AI records and force a full rebuild.
-      when:
-        - teardown_from | int >= 2
-        - keep_image | bool
-        - ecs_image_id is defined and ecs_image_id | length > 0
-
-    # ── Step 3: Delete ROS stack (Phase 03+) ──────────────────────────────
-    # Fallback adoption: state.yml may be missing or have an empty ros_stack_id
-    # (Case B partial teardown, manual deletion, etc.).  Without this, the
-    # entire delete path silently skips and stack_deleted=true is set, leaving
-    # the stack orphaned.  Look it up by name and adopt its ID.
-    - name: List stacks by name (fallback when state.yml has no ros_stack_id)
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - ros
-          - ListStacks
-          - --RegionId
-          - "{{ region }}"
-          - --StackName.1
-          - "openshift-{{ cluster_name }}"
-          - --profile
-          - "{{ aliyun_profile }}"
-      register: teardown_stack_list
-      changed_when: false
-      failed_when: false
-      when:
-        - teardown_from | int >= 3
-        - ros_stack_id is not defined or ros_stack_id | length == 0
-
-    - name: Adopt stack ID by name (any non-DELETE_COMPLETE state)
-      ansible.builtin.set_fact:
-        ros_stack_id: "{{ ((teardown_stack_list.stdout | from_json).Stacks
-                           | rejectattr('Status', 'equalto', 'DELETE_COMPLETE')
-                           | list | first).StackId }}"
-      when:
-        - teardown_from | int >= 3
-        - ros_stack_id is not defined or ros_stack_id | length == 0
-        - teardown_stack_list is defined
-        - teardown_stack_list is not skipped
-        - teardown_stack_list.rc == 0
-        - teardown_stack_list.stdout | length > 0
-        - (teardown_stack_list.stdout | from_json).Stacks
-            | rejectattr('Status', 'equalto', 'DELETE_COMPLETE')
-            | list | length > 0
-
-    - name: Note — adopted stack ID from ListStacks
-      ansible.builtin.debug:
-        msg: >-
-          state.yml had no ros_stack_id; adopted {{ ros_stack_id }}
-          from ListStacks by name (openshift-{{ cluster_name }}).
-      when:
-        - teardown_from | int >= 3
-        - teardown_stack_list is defined
-        - teardown_stack_list is not skipped
-        - ros_stack_id is defined and ros_stack_id | length > 0
-
-    # Pre-clean RAM resources that block stack deletion
-    - name: Pre-detach RAM policy from role (unblocks stack deletion)
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - ram
-          - DetachPolicyFromRole
-          - --PolicyName
-          - "{{ cluster_name }}-node-policy"
-          - --PolicyType
-          - Custom
-          - --RoleName
-          - "{{ node_ram_role | default('openshift-node-role') }}"
-          - --profile
-          - "{{ aliyun_profile }}"
-      failed_when: false
-      changed_when: false
-      when:
-        - teardown_from | int >= 3
-        - ros_stack_id is defined and ros_stack_id | length > 0
-
-    - name: Pre-delete RAM policy (unblocks stack deletion)
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - ram
-          - DeletePolicy
-          - --PolicyName
-          - "{{ cluster_name }}-node-policy"
-          - --profile
-          - "{{ aliyun_profile }}"
-      failed_when: false
-      changed_when: false
-      when:
-        - teardown_from | int >= 3
-        - ros_stack_id is defined and ros_stack_id | length > 0
-
-    # ── Mirror-registry RAM resources — same pattern as node-policy/role ──────
-    # ALIYUN::RAM::ManagedPolicy + AttachPolicyToRole can fail to delete inside
-    # a ROS stack if the policy is still attached to the role.  Pre-detach +
-    # pre-delete here so the stack deletion path is clean.  Safe to run even
-    # when mirror was never enabled — the commands fail-silently with rc != 0.
-    - name: Pre-detach mirror RAM policy from role (unblocks stack deletion)
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - ram
-          - DetachPolicyFromRole
-          - --PolicyName
-          - "{{ cluster_name }}-mirror-policy"
-          - --PolicyType
-          - Custom
-          - --RoleName
-          - "{{ cluster_name }}-mirror-role"
-          - --profile
-          - "{{ aliyun_profile }}"
-      failed_when: false
-      changed_when: false
-      when:
-        - teardown_from | int >= 3
-        - ros_stack_id is defined and ros_stack_id | length > 0
-
-    - name: Pre-delete mirror RAM policy (unblocks stack deletion)
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - ram
-          - DeletePolicy
-          - --PolicyName
-          - "{{ cluster_name }}-mirror-policy"
-          - --profile
-          - "{{ aliyun_profile }}"
-      failed_when: false
-      changed_when: false
-      when:
-        - teardown_from | int >= 3
-        - ros_stack_id is defined and ros_stack_id | length > 0
-
-    - name: Delete ROS stack
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - ros
-          - DeleteStack
-          - --StackId
-          - "{{ ros_stack_id }}"
-          - --RegionId
-          - "{{ region }}"
-          - --profile
-          - "{{ aliyun_profile }}"
-      when:
-        - teardown_from | int >= 3
-        - ros_stack_id is defined and ros_stack_id | length > 0
-      failed_when: false
-
-    - name: Wait for ROS stack deletion (DELETE_COMPLETE or 404)
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - ros
-          - GetStack
-          - --StackId
-          - "{{ ros_stack_id }}"
-          - --RegionId
-          - "{{ region }}"
-          - --profile
-          - "{{ aliyun_profile }}"
-      register: stack_check
-      changed_when: false
-      failed_when: false
-      retries: 40
-      delay: 30
-      # rc != 0 alone is NOT sufficient — it also fires on transient network errors.
-      # Only treat rc != 0 as "deleted" when the API explicitly says StackNotFound.
-      # This prevents a flaky curl from fooling us into thinking the stack is gone.
-      until: >-
-        (stack_check.rc == 0 and
-         stack_check.stdout | length > 0 and
-         (stack_check.stdout | from_json).Status in ['DELETE_COMPLETE', 'DELETE_FAILED']) or
-        (stack_check.rc != 0 and
-         'StackNotFound' in (stack_check.stderr | default('')))
-      when:
-        - teardown_from | int >= 3
-        - ros_stack_id is defined and ros_stack_id | length > 0
-
-    - name: Warn if stack stuck in DELETE_FAILED
-      ansible.builtin.debug:
-        msg: |
-          WARNING: Stack {{ ros_stack_id }} is stuck in DELETE_FAILED.
-          Check the ROS console for remaining blocking resources and delete manually.
-      when:
-        - teardown_from | int >= 3
-        - stack_check is not skipped
-        - stack_check.rc == 0
-        - stack_check.stdout | length > 0
-        - (stack_check.stdout | from_json).Status == 'DELETE_FAILED'
-
-    # Record deletion outcome so state-clear tasks can gate on confirmed success.
-    # stack_deleted=true only when:
-    #   (a) no stack ID in state (never created), OR
-    #   (b) API returned DELETE_COMPLETE, OR
-    #   (c) API returned 404 with StackNotFound (already gone).
-    # Anything else (DELETE_FAILED, poll timeout, transient error) leaves
-    # stack_deleted=false so we do NOT wipe state and the run is re-tryable.
-    - name: Record stack deletion outcome
-      ansible.builtin.set_fact:
-        stack_deleted: >-
-          {{ ros_stack_id is not defined or ros_stack_id | length == 0 or
-             (stack_check is not skipped and (
-               (stack_check.rc != 0 and 'StackNotFound' in (stack_check.stderr | default(''))) or
-               (stack_check.rc == 0 and stack_check.stdout | length > 0 and
-                (stack_check.stdout | from_json).Status == 'DELETE_COMPLETE')
-             )) }}
-      when: teardown_from | int >= 3
-
-    - name: Abort state clear — stack not confirmed deleted
-      ansible.builtin.fail:
-        msg: >-
-          Stack {{ ros_stack_id }} was NOT confirmed deleted
-          (status: {{ (stack_check.stdout | from_json).Status
-                      if (stack_check is not skipped and stack_check.rc == 0
-                          and stack_check.stdout | length > 0)
-                      else 'unknown / poll timed out' }}).
-          state.yml NOT modified — fix the stack manually and re-run teardown.
-      when:
-        - teardown_from | int >= 3
-        - not (stack_deleted | default(false) | bool)
-
-    # ── Step 4: Orphan scan (always) ──────────────────────────────────────
-    - name: Scan for orphan resources tagged with cluster name
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - "{{ item.svc }}"
-          - "{{ item.action }}"
-          - --RegionId
-          - "{{ region }}"
-          - --Tag.1.Key
-          - "kubernetes.io/cluster/{{ cluster_name }}"
-          - --Tag.1.Value
-          - owned
-          - --profile
-          - "{{ aliyun_profile }}"
-      register: orphan_scan
-      changed_when: false
-      failed_when: false
-      loop:
-        - { svc: ecs, action: DescribeInstances,      label: "ECS instances" }
-        - { svc: ecs, action: DescribeDisks,          label: "Disks (CSI orphans)" }
-        - { svc: ecs, action: DescribeSecurityGroups, label: "Security Groups" }
-        - { svc: slb, action: DescribeLoadBalancers,  label: "SLBs (CCM orphans)" }
-        - { svc: vpc, action: DescribeEipAddresses,   label: "EIPs" }
-        - { svc: vpc, action: DescribeNatGateways,    label: "NAT Gateways" }
-        - { svc: vpc, action: DescribeVSwitches,      label: "VSwitches" }
-        - { svc: vpc, action: DescribeVpcs,           label: "VPCs" }
-        - { svc: pvtz, action: DescribeZones,         label: "PrivateZones" }
-      loop_control:
-        label: "{{ item.label }}"
-
-    - name: Show orphan summary
-      ansible.builtin.debug:
-        msg: >-
-          {{ item.item.label }}: {{ item.stdout
-            | regex_findall('"InstanceId"|"DiskId"|"LoadBalancerId"|"AllocationId"')
-            | length }} found
-      loop: "{{ orphan_scan.results }}"
-      loop_control:
-        label: "{{ item.item.label }}"
-
-    # ── Step 5: Clear state ────────────────────────────────────────────────
-    # Three cases:
-    #
-    # Case A  teardown_from >= 3, keep_image=false  → full teardown
-    #         Everything deleted (AI + image + stack).  Wipe state.yml.
-    #         Next: Phase 01 → 02 → 03 → 04
-    #
-    # Case B  teardown_from >= 3, keep_image=true   → stack-only teardown
-    #         Only the Aliyun stack was deleted; AI records + image preserved.
-    #         Clear stack-derived IDs so Phase 03 creates a fresh stack,
-    #         but keep AI + image IDs so Phase 03/04 can reuse them.
-    #         Next: Phase 03 → Phase 04 (auto-reset handles cluster state)
-    #
-    # Case C  teardown_from < 3  → partial teardown (stack alive)
-    #         Clear only the IDs that were actually deleted (AI cluster + infra-env,
-    #         and optionally image IDs when keep_image=false + teardown_from >= 2).
-    #         Preserve all stack-derived IDs for Phase 03/04 reuse.
-    #         Next: Phase 01 → 02 → 03 → 04 (infra-env changed; new ECS image needed)
-
-    # Case A: full teardown
-    - name: Remove state.yml (full teardown — all resources deleted)
-      ansible.builtin.file:
-        path: "{{ playbook_dir }}/../state.yml"
-        state: absent
-      when:
-        - teardown_from | int >= 3
-        - not keep_image | bool
-        - stack_deleted | default(false) | bool
-
-    # Case B: stack deleted, AI records + image preserved
-    # mirror_* fields are also cleared — the mirror ECS belongs to the stack
-    # and was destroyed with it.  Phase 03 + Phase 01's "Resolve mirror init
-    # password (auto-generate if blank)" will regenerate a fresh password on
-    # rebuild, which will mismatch the stale one if it isn't cleared here.
-    - name: Clear stack IDs from state (stack rebuilt, AI records + image reused)
-      ansible.builtin.include_tasks: ../tasks/save_state.yml
-      vars:
-        new_state:
-          ros_stack_id: ''
-          vpc_id: ''
-          private_vswitch: ''
-          api_lb_endpoint: ''
-          worker_sg: ''
-          node_ram_role: ''
-          jump_host_ip: ''
-          master_ip1: ''
-          master_ip2: ''
-          master_ip3: ''
-          dynamic_manifest_file: ''
-          kubeconfig_path: ''
-          kubeadmin_password_path: ''
-          mirror_private_ip: ''
-          mirror_init_user: ''
-          mirror_init_password: ''
-          mirror_ca_cert_path: ''
-      when:
-        - teardown_from | int >= 3
-        - keep_image | bool
-        - stack_deleted | default(false) | bool
-        - state_stat.stat.exists
-
-    # Case C: partial teardown (teardown_from < 3, stack preserved)
-    - name: Clear deleted-resource IDs from state (partial teardown, stack preserved)
-      ansible.builtin.include_tasks: ../tasks/save_state.yml
-      vars:
-        # Always clear AI cluster + infra-env IDs (deleted in Step 1 for teardown_from < 3).
-        # Also clear image IDs when keep_image=false and teardown_from >= 2.
-        new_state: >-
-          {{ {'cluster_id': '', 'infra_env_id': ''}
-             | combine(
-                 {} if (keep_image | bool or teardown_from | int < 2)
-                 else {'ecs_image_id': '', 'iso_path': ''}
-               ) }}
-      when:
-        - teardown_from | int < 3
-        - state_stat.stat.exists
+        - name: Clear mirror_* + AI fields in state
+          ansible.builtin.include_tasks: ../tasks/save_state.yml
+          vars:
+            new_state:
+              mirror_stack_id: ''
+              mirror_vpc_id: ''
+              mirror_vpc_cidr: ''
+              mirror_private_vsw_1: ''
+              mirror_private_vsw_2: ''
+              mirror_public_vsw: ''
+              mirror_zone_id: ''
+              mirror_zone_id2: ''
+              mirror_node_ram_role: ''
+              mirror_private_ip: ''
+              mirror_registry_id: ''
+              jump_host_ip: ''
+              jump_host_sg_id: ''
+              mirror_init_password: ''
+              # Also clear the paired AI / image fields.
+              cluster_id: ''
+              infra_env_id: ''
+              ecs_image_id: ''
+              iso_path: ''
 
     - name: Teardown done
       ansible.builtin.debug:
         msg: |
-          ✓ Teardown phases 1–{{ teardown_from }} complete.
-          Check the Aliyun billing console in ~1 h to confirm zero ongoing charges.
+          ✓ split-teardown complete (target={{ teardown_target }}).
+
+          {% if teardown_target == 'cluster' %}
+          mirror-stack is untouched.  Re-run:
+            ansible-playbook ansible/playbooks/06-create-cluster-stack.yml
+            ansible-playbook ansible/playbooks/07-install-cluster.yml
+          {% elif teardown_target == 'mirror' %}
+          mirror gone (along with AI cluster + ECS image).  Full rebuild:
+            ansible-playbook ansible/playbooks/01-prepare-iso.yml
+            ansible-playbook ansible/playbooks/02-import-image.yml
+            ansible-playbook ansible/playbooks/03-create-mirror-stack.yml
+            ansible-playbook ansible/playbooks/04-prepare-mirror.yml
+            ansible-playbook ansible/playbooks/06-create-cluster-stack.yml
+            ansible-playbook ansible/playbooks/07-install-cluster.yml
+          {% else %}
+          Both stacks gone, state mostly cleared.  Full rebuild from Phase 01 → 02 → 03 → 04 → 05 → 06 → 07.
+          {% endif %}

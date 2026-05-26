@@ -1,6 +1,6 @@
 ---
 # mirror-prepare.yml — set up the mirror-registry on the bare ECS that
-# Phase 03's ROS stack created.  Runs AFTER Phase 03, BEFORE Phase 04.
+# Phase 03's mirror-stack created.  Runs AFTER Phase 03 (mirror-stack), BEFORE Phase 06 (cluster-stack).
 #
 # Why a separate playbook (not cloud-init):
 #   - Iterative debugging.  A bug in install/import logic doesn't force
@@ -15,7 +15,7 @@
 #   - Each "do work" task is guarded by a prior "check if already done" task.
 #   - Re-running on a fully-prepared mirror is a no-op (~30 seconds).
 #   - Re-running after a mid-flight failure resumes from the failed step.
-- name: Prepare mirror-registry on the bare ECS provisioned by Phase 03
+- name: Prepare mirror-registry on the bare ECS provisioned by Phase 03 (mirror-stack)
   hosts: local
   gather_facts: false
   vars:
@@ -40,7 +40,7 @@
       ansible.builtin.meta: end_play
       when: not (mirror_enabled | default(false) | bool)
 
-    - name: Sanity — Phase 03 ran with mirror_enabled and saved its outputs
+    - name: Sanity — Phase 03 (mirror-stack) ran with mirror_enabled and saved its outputs
       ansible.builtin.assert:
         that:
           - mirror_enabled | default(false) | bool
@@ -53,10 +53,10 @@
           - oss_bucket is defined and oss_bucket | length > 0
           - mirror_oss_object is defined and mirror_oss_object | length > 0
         fail_msg: |
-          Required state is missing.  This playbook runs AFTER Phase 03 and
+          Required state is missing.  This playbook runs AFTER Phase 03 (mirror-stack) and
           requires:
             - mirror_enabled=true in group_vars
-            - Phase 03 completed (state.yml has mirror_private_ip / jump_host_ip
+            - Phase 03 (mirror-stack) completed (state.yml has mirror_private_ip / jump_host_ip
               / cluster_id / infra_env_id)
             - mirror_oss_object / oss_bucket configured
 
@@ -468,7 +468,7 @@
     # (Mirror-completeness verification removed from this playbook —
     # ansible.builtin.shell heredocs containing jq / awk single-quoted
     # scripts trip the arg splitter ("unbalanced quotes").  Use a
-    # standalone 03c-mirror-verify.yml that template-renders a script
+    # standalone 05-verify-mirror.yml that template-renders a script
     # file instead, if you want a runtime gate.  We already trust the
     # build-side "✓ 192/192 + ✓ 3/3" check from oc-mirror v2.)
 
@@ -593,4 +593,4 @@
 
           Next step:
             ansible-playbook ansible/playbooks/mirror-verify.yml
-            ansible-playbook ansible/playbooks/04-install-cluster.yml
+            ansible-playbook ansible/playbooks/07-install-cluster.yml

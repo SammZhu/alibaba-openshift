@@ -29,7 +29,7 @@ Step 1 — Red Hat Hybrid Cloud Console
   └── Create cluster, set name + base domain, paste InstallConfig (from Step 2 output)
 
 Step 2 — Alibaba Cloud ROS  (InstallationMethod=Assisted, ImageId=<from Step 0>)
-  └── ros-templates/create-cluster.yaml
+  └── ros-templates/create-cluster-LEGACY.yaml
       ├── VPC / VSwitch (×3) / NAT / EIP / SNAT
       ├── Security Groups (master + worker, incl. 80/443 for Ingress)
       ├── RAM Role + Policy (Instance Principal — no AK/SK)
@@ -78,7 +78,7 @@ Step 2 — Prepare boot image
   📖 Detailed walkthrough: docs/boot-image-import.md
 
 Step 3 — Alibaba Cloud ROS  (InstallationMethod=Agent-based, ImageId=<from Step 2>)
-  └── ros-templates/create-cluster.yaml
+  └── ros-templates/create-cluster-LEGACY.yaml
       ├── Same infrastructure as Assisted
       ├── master-1 (RendezvousInstance) gets fixed private IP = RendezvousIp
       └── Outputs: InstallConfig / AgentConfig / DynamicCustomManifest
@@ -178,9 +178,9 @@ preparation.
 ansible-playbook ansible/playbooks/00-preflight.yml
 ansible-playbook ansible/playbooks/01-prepare-iso.yml
 ansible-playbook ansible/playbooks/02-import-image.yml
-ansible-playbook ansible/playbooks/03-create-stack.yml          # ← monolithic stack
-ansible-playbook ansible/playbooks/03b-mirror-prepare.yml
-ansible-playbook ansible/playbooks/04-install-cluster.yml
+ansible-playbook ansible/playbooks/03-create-stack-LEGACY.yml          # ← monolithic stack
+ansible-playbook ansible/playbooks/04-prepare-mirror.yml
+ansible-playbook ansible/playbooks/07-install-cluster.yml
 
 # teardown:
 ansible-playbook ansible/playbooks/99-teardown.yml \
@@ -203,19 +203,19 @@ install skips the 30-min mirror prep entirely.
 ansible-playbook ansible/playbooks/00-preflight.yml
 ansible-playbook ansible/playbooks/01-prepare-iso.yml
 ansible-playbook ansible/playbooks/02-import-image.yml
-ansible-playbook ansible/playbooks/02b-create-mirror-stack.yml    # ← persistent
-ansible-playbook ansible/playbooks/03b-mirror-prepare.yml         # ← one-time
-ansible-playbook ansible/playbooks/03-create-cluster-stack.yml    # ← short-lived
-ansible-playbook ansible/playbooks/04-install-cluster.yml
+ansible-playbook ansible/playbooks/03-create-mirror-stack.yml    # ← persistent
+ansible-playbook ansible/playbooks/04-prepare-mirror.yml         # ← one-time
+ansible-playbook ansible/playbooks/06-create-cluster-stack.yml    # ← short-lived
+ansible-playbook ansible/playbooks/07-install-cluster.yml
 
 # Cluster rebuild only (mirror survives, ~30 min faster):
-ansible-playbook ansible/playbooks/99-teardown-split.yml \
+ansible-playbook ansible/playbooks/99-teardown.yml \
   -e teardown_target=cluster -e teardown_confirmed=true
-ansible-playbook ansible/playbooks/03-create-cluster-stack.yml
-ansible-playbook ansible/playbooks/04-install-cluster.yml
+ansible-playbook ansible/playbooks/06-create-cluster-stack.yml
+ansible-playbook ansible/playbooks/07-install-cluster.yml
 
 # Full teardown (also removes mirror + AI cluster + ECS image):
-ansible-playbook ansible/playbooks/99-teardown-split.yml \
+ansible-playbook ansible/playbooks/99-teardown.yml \
   -e teardown_target=both -e teardown_confirmed=true
 ```
 
@@ -231,7 +231,7 @@ ansible-playbook ansible/playbooks/99-teardown-split.yml \
 The two flows write distinct fields in `state.yml`
 (`ros_stack_id` for A vs `mirror_stack_id` + `cluster_stack_id` for
 B) so they do not collide; teardown playbooks match accordingly
-(`99-teardown.yml` for A, `99-teardown-split.yml` for B).
+(`99-teardown.yml` for A, `99-teardown.yml` for B).
 
 ### One-time NLB service-linked role
 
@@ -272,7 +272,7 @@ exact command above if it's missing.
 ### Step 1 — Provision Infrastructure
 
 1. Open **Alibaba Cloud ROS Console** → Create Stack
-2. Upload `ros-templates/create-cluster.yaml`
+2. Upload `ros-templates/create-cluster-LEGACY.yaml`
 3. Fill in parameters:
 
    | Parameter | Value |
@@ -397,7 +397,7 @@ openshift-install agent create image --dir install-dir/
 ### Step 3 — Provision Infrastructure
 
 1. Open **Alibaba Cloud ROS Console** → Create Stack
-2. Upload `ros-templates/create-cluster.yaml`
+2. Upload `ros-templates/create-cluster-LEGACY.yaml`
 3. Fill in parameters — use the **exact same values** chosen in Step 0:
 
    | Parameter | Value |

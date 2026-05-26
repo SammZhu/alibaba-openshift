@@ -282,4 +282,4 @@
 
     - name: Phase 02 done
       ansible.builtin.debug:
-        msg: "ECS image {{ ecs_image_id }} ready — OSS ISO deleted — next: 03-create-stack.yml"
+        msg: "ECS image {{ ecs_image_id }} ready — OSS ISO deleted — next: 03-create-stack-LEGACY.yml"

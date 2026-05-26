@@ -125,7 +125,7 @@ git clone <url-to>/openshift-capi-alicloud.git
 ## Phase 1 — 创建云基础设施
 
 打开 [ROS 控制台](https://ros.console.aliyun.com/) → **Create Stack** → **Use the file**，
-上传 `ros-templates/create-cluster.yaml`，填以下参数：
+上传 `ros-templates/create-cluster-LEGACY.yaml`，填以下参数：
 
 | 参数 | 生产示例 | 测试（compact 3 节点）|
 |---|---|---|
@@ -216,7 +216,7 @@ openshift-install agent wait-for install-complete --dir install-dir/
 
 > 推荐用 Ansible（在跳板上）：
 > ```sh
-> ansible-playbook ansible/playbooks/05-deploy-post-install.yml
+> ansible-playbook ansible/playbooks/08-deploy-post-install.yml
 > ```
 
 或 shell 等价版本：
@@ -518,21 +518,21 @@ cd ansible && ansible-playbook playbooks/site.yml
 # ── 安装失败时的恢复（最常用）──────────────────────────────────────────
 # 安装中途失败（error/cancelled/installing-pending-user-action 等状态）
 # 直接重跑 Phase 04，auto-reset 自动处理，不需要 teardown
-ansible-playbook playbooks/04-install-cluster.yml
+ansible-playbook playbooks/07-install-cluster.yml
 
 # ── 重建栈但保留 image（节省 ~30 min 重新导入，最常用的 teardown）────
 # keep_image=true（默认）：AI 记录 + image 同时保留（凭证配对，缺一不可）
 # 删栈 → 重建栈 → Phase 04 auto-reset 重装
 ansible-playbook playbooks/99-teardown.yml -e teardown_from=3
-ansible-playbook playbooks/03-create-stack.yml
-ansible-playbook playbooks/04-install-cluster.yml
+ansible-playbook playbooks/03-create-stack-LEGACY.yml
+ansible-playbook playbooks/07-install-cluster.yml
 
 # ── 完整销毁（删 AI + image + 栈），需要全部重新跑 ────────────────────
 ansible-playbook playbooks/99-teardown.yml -e teardown_from=3 -e keep_image=false
 ansible-playbook playbooks/01-prepare-iso.yml
 ansible-playbook playbooks/02-import-image.yml
-ansible-playbook playbooks/03-create-stack.yml
-ansible-playbook playbooks/04-install-cluster.yml
+ansible-playbook playbooks/03-create-stack-LEGACY.yml
+ansible-playbook playbooks/07-install-cluster.yml
 
 # ── 集群已安装，含应用层清理，然后完整重建 ──────────────────────────
 ansible-playbook playbooks/99-teardown.yml -e teardown_from=4 -e keep_image=false
@@ -615,9 +615,9 @@ echo 'mirror_oss_object: "mirror-tarballs/aliocp1-4.20.tar"' >> ansible/group_va
 # Step 3: 正常跑 + 验证
 ansible-playbook ansible/playbooks/01-prepare-iso.yml
 ansible-playbook ansible/playbooks/02-import-image.yml
-ansible-playbook ansible/playbooks/03-create-stack.yml    # 多 ~30 min（mirror cloud-init）
-ansible-playbook ansible/playbooks/03c-mirror-verify.yml      # Phase 04 前 sanity check
-ansible-playbook ansible/playbooks/04-install-cluster.yml
+ansible-playbook ansible/playbooks/03-create-stack-LEGACY.yml    # 多 ~30 min（mirror cloud-init）
+ansible-playbook ansible/playbooks/05-verify-mirror.yml      # Phase 04 前 sanity check
+ansible-playbook ansible/playbooks/07-install-cluster.yml
 ```
 
 **完整文档（架构 / 成本 / 配置参考 / 扩展 operator + CCM / 详细故障排查）**：  
@@ -628,7 +628,7 @@ ansible-playbook ansible/playbooks/04-install-cluster.yml
 | Playbook | 用途 |
 |---------|------|
 | `mirror-rebuild.yml` | 刷新 mirror 镜像（不动 cluster），加 operator / 升级版本时用 |
-| `03c-mirror-verify.yml` | 健康检查 + 镜像存在验证 |
+| `05-verify-mirror.yml` | 健康检查 + 镜像存在验证 |
 
 ---
 

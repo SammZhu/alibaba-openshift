@@ -454,7 +454,7 @@
           {% if jump_host_ip | default('') | length > 0 %}
           Next: ssh -i {{ ssh_priv_key_file }} root@{{ jump_host_ip }}
                 cd /root/openshift-alibaba/alibaba-openshift
-                ansible-playbook ansible/playbooks/05-deploy-post-install.yml
+                ansible-playbook ansible/playbooks/08-deploy-post-install.yml
           {% else %}
-          Next: from inside the VPC, run 05-deploy-post-install.yml
+          Next: from inside the VPC, run 08-deploy-post-install.yml
           {% endif %}

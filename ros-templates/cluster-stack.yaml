@@ -19,7 +19,7 @@ Description: |
 
   Workflow:
     1. Create mirror-stack    (one-time)
-    2. Run 03b-mirror-prepare (one-time)
+    2. Run 04-prepare-mirror (one-time)
     3. Create cluster-stack   (this template; per-cluster)
     4. Run 04-install-cluster (per-cluster)
     5. Delete cluster-stack   (per-cluster; mirror-stack survives)
@@ -27,7 +27,7 @@ Description: |
 
 Parameters:
   # ── References to mirror-stack outputs (operator passes these in) ────────
-  # When invoked by ansible (03-create-cluster-stack.yml) these come
+  # When invoked by ansible (06-create-cluster-stack.yml) these come
   # straight from state.yml; for manual ROS-console creation, copy the
   # values from the mirror-stack outputs page.
   VpcId:

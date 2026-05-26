@@ -18,7 +18,7 @@ source "$(dirname "$0")/lib/common.sh"
 preflight
 state_require ECS_IMAGE_ID
 
-TEMPLATE_FILE="${REPO_ROOT}/ros-templates/create-cluster.yaml"
+TEMPLATE_FILE="${REPO_ROOT}/ros-templates/create-cluster-LEGACY.yaml"
 [ -f "$TEMPLATE_FILE" ] || die "Template not found: $TEMPLATE_FILE"
 SSH_PUB_KEY="$(<"$SSH_PUBLIC_KEY_FILE")"
 

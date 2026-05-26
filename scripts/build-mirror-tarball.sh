@@ -411,12 +411,12 @@ Next step — on your local ansible host:
   mirror_oss_object: $OSS_OBJECT
 
   # Spin up mirror ECS + import tarball:
-  ansible-playbook ansible/playbooks/03b-mirror-prepare.yml
+  ansible-playbook ansible/playbooks/04-prepare-mirror.yml
 
   # Then proceed with the normal cluster install:
   ansible-playbook ansible/playbooks/01-prepare-iso.yml
   ansible-playbook ansible/playbooks/02-import-image.yml
-  ansible-playbook ansible/playbooks/03-create-stack.yml
-  ansible-playbook ansible/playbooks/04-install-cluster.yml
+  ansible-playbook ansible/playbooks/03-create-stack-LEGACY.yml
+  ansible-playbook ansible/playbooks/07-install-cluster.yml
 ═══════════════════════════════════════════════════════════════════════
 EOF

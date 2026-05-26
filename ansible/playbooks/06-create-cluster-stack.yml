@@ -1,10 +1,10 @@
 ---
-# Phase 03 (split architecture) — Create the SHORT-LIVED cluster-stack
+# Phase 06 — Create the SHORT-LIVED cluster-stack
 # via ROS, consuming mirror-stack outputs from state.yml.
 #
-# This is the new "split architecture" Phase 03 (paired with
-# 02b-create-mirror-stack.yml).  Together they replace the legacy
-# 03-create-stack.yml + create-cluster.yaml.
+# This is the split architecture Phase 06 (paired with
+# 03-create-mirror-stack.yml).  Together they replace the legacy
+# 03-create-stack-LEGACY.yml + create-cluster.yaml.
 #
 # What this stack contains:
 #   - Control plane + worker SecurityGroups (+ cross-SG ingress)
@@ -33,7 +33,7 @@
           - mirror_node_ram_role is defined
         fail_msg: |
           Required mirror-stack outputs missing from state.yml.
-          Run 02b-create-mirror-stack.yml first.
+          Run 03-create-mirror-stack.yml first.
 
     - name: Sanity — ECS image was imported by Phase 02
       ansible.builtin.assert:
@@ -125,7 +125,7 @@
         dest: "{{ output_dir }}/alibaba-ccm-config.yaml"
         mode: "0644"
 
-    - name: Resolve forward-zone ID by name (for Phase 04 PTR/DNS PATCHes)
+    - name: Resolve forward-zone ID by name (for Phase 07 PTR/DNS PATCHes)
       ansible.builtin.command:
         argv:
           - aliyun
@@ -160,7 +160,7 @@
           reverse_zone_id2: "{{ reverse_zone_id2 }}"
           dynamic_manifest_file: "{{ output_dir }}/alibaba-ccm-config.yaml"
 
-    - name: Phase 03 (cluster-stack) done
+    - name: Phase 06 (cluster-stack) done
       ansible.builtin.debug:
         msg: |
           ✓ cluster-stack ready.
@@ -171,4 +171,4 @@
           master-3 IP  : {{ master_ip3 }}
 
           Next:
-            ansible-playbook ansible/playbooks/04-install-cluster.yml
+            ansible-playbook ansible/playbooks/07-install-cluster.yml

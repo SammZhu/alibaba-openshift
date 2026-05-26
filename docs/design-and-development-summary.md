@@ -107,7 +107,7 @@ alicloud://<region>.<instanceID>
 
 **仓库**：`SammZhu/alibaba-openshift`，分支 `main`
 
-#### 3.3.1 ROS 模板（`ros-templates/create-cluster.yaml`）
+#### 3.3.1 ROS 模板（`ros-templates/create-cluster-LEGACY.yaml`）
 
 替代 OCI 的 Terraform，使用阿里云原生 ROS（Resource Orchestration Service），规避 Terraform BSL 许可证问题。
 

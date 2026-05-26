@@ -15,9 +15,9 @@ Description: |
 
   Workflow:
     1. ROS create mirror-stack (one-time, ~15 min)
-    2. ansible-playbook 03b-mirror-prepare.yml (one-time, ~30 min)
+    2. ansible-playbook 04-prepare-mirror.yml (one-time, ~30 min)
     3. ROS create cluster-stack  (per-cluster, ~10 min)
-    4. ansible-playbook 04-install-cluster.yml (per-cluster, ~45-60 min)
+    4. ansible-playbook 07-install-cluster.yml (per-cluster, ~45-60 min)
     5. teardown cluster-stack    (per-cluster, ~5 min)
     6. repeat 3-5 freely; mirror-stack stays up
 
@@ -503,7 +503,7 @@ Resources:
           Fn::Sub: |
             #!/bin/bash
             # MINIMAL bootstrap — just make the host SSH-able and disk-mounted.
-            # 03b-mirror-prepare.yml does the rest (mirror-registry install,
+            # 04-prepare-mirror.yml does the rest (mirror-registry install,
             # oc-mirror import, PATCH Assisted Installer).
             set -euxo pipefail
             exec > /var/log/mirror-bootstrap.log 2>&1

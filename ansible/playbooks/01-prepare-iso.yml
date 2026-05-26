@@ -263,7 +263,7 @@
           insecure = true
 
           # Mirror destination paths come from oc-mirror's own ICSP — see
-          # comment on the analogous PATCH in 03b-mirror-prepare.yml.
+          # comment on the analogous PATCH in 04-prepare-mirror.yml.
           # oc-mirror v1 publishes both OCP repos into the `openshift`
           # namespace with *different* names from the source.
           [[registry]]

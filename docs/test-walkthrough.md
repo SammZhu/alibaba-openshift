@@ -15,8 +15,8 @@
 > 本文档详细解释每一步**为什么**和**手动该怎么点**，仅在出错排查或想理解机制时阅读。
 > 6 个 playbook 各自对应这里的一个 Phase：
 > `01-prepare-iso.yml` (A) / `02-import-image.yml` (A.2-4) /
-> `03-create-stack.yml` (B) / `04-install-cluster.yml` (C) /
-> `05-deploy-post-install.yml` (D，跳板上跑) / `99-teardown.yml` (G)。
+> `03-create-stack-LEGACY.yml` (B) / `07-install-cluster.yml` (C) /
+> `08-deploy-post-install.yml` (D，跳板上跑) / `99-teardown.yml` (G)。
 >
 > `scripts/` 下的 bash 等价版已弃用，留作快速参考。
 
@@ -42,10 +42,10 @@
 | Day 0 | 一次性准备 | （手动） |
 | A | 准备 OpenShift 引导镜像 | `ansible/playbooks/01-prepare-iso.yml` |
 | A.2-4 | 上传 OSS + 导入 ECS 镜像 | `ansible/playbooks/02-import-image.yml` |
-| B | 创建云基础设施 | `ansible/playbooks/03-create-stack.yml` |
-| C | 安装 OpenShift | `ansible/playbooks/04-install-cluster.yml` |
+| B | 创建云基础设施 | `ansible/playbooks/03-create-stack-LEGACY.yml` |
+| C | 安装 OpenShift | `ansible/playbooks/07-install-cluster.yml` |
 | — | 上述 A-C 一条龙 | `ansible/playbooks/site.yml` |
-| D | 应用 post-install 组件 | `ansible/playbooks/05-deploy-post-install.yml` |
+| D | 应用 post-install 组件 | `ansible/playbooks/08-deploy-post-install.yml` |
 | E | 功能验证 | （手动，参看本文 E 节） |
 | F | OPCT 合规性测试 | （手动，参看本文 F 节） |
 | G | 销毁 | `ansible/playbooks/99-teardown.yml` |
@@ -462,7 +462,7 @@ done
 
 1. 打开 [ROS 控制台](https://ros.console.aliyun.com/cn-wulanchabu/stacks/create)
 2. **Choose template** → **Use existing template** → **Upload template file**
-3. 选择本地的 `~/openshift-alibaba/alibaba-openshift/ros-templates/create-cluster.yaml`
+3. 选择本地的 `~/openshift-alibaba/alibaba-openshift/ros-templates/create-cluster-LEGACY.yaml`
 4. **Next**：**Stack Information**
    - **Stack Name**: `openshift-cluster1`
    - **Specify the rollback policy**: Disable（测试时禁用，方便看报错）
@@ -613,7 +613,7 @@ mv /root/kubeconfig ~/openshift-install/$CLUSTER_NAME/auth/kubeconfig
 chmod 600 ~/openshift-install/$CLUSTER_NAME/auth/kubeconfig
 ```
 
-> **想跳过手动下载？** 用 `ansible/playbooks/04-install-cluster.yml` 自动通过
+> **想跳过手动下载？** 用 `ansible/playbooks/07-install-cluster.yml` 自动通过
 > Assisted REST API 下载到 RHEL VM、并自动 scp 到跳板。
 
 **Console 上还会显示**:
@@ -717,7 +717,7 @@ oc get nodes
 cd /root/openshift-alibaba/alibaba-openshift
 
 # ── 推荐：Ansible 版本 ──
-ansible-playbook ansible/playbooks/05-deploy-post-install.yml
+ansible-playbook ansible/playbooks/08-deploy-post-install.yml
 
 # ── 或：shell 版本（等价，已弃用但保留）──
 ./scripts/05-deploy-post-install.sh

@@ -215,7 +215,7 @@ ImageId: m-bp1abcdef0123456789xyz
 ```sh
 aliyun ros CreateStack \
   --StackName openshift-cluster1 \
-  --TemplateBody "$(cat ros-templates/create-cluster.yaml)" \
+  --TemplateBody "$(cat ros-templates/create-cluster-LEGACY.yaml)" \
   --Parameters '[{"ParameterKey":"ImageId","ParameterValue":"m-bp1abcdef0123456789xyz"}, ...]'
 ```
 

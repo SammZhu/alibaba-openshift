@@ -1,5 +1,5 @@
 # Shared "create or adopt a ROS stack" task — invoked by both
-# 02b-create-mirror-stack.yml and 03-create-cluster-stack.yml.
+# 03-create-mirror-stack.yml and 06-create-cluster-stack.yml.
 #
 # Inputs (caller sets via include_tasks vars: { ... }):
 #   _cs_stack_name        Stack name (idempotent identifier)
@@ -19,7 +19,7 @@
 #   * Aborts loudly on CREATE_FAILED / DELETE_FAILED — operator must
 #     run 99-teardown to clean before re-running.
 #
-# Why this is small (~150 lines) versus the legacy 03-create-stack.yml
+# Why this is small (~150 lines) versus the legacy 03-create-stack-LEGACY.yml
 # (~900 lines): this version assumes each stack is single-purpose
 # (mirror OR cluster, not both).  The legacy playbook had to defend
 # against half-deleted monolithic stacks where the RAM role outlived

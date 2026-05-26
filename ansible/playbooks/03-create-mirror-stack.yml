@@ -1,9 +1,9 @@
 ---
-# Phase 02b — Create the PERSISTENT mirror-stack via ROS.
+# Phase 03 — Create the PERSISTENT mirror-stack via ROS.
 #
 # This is the new "split architecture" entrypoint (paired with the
-# rewritten 03-create-cluster-stack.yml).  Together they replace the
-# old monolithic 03-create-stack.yml + create-cluster.yaml.
+# rewritten 06-create-cluster-stack.yml).  Together they replace the
+# old monolithic 03-create-stack-LEGACY.yml + create-cluster.yaml.
 #
 # What this stack contains:
 #   - VPC, subnets, NAT, EIP, SNAT entries
@@ -12,7 +12,7 @@
 #   - Mirror-registry ECS + 200 GB data disk + dedicated SG
 #
 # This stack is created ONCE and survives cluster rebuilds.  Run
-# 03b-mirror-prepare.yml afterwards to install Quay + push images.
+# 04-prepare-mirror.yml afterwards to install Quay + push images.
 
 - name: Create mirror-stack
   hosts: local
@@ -128,7 +128,7 @@
           mirror_init_user:       "{{ mirror_init_user | default('mirror-admin') }}"
       no_log: true
 
-    - name: Phase 02b done
+    - name: Phase 03 done
       ansible.builtin.debug:
         msg: |
           ✓ mirror-stack ready.
@@ -140,6 +140,6 @@
           {% endif %}
 
           Next:
-            ansible-playbook ansible/playbooks/03b-mirror-prepare.yml
-            ansible-playbook ansible/playbooks/03-create-cluster-stack.yml
-            ansible-playbook ansible/playbooks/04-install-cluster.yml
+            ansible-playbook ansible/playbooks/04-prepare-mirror.yml
+            ansible-playbook ansible/playbooks/06-create-cluster-stack.yml
+            ansible-playbook ansible/playbooks/07-install-cluster.yml
