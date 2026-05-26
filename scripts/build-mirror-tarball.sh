@@ -187,8 +187,58 @@ fi
 # Output layout differs from v1:
 #   openshift-mirror/working-dir/      — staging, contains cluster-resources/
 #   openshift-mirror/mirror_*.tar      — image chunks
+#
+# IMPORTANT: oc-mirror v2 frequently exits 0 even when some images
+# failed to download (partial-success semantics).  set -e alone won't
+# catch this.  We tee the log and inspect afterwards to fail loudly
+# instead of shipping a half-baked tarball.
 echo "[3/6] Running oc-mirror v2 (will take 15-60 min depending on link speed)..."
-oc-mirror -c imageset-config.yaml file://./openshift-mirror --v2
+OC_MIRROR_LOG="$WORK_DIR/oc-mirror.log"
+oc-mirror -c imageset-config.yaml file://./openshift-mirror --v2 2>&1 | tee "$OC_MIRROR_LOG"
+OCM_RC=${PIPESTATUS[0]}
+
+echo "[3a/6] Validating oc-mirror output..."
+# Check 1: explicit exit code
+if [[ "$OCM_RC" != 0 ]]; then
+  echo "ERROR: oc-mirror exited with rc=$OCM_RC — aborting before upload."
+  exit 1
+fi
+# Check 2: error / failure lines in the log (v2 prints
+# "image X failed", "error", "ERRO", etc. even when rc=0)
+if grep -nEi '^(ERRO|error|failed|FATAL)|image .* failed|unable to (pull|copy)' \
+     "$OC_MIRROR_LOG" \
+     | grep -vEi 'no error|0 errors|warning|deprecation' \
+     | head -5 \
+     | grep -q .; then
+  echo "ERROR: oc-mirror reported failures in log — aborting before upload:"
+  grep -nEi '^(ERRO|error|failed|FATAL)|image .* failed|unable to (pull|copy)' \
+       "$OC_MIRROR_LOG" | grep -vEi 'no error|0 errors|warning|deprecation' | head -20
+  echo
+  echo "  full log: $OC_MIRROR_LOG"
+  echo "  fix the network / pull-secret / image-set config and re-run."
+  exit 1
+fi
+# Check 3: expected v2 output artefacts exist
+for f in openshift-mirror/working-dir/cluster-resources/idms-oc-mirror.yaml \
+         openshift-mirror/working-dir/cluster-resources; do
+  if [[ ! -e "$f" ]]; then
+    echo "ERROR: missing expected v2 artefact: $f"
+    echo "  oc-mirror likely didn't complete a full mirror.  Aborting."
+    exit 1
+  fi
+done
+# Check 4: rough size sanity (OCP 4.20 full release ≥ ~18 GB compressed
+# image content; anything noticeably smaller means many images missing).
+MIRROR_BYTES=$(du -sb ./openshift-mirror 2>/dev/null | awk '{print $1}')
+MIRROR_GB=$(( MIRROR_BYTES / 1024 / 1024 / 1024 ))
+MIN_GB="${MIRROR_MIN_GB:-18}"   # override for partial mirrors
+if (( MIRROR_GB < MIN_GB )); then
+  echo "ERROR: mirror content is only ${MIRROR_GB} GB, below threshold ${MIN_GB} GB."
+  echo "  This usually means oc-mirror skipped images silently."
+  echo "  If you intentionally built a partial mirror, set MIRROR_MIN_GB=<N>."
+  exit 1
+fi
+echo "    ✓ oc-mirror output looks complete (${MIRROR_GB} GB, idms generated, no error lines)"
 
 # Collect everything into one tarball; on the receive side the entire
 # directory tree gets handed back to oc-mirror via `--from file://...`.
