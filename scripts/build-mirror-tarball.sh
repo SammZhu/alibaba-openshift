@@ -221,6 +221,20 @@ echo "[3/6] Running oc-mirror v2 (will take 15-60 min depending on link speed)..
 echo "      cache dir : ${OC_MIRROR_CACHE_DIR:-$HOME/.oc-mirror}"
 echo "      retries   : ${OC_MIRROR_RETRIES:-10}"
 OC_MIRROR_LOG="$WORK_DIR/oc-mirror.log"
+
+# CRITICAL: wipe the per-run output dir before each oc-mirror invocation.
+# v2 tracks emitted blobs in openshift-mirror/working-dir/.history/ and
+# SKIPS re-emitting them on subsequent runs even when the imageset
+# explicitly asks for them — leaving the mirror_NNNNNN.tar chunks as
+# small incremental deltas instead of self-contained mirrors.  When we
+# ship that tar to a remote ECS and run d2m there, it has no cache to
+# fall back to and Quay ends up with thousands of missing blobs.
+#
+# Keep ~/.oc-mirror (the blob cache) — that's our cross-run speed-up
+# and is local to this build host anyway.  Just nuke the disk output
+# tree so the next run produces a fresh, complete tarball.
+echo "[3-pre] Wiping previous openshift-mirror/ output (keeping ~/.oc-mirror cache)..."
+rm -rf openshift-mirror
 # Note: --workspace is rejected in mirrorToDisk (file://) mode —
 # oc-mirror always uses <destination>/working-dir there.
 #
