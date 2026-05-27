@@ -139,11 +139,13 @@
       changed_when: false
 
     - name: Set forward_zone_id fact
+      # 不要用 json_query —— 需要 community.general collection，RHEL8 默认 ansible 没装。
+      # 直接 dict 取属性即可（同样幂等：找不到时 default({}) → .ZoneId 用 default('')）。
       ansible.builtin.set_fact:
         forward_zone_id: >-
-          {{ (_pvtz_list.stdout | from_json).Zones.Zone
-             | selectattr('ZoneName','equalto', cluster_name + '.' + base_domain)
-             | first | default({}) | combine({'ZoneId': ''}) | json_query('ZoneId') }}
+          {{ ((_pvtz_list.stdout | from_json).Zones.Zone
+              | selectattr('ZoneName','equalto', cluster_name + '.' + base_domain)
+              | list | first | default({})).ZoneId | default('') }}
 
     - name: Save cluster-stack facts to state
       ansible.builtin.include_tasks: ../tasks/save_state.yml
