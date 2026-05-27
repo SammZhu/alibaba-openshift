@@ -199,13 +199,44 @@
         - oc_mirror_present.rc | default(1) != 0
 
     # ── Step 5: download the 22 GB image tarball from OSS ────────────────────
+    #
+    # Idempotency policy: the outer tarball gets DELETED right before
+    # `oc-mirror import` runs (see "Reclaim tarball BEFORE import" task) to
+    # free disk for the cache.  So on a re-run after a failed import, the
+    # outer tarball is gone but the extracted v2 chunks
+    # (/var/lib/quay-storage/extracted/mirror_*.tar) are still there.
+    # Without this short-circuit, ansible would happily re-download 22 GB
+    # for nothing — Extract sees chunks present and skips, so the download
+    # is pure waste (~50 min on internal OSS bandwidth).
+    #
+    # Cheapest signal that the previous run got past extract: any v2 chunk
+    # file > 1 GB under extracted/.  If yes → skip download + size lookups
+    # + extract entirely and go straight to mirror-registry install.
+    - name: Check if v2 chunks already extracted (skip re-download if so)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euo pipefail
+        EXTRACTED=/var/lib/quay-storage/extracted
+        if ls "$EXTRACTED"/mirror_*.tar >/dev/null 2>&1 && \
+           [ "$(stat -c %s "$EXTRACTED"/mirror_*.tar | sort -n | tail -1)" -gt 1073741824 ]; then
+          echo PRESENT
+        else
+          echo MISSING
+        fi
+        REMOTE
+      register: chunks_check
+      changed_when: false
+      when: already_ready.rc != 0
+
     - name: Check if image tarball already on disk (correct size)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} 'stat -c%s /var/lib/quay-storage/mirror-tarball.tar 2>/dev/null || echo 0'
       register: tarball_size_check
       changed_when: false
       failed_when: false
-      when: already_ready.rc != 0
+      when:
+        - already_ready.rc != 0
+        - "'PRESENT' not in (chunks_check.stdout | default(''))"
 
     - name: Get expected tarball size from OSS
       ansible.builtin.shell: |
@@ -217,7 +248,9 @@
           | awk -F': *' '/Content-Length/ {print $2}'
       register: oss_size
       changed_when: false
-      when: already_ready.rc != 0
+      when:
+        - already_ready.rc != 0
+        - "'PRESENT' not in (chunks_check.stdout | default(''))"
       no_log: true
 
     - name: Download image tarball from OSS (with retries; aliyun multipart resumes from .temp)
@@ -240,6 +273,7 @@
       until: tarball_download.rc == 0
       when:
         - already_ready.rc != 0
+        - "'PRESENT' not in (chunks_check.stdout | default(''))"
         - (tarball_size_check.stdout | default('0') | int) != (oss_size.stdout | default('0') | trim | int)
 
     # ── Step 6a: generate a self-signed cert with IP SAN ─────────────────────
@@ -410,7 +444,9 @@
         echo "=== $(date -Iseconds) extract complete ==="
         ls -lh "$EXTRACTED"/mirror_*.tar
         REMOTE
-      when: already_ready.rc != 0
+      when:
+        - already_ready.rc != 0
+        - "'PRESENT' not in (chunks_check.stdout | default(''))"
 
     # Reclaim ~25 GB BEFORE the import phase — the outer tarball is no
     # longer needed once extracted/mirror_*.tar is on disk, and oc-mirror
@@ -425,7 +461,9 @@
         rm -f /var/lib/quay-storage/mirror-tarball.tar
         df -h /var/lib/quay-storage
         REMOTE
-      when: already_ready.rc != 0
+      when:
+        - already_ready.rc != 0
+        - "'PRESENT' not in (chunks_check.stdout | default(''))"
       changed_when: true
 
     # The imageset-config.yaml that oc-mirror v2 d2m needs is NOT shipped
