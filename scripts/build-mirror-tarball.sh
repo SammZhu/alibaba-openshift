@@ -303,13 +303,14 @@ echo "    ✓ oc-mirror output looks complete (${CHUNK_COUNT} chunk(s), ${CHUNK_
 
 # Collect everything into one tarball; on the receive side the entire
 # directory tree gets handed back to oc-mirror via `--from file://...`.
-# IMPORTANT: copy imageset-config.yaml *into* ./openshift-mirror/ first.
-# oc-mirror v2 d2m requires -c <isc>; if the file is missing the
-# downstream 03b falls back to a `mirror: {}` stub and the d2m exits
-# with "No images to mirror".  Shipping the real isc inside the tarball
-# guarantees the d2m sees the same image set the m2d built.
-echo "[4/6] Packaging mirror data into single tarball..."
-cp -f imageset-config.yaml ./openshift-mirror/imageset-config.yaml
+# The imageset-config.yaml is NOT bundled into the tarball — it gets
+# uploaded as a separate OSS sibling object below (see step 6b).
+# Phase 04 downloads it onto the mirror ECS at import time via the same
+# ECS-RAM-role path used for the tarball.  Decoupling means:
+#   - 任何能访问 OSS 的 ansible 控制机都能跑 04，不必跟构建机同台
+#   - 编辑 isc (加 operator catalog 等) → 仅需重传 isc + 重跑 04，
+#     不必重打/重传 22 GB tarball
+echo "[4/6] Packaging mirror data into single tarball (isc 单独走 OSS sibling，不进 tar)..."
 TARBALL_PATH="$WORK_DIR/$TARBALL_NAME"
 tar -cf "$TARBALL_PATH" -C ./openshift-mirror .
 
@@ -337,6 +338,16 @@ aliyun oss cp "$TARBALL_PATH" "oss://${OSS_BUCKET}/${OSS_OBJECT}" \
     --part-size=104857600 --parallel=10 --force
 
 aliyun oss cp "${TARBALL_PATH}.sha256" "oss://${OSS_BUCKET}/${OSS_OBJECT}.sha256" \
+    --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
+    --force
+
+# Upload imageset-config.yaml as a sibling object next to the tarball.
+# Phase 04 (ansible/playbooks/04-prepare-mirror.yml) downloads this onto
+# the mirror ECS at import time.  Keeping it OUTSIDE the tarball means
+# the isc can be re-uploaded standalone (after editing operator catalogs
+# etc.) without re-shipping the 22 GB tarball.
+echo "[6b/8] Uploading imageset-config.yaml as OSS sibling..."
+aliyun oss cp "imageset-config.yaml" "oss://${OSS_BUCKET}/${OSS_OBJECT}.imageset-config.yaml" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
     --force
 

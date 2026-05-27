@@ -428,6 +428,40 @@
       when: already_ready.rc != 0
       changed_when: true
 
+    # The imageset-config.yaml that oc-mirror v2 d2m needs is NOT shipped
+    # inside the tarball anymore — it lives in OSS next to the tarball
+    # as a sibling object (built by scripts/build-mirror-tarball.sh and
+    # uploaded to `${OSS_OBJECT}.imageset-config.yaml`).  Here we download
+    # it onto the mirror ECS via the same ECS-RAM-role path used for the
+    # tarball itself.  Decoupling from the tarball means:
+    #   - 任何能访问 OSS 的 ansible 控制机都能跑 04，不必跟当初打 tarball 的那台机器同一台
+    #   - 编辑 isc（如加 operator catalog）→ 只需重传 isc + 重跑 04，
+    #     不必重打 / 重传 22 GB tarball
+    #   - 失败模式 "ISC 缺失 → mirror: {} stub → no images to copy"
+    #     被下面的 fail-fast assert 拦截，不再静默 3 分钟空跑
+    - name: Download imageset-config.yaml from OSS to mirror ECS
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        echo "=== $(date -Iseconds) 从 OSS 下载 imageset-config.yaml ==="
+        aliyun oss cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}.imageset-config.yaml" \
+          /var/lib/quay-storage/extracted/imageset-config.yaml \
+          --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
+          --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
+          --region "{{ region }}" --force
+        # 防御：80 bytes 是旧的空 stub `mirror: {}` 的大小，真 isc 至少 300+ bytes
+        SIZE=$(stat -c%s /var/lib/quay-storage/extracted/imageset-config.yaml)
+        if [ "$SIZE" -lt 100 ]; then
+          echo "致命错误：下载下来的 imageset-config.yaml 只有 ${SIZE} bytes，疑似空 stub。"
+          echo "检查 OSS 对象：oss://{{ oss_bucket }}/{{ mirror_oss_object }}.imageset-config.yaml"
+          echo "可能是 build-mirror-tarball.sh 上传步骤没跑完，请重跑 build 脚本。"
+          exit 2
+        fi
+        echo "    ✓ imageset-config.yaml 已就位 (${SIZE} bytes)"
+        REMOTE
+      when: already_ready.rc != 0
+      changed_when: true
+
     - name: Import image tarball into mirror-registry — oc-mirror v2 (~15-20 min)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
@@ -437,14 +471,12 @@
         cd /var/lib/quay-storage/extracted
         # oc-mirror v2 disk-to-mirror syntax:
         #   oc-mirror -c <isc> --from file://<dir> docker://<reg> --v2
-        # The imageset-config.yaml is inside the tarball (added by builder
-        # in v2 mode); if missing, write a minimal stub so v2 can still run.
+        # imageset-config.yaml was just scp-ed up in the previous task —
+        # no stub fallback, no in-band heredoc.  If it is somehow still
+        # missing at this point, oc-mirror v2 will fail loud rather than
+        # silently producing "No images to mirror" from an empty stub.
         ISC=imageset-config.yaml
-        [ -s "$ISC" ] || cat > "$ISC" <<'YAML'
-        apiVersion: mirror.openshift.io/v2alpha1
-        kind: ImageSetConfiguration
-        mirror: {}
-        YAML
+        test -s "$ISC" || { echo "致命错误：$ISC 在 mirror ECS 上不存在或为空 —— 上一步 scp 没跑成功？"; exit 2; }
         # parallel-images=1 + parallel-layers=1 forces serial copy.
         # Defaults are 4 images x 5 layers = 20 concurrent goroutines
         # which OOM-kills oc-mirror on small mirror ECS during the

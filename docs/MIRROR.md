@@ -592,7 +592,7 @@ peak                       ≈82 GB（第一次 reclaim 前的窗口）
 | `Killed` 在 <1 秒内 | 启动 fork 时全局 OOM（Quay-app 占 ~3 GB） | 同上 |
 | `no space left on device ... /root/.oc-mirror/...` | 默认 `--cache-dir` 在 `$HOME`（系统盘 40 GB） | `--cache-dir /var/lib/quay-storage/oc-mirror-cache`（数据盘）|
 | `no space left on device ... working-dir/cluster-resources/idms-oc-mirror.yaml` | 数据盘满（tarball+extracted+cache+datastorage+swap > 100 GB） | 默认 `MirrorDataDiskSize=200`；03b 在 import 前 rm 掉 tarball |
-| `No images to mirror` / `[Executor] no images to copy` | `imageset-config.yaml` 不在 tarball 里，03b 写了 `mirror: {}` stub | build 把 isc 复制进 `openshift-mirror/` 再 tar；已有 tarball 临时 scp 本地副本到 mirror |
+| `No images to mirror` / `[Executor] no images to copy` | `imageset-config.yaml` 在 mirror ECS 上是空 stub | build 脚本把 isc 作为 OSS sibling 上传到 `${OSS_OBJECT}.imageset-config.yaml`；04 在 import 前从 OSS 下载到 mirror ECS 并 fail-fast assert（size < 100 bytes 即报错）；不再进 tarball |
 | `0 / 3 additional images mirrored` 但无错误 | v2 静默跳过某些 tag-form `additionalImages` | build script `skopeo inspect` 把 tag → digest，digest 形式写 isc |
 | oc-mirror exit 0 + report N/N 但 Quay 仍空 | v1 时代；oc-mirror 复用了 `.history/` 决定 noop | 用 v2；同时每次 m2d 前 `rm -rf openshift-mirror/` |
 | `mirror_000001.tar` 比预期小（e.g. 6 GB vs 25 GB） | v2 m2d emit 增量 chunk，除非 dest dir 是空 | build script 每次 m2d 前 `rm -rf openshift-mirror` |
