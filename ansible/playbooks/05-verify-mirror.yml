@@ -154,6 +154,10 @@
           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
           -o "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
           root@{{ mirror_private_ip }}
+      # block + always 保证：无论快照流程哪一步炸了，Quay 都会被拉起来。
+      # 之前 podman stop 之后碰到 systemd auto-restart 的 race 导致后续 task
+      # 失败，Quay 卡在 stopped 状态需要人工救活。改用 systemctl 是 mirror-
+      # registry 自己的管理方式（quay-{app,postgres,redis,pod}.service）。
       block:
         - name: 快照前清理瞬态文件（释放 ~28 GB，缩小快照体积）
           ansible.builtin.shell: |
@@ -165,11 +169,17 @@
             REMOTE
           changed_when: true
 
-        - name: 静默 Quay（停容器，确保 Postgres 一致点）
+        - name: 静默 Quay（systemctl stop，确保 Postgres 一致点）
           ansible.builtin.shell: |
             {{ _ssh_to_mirror }} bash <<'REMOTE'
             set -euxo pipefail
-            podman stop quay-app quay-redis quay-postgres || true
+            # mirror-registry 把每个容器注册成 systemd service，systemd 会
+            # auto-restart 任何 podman 进程死掉的容器。必须停 service 而不是
+            # 容器，否则会被 systemd 立刻拉起 + race 出 "no such container"。
+            systemctl stop quay-app.service quay-redis.service quay-postgres.service || true
+            # quay-pod.service 不停：infra container 死掉会摧毁 pod，data
+            # 卷绑挂掉，反而更复杂。只要 app/redis/postgres 停，Postgres 会
+            # checkpoint，足够拿一致点。
             sync; sync; sync
             REMOTE
           changed_when: true
@@ -264,16 +274,37 @@
             _new_vda_snap_id: "{{ (_create_vda_snap.stdout | from_json).SnapshotId }}"
             _new_vdb_snap_id: "{{ (_create_vdb_snap.stdout | from_json).SnapshotId }}"
 
-        - name: 重启 Quay（快照已注册时间点，可立刻恢复服务）
+      # always 块：无论上面 block 内哪步炸，都把 Quay 拉起来。
+      # 之前一次失败正是因为 restart Quay 是普通 task，前面任一 task fail
+      # 就跳过它，Quay 卡在 stopped。
+      always:
+        - name: 恢复 Quay（systemctl start + 健康轮询，无论快照是否成功）
           ansible.builtin.shell: |
             {{ _ssh_to_mirror }} bash <<'REMOTE'
             set -euxo pipefail
-            podman start quay-postgres quay-redis quay-app
-            until curl -ksf https://{{ mirror_private_ip }}:8443/health/instance; do sleep 5; done
-            echo "Quay 恢复服务"
+            systemctl start quay-postgres.service quay-redis.service quay-app.service || true
+            for i in $(seq 1 60); do
+              curl -ksf https://{{ mirror_private_ip }}:8443/health/instance && { echo "Quay healthy"; exit 0; }
+              sleep 5
+            done
+            echo "Quay 健康检查超时（5 min）"; exit 1
             REMOTE
           changed_when: true
 
+    # ── 第二个 block：快照完成后的处理（等 100% / 删旧 / 存 state）
+    # 单独分一个 block 是因为如果上面的 block always 把 Quay 拉起来时失败
+    # 了（极少见，但万一），我们不想后面这些 cleanup 也跑——但如果 Quay
+    # 拉起来成功，且快照创建成功，这里就该继续。
+    # 用 when 检查 _new_vda_snap_id / _new_vdb_snap_id 是否定义即可。
+    - name: 快照后处理（等待 + 覆盖 + 存 state）
+      when:
+        - mirror_snapshot_enabled | default(true) | bool
+        - _new_vda_snap_id is defined
+        - _new_vdb_snap_id is defined
+      vars:
+        _snap_system_name: "{{ cluster_name }}-mirror-system"
+        _snap_data_name:   "{{ cluster_name }}-mirror-data"
+      block:
         - name: 等待两个快照传到 OSS 完成（Progress=100%；最长 30 min）
           ansible.builtin.command:
             argv:
