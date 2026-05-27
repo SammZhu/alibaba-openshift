@@ -210,6 +210,51 @@
           failed_when: false
           changed_when: false
 
+        # ── 可选：连同 mirror snapshot 一起删（默认保留，便于下次 fast-path 重建）
+        # 用法：-e delete_mirror_snapshots=true
+        # 不删时：下次跑 03 会用同名快照创建 image 并 fast-path 起 ECS
+        # 删后：下次跑 03 检测不到 snapshot id（被清出 state）→ 走 fresh
+        #       bring-up 路径，Phase 04 会完整执行 ~1 小时 import。
+        - name: 删除 mirror snapshot（仅当 delete_mirror_snapshots=true）
+          when:
+            - delete_mirror_snapshots | default(false) | bool
+            - item is defined
+            - item | length > 0
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DeleteSnapshot
+              - --RegionId
+              - "{{ region }}"
+              - --SnapshotId
+              - "{{ item }}"
+              - --profile
+              - "{{ aliyun_profile }}"
+          loop:
+            - "{{ mirror_snapshot_system_id | default('') }}"
+            - "{{ mirror_snapshot_data_id   | default('') }}"
+          failed_when: false
+          changed_when: true
+
+        - name: 删除从快照派生的自定义 image（仅当 delete_mirror_snapshots=true）
+          when: delete_mirror_snapshots | default(false) | bool
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DeleteImage
+              - --RegionId
+              - "{{ region }}"
+              - --ImageName
+              - "{{ cluster_name }}-mirror-system-from-snap"
+              - --Force
+              - "true"
+              - --profile
+              - "{{ aliyun_profile }}"
+          failed_when: false
+          changed_when: true
+
         - name: Clear mirror_* + AI fields in state
           ansible.builtin.include_tasks: ../tasks/save_state.yml
           vars:
@@ -228,6 +273,10 @@
               jump_host_ip: ''
               jump_host_sg_id: ''
               mirror_init_password: ''
+              # 快照 ID 仅在 delete_mirror_snapshots=true 时清空。
+              # 默认保留 → 下次 03 自动走 fast-path。
+              mirror_snapshot_system_id: "{{ '' if (delete_mirror_snapshots | default(false) | bool) else (mirror_snapshot_system_id | default('')) }}"
+              mirror_snapshot_data_id:   "{{ '' if (delete_mirror_snapshots | default(false) | bool) else (mirror_snapshot_data_id   | default('')) }}"
               # Also clear the paired AI / image fields.
               cluster_id: ''
               infra_env_id: ''

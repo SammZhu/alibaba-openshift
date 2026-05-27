@@ -125,8 +125,29 @@ Parameters:
       + swap) is ~100-110 GB for a full OCP release.  200 GB leaves comfortable
       headroom for re-runs without manual cleanup.
 
+  MirrorOverrideImageId:
+    Type: String
+    Default: ""
+    Description: |
+      Optional custom ECS ImageId.  When non-empty, overrides the auto-discovered
+      RHEL image for the mirror registry instance — used by Phase 03 to launch
+      the mirror ECS from a snapshot-derived custom image (fast-path restore,
+      skips Phase 04's 1-hour oc-mirror import).
+      Pair with MirrorDataDiskSnapshotId — single-disk restore leaves Postgres
+      metadata on vda out of sync with blobs on vdb.
+
+  MirrorDataDiskSnapshotId:
+    Type: String
+    Default: ""
+    Description: |
+      Optional snapshot ID for the data disk (/var/lib/quay-storage).  When
+      non-empty, the data disk is created from this snapshot instead of blank.
+      cloud-init will detect existing XFS and skip mkfs.
+
 Conditions:
   HasJumpHost: !Equals [!Ref EnableJumpHost, true]
+  HasOverrideImage: !Not [!Equals [!Ref MirrorOverrideImageId, ""]]
+  HasDataSnapshot:  !Not [!Equals [!Ref MirrorDataDiskSnapshotId, ""]]
 
 Resources:
   # ── Networking ───────────────────────────────────────────────────────────────
@@ -484,7 +505,13 @@ Resources:
       InstanceName: !Sub '${ClusterName}-mirror-registry'
       HostName: !Sub '${ClusterName}-mirror'
       InstanceType: !Ref MirrorInstanceType
-      ImageId: !Select [0, !GetAtt MirrorImageLookup.ImageIds]
+      # ImageId: snapshot fast-path uses MirrorOverrideImageId (a custom
+      # image derived from the system-disk snapshot via CreateImage), else
+      # fall back to the auto-discovered base RHEL image.
+      ImageId: !If
+        - HasOverrideImage
+        - !Ref MirrorOverrideImageId
+        - !Select [0, !GetAtt MirrorImageLookup.ImageIds]
       SecurityGroupId: !Ref MirrorSecurityGroup
       VSwitchId: !Ref PrivateVSwitch
       PrivateIpAddress: !Ref MirrorPrivateIp
@@ -495,6 +522,9 @@ Resources:
           Size: !Ref MirrorDataDiskSize
           Device: /dev/xvdb
           DiskName: !Sub '${ClusterName}-mirror-data'
+          # SnapshotId restores the data disk from the saved snapshot;
+          # empty string = blank disk (mkfs will run in cloud-init).
+          SnapshotId: !Ref MirrorDataDiskSnapshotId
       AllocatePublicIP: false
       RamRoleName: !GetAtt MirrorRamRole.RoleName
       PasswordInherit: true
@@ -515,10 +545,20 @@ Resources:
 
             DATA_DISK=/dev/vdb
             for i in $(seq 1 60); do [ -b "$DATA_DISK" ] && break; sleep 2; done
-            mkfs.xfs -f "$DATA_DISK"
+            # Idempotent: only mkfs when no FS detected.  This is critical
+            # for the snapshot-restore fast-path — the data disk is created
+            # FROM the saved snapshot and already has an XFS containing
+            # Quay's datastorage; mkfs would WIPE it.
+            if ! blkid -s TYPE -o value "$DATA_DISK" | grep -q .; then
+              echo "no filesystem on $DATA_DISK — mkfs.xfs (blank-disk path)"
+              mkfs.xfs -f "$DATA_DISK"
+            else
+              echo "filesystem already present on $DATA_DISK — skipping mkfs (snapshot-restore path)"
+            fi
             mkdir -p /var/lib/quay-storage
-            mount "$DATA_DISK" /var/lib/quay-storage
-            echo "$DATA_DISK /var/lib/quay-storage xfs defaults 0 0" >> /etc/fstab
+            mountpoint -q /var/lib/quay-storage || mount "$DATA_DISK" /var/lib/quay-storage
+            grep -q "$DATA_DISK /var/lib/quay-storage" /etc/fstab || \
+              echo "$DATA_DISK /var/lib/quay-storage xfs defaults 0 0" >> /etc/fstab
 
             # Add 8 GB swap on the data disk so oc-mirror v2 import does
             # not get OOM-killed on small mirror instance types

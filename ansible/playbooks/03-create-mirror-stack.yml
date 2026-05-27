@@ -34,6 +34,115 @@
              else (lookup('password', '/dev/null length=20 chars=ascii_letters,digits')) }}
       no_log: true
 
+    # ─── 快照快速恢复路径 ────────────────────────────────────────────────────────
+    # 如果 state.yml 里有 mirror_snapshot_system_id + mirror_snapshot_data_id
+    # （由 05-verify-mirror.yml 的快照步骤写入），则用它们恢复 mirror ECS：
+    #   - system 盘：先 CreateImage 把 vda 快照转成 ECS 自定义 image
+    #     （ROS 的 ALIYUN::ECS::Instance 不直接吃 SystemDiskSnapshotId），
+    #     然后把 ImageId 通过 MirrorOverrideImageId 参数传给 stack。
+    #   - data 盘：直接通过 MirrorDataDiskSnapshotId 让 ROS 在 DiskMappings
+    #     里指定 SnapshotId（ROS 原生支持）。
+    # 没有快照 → 走传统空盘 + cloud-init bootstrap + Phase 04 完整导入。
+    # 强制走慢路径：-e mirror_restore_from_snapshot=false
+    - name: 判定是否走快照恢复路径
+      ansible.builtin.set_fact:
+        _mirror_restore_from_snapshot: >-
+          {{ (mirror_restore_from_snapshot | default(true) | bool)
+             and (mirror_snapshot_system_id | default('') | length > 0)
+             and (mirror_snapshot_data_id   | default('') | length > 0) }}
+
+    - name: 快照路径生效提示
+      ansible.builtin.debug:
+        msg: |
+          {% if _mirror_restore_from_snapshot %}
+          ✓ 检测到快照，将走 fast-path 恢复 mirror ECS：
+              system snapshot : {{ mirror_snapshot_system_id }}
+              data   snapshot : {{ mirror_snapshot_data_id }}
+            （会先把 system snapshot 转成自定义 image，再用它启 ECS。
+             ECS 起来后 Quay 已就绪，Phase 04 会被现有 "already prepared"
+             检查直接跳过整个 download/install/import 流程。）
+          {% else %}
+          → 走 fresh bring-up 路径（无快照或被显式禁用）。
+            Phase 04 会完整执行 download tarball + install Quay + oc-mirror import。
+          {% endif %}
+
+    - name: （快照路径）查询是否已有同名自定义 image（幂等：跳过重复 CreateImage）
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeImages
+          - --RegionId
+          - "{{ region }}"
+          - --ImageName
+          - "{{ cluster_name }}-mirror-system-from-snap"
+          - --ImageOwnerAlias
+          - self
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _existing_image_query
+      when: _mirror_restore_from_snapshot
+      changed_when: false
+
+    - name: （快照路径）记录已有 image id（如果有）
+      ansible.builtin.set_fact:
+        _existing_image_id: >-
+          {{ ((_existing_image_query.stdout | default('{}') | from_json).Images.Image
+              | default([])
+              | selectattr('Status','equalto','Available')
+              | list | map(attribute='ImageId') | first) | default('') }}
+      when: _mirror_restore_from_snapshot
+
+    - name: （快照路径）从 system snapshot 创建自定义 image（仅当不存在时）
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - CreateImage
+          - --RegionId
+          - "{{ region }}"
+          - --SnapshotId
+          - "{{ mirror_snapshot_system_id }}"
+          - --ImageName
+          - "{{ cluster_name }}-mirror-system-from-snap"
+          - --Description
+          - "Built from mirror-system snapshot for fast-path restore"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _create_image_result
+      when:
+        - _mirror_restore_from_snapshot
+        - _existing_image_id | length == 0
+
+    - name: （快照路径）解析新 image id
+      ansible.builtin.set_fact:
+        _mirror_override_image_id: >-
+          {{ _existing_image_id
+             if (_existing_image_id | length > 0)
+             else (_create_image_result.stdout | from_json).ImageId }}
+      when: _mirror_restore_from_snapshot
+
+    - name: （快照路径）等待自定义 image 进入 Available（最长 15 min）
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeImages
+          - --RegionId
+          - "{{ region }}"
+          - --ImageId
+          - "{{ _mirror_override_image_id }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _image_poll
+      retries: 30
+      delay: 30
+      until: >-
+        ((_image_poll.stdout | from_json).Images.Image
+         | default([]) | selectattr('Status','equalto','Available') | list | length) == 1
+      when: _mirror_restore_from_snapshot
+      changed_when: false
+
     - name: Read SSH public key
       ansible.builtin.slurp:
         src: "{{ ssh_pub_key_file }}"
@@ -79,6 +188,11 @@
             ParameterValue: "{{ mirror_instance_type }}"
           - ParameterKey: MirrorDataDiskSize
             ParameterValue: "{{ mirror_data_disk_size | string }}"
+          # 快照路径才有值；空字符串 = ROS 走默认空盘 + auto-discovered image。
+          - ParameterKey: MirrorOverrideImageId
+            ParameterValue: "{{ _mirror_override_image_id | default('') }}"
+          - ParameterKey: MirrorDataDiskSnapshotId
+            ParameterValue: "{{ mirror_snapshot_data_id if _mirror_restore_from_snapshot else '' }}"
 
     - name: Create / adopt mirror-stack
       ansible.builtin.include_tasks: ../tasks/create_stack.yml
@@ -137,6 +251,13 @@
           Mirror IP    : {{ mirror_registry_ip }}
           {% if mirror_jump_host_ip | length > 0 %}
           Jump host    : {{ mirror_jump_host_ip }}
+          {% endif %}
+          {% if _mirror_restore_from_snapshot %}
+          路径         : 从快照恢复 (fast-path)
+                        04 将由 "already prepared" 检查直接跳过 import。
+          {% else %}
+          路径         : 全新部署 (slow-path)
+                        04 会完整执行 ~1 小时 oc-mirror import。
           {% endif %}
 
           Next:
