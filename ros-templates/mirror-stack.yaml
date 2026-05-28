@@ -508,10 +508,11 @@ Resources:
       # ImageId: snapshot fast-path uses MirrorOverrideImageId (a custom
       # image derived from the system-disk snapshot via CreateImage), else
       # fall back to the auto-discovered base RHEL image.
-      ImageId: !If
-        - HasOverrideImage
-        - !Ref MirrorOverrideImageId
-        - !Select [0, !GetAtt MirrorImageLookup.ImageIds]
+      # MUST use inline !If form — Aliyun ROS YAML parser silently picks
+      # the wrong branch with the multi-line block form, even when the
+      # condition is correctly defined.  (Confirmed by debugging: param
+      # was passed correctly but ECS still booted from the discovery image.)
+      ImageId: !If [HasOverrideImage, !Ref MirrorOverrideImageId, !Select [0, !GetAtt MirrorImageLookup.ImageIds]]
       SecurityGroupId: !Ref MirrorSecurityGroup
       VSwitchId: !Ref PrivateVSwitch
       PrivateIpAddress: !Ref MirrorPrivateIp
