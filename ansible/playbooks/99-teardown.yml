@@ -34,6 +34,8 @@
   vars:
     teardown_target: cluster        # cluster | mirror | both
     teardown_confirmed: false
+    teardown_preserves_ai: false    # mirror teardown 时是否保留 AI cluster + infra-env + ECS image
+    delete_mirror_snapshots: false  # 是否连同 mirror snapshot 一起删
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
     - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
@@ -43,12 +45,30 @@
         that: teardown_target in ['cluster', 'mirror', 'both']
         fail_msg: "teardown_target must be one of: cluster, mirror, both"
 
+    # teardown_preserves_ai=true 只在打算"快照恢复 mirror"时用：
+    # AI cluster install-config 里 PATCH 过的 trustBundle + IDMS 都引用
+    # 旧 mirror 的 CA 和 IP；快照恢复出来的 mirror ECS CA / IP 都没变，
+    # 所以 AI 这边可以完整复用。但如果同时让 snapshot 也被删，就没意义了
+    # （快照都没了哪能恢复），所以两个标志互斥时拒绝。
+    - name: Reject preserves_ai + delete_snapshots 同时为 true
+      ansible.builtin.assert:
+        that: not (teardown_preserves_ai | bool and delete_mirror_snapshots | bool)
+        fail_msg: |
+          teardown_preserves_ai=true 跟 delete_mirror_snapshots=true 互斥。
+          preserves_ai 假设你下次用 snapshot 恢复 mirror（AI install-config 引用
+          的 CA/IP 在快照里都还有效）；snapshot 都删了 AI 留着也没用，
+          AI 的 ignition 跟新 mirror 对不上。
+          要么走 snapshot 恢复（preserves_ai=true, snapshot 不删），
+          要么走 fresh 重建（preserves_ai=false, snapshot 可删可不删）。
+
     - name: Show scope + confirm
       ansible.builtin.pause:
         prompt: |
 
           Split-architecture teardown for cluster '{{ cluster_name }}':
-            target = {{ teardown_target }}
+            target                   = {{ teardown_target }}
+            teardown_preserves_ai    = {{ teardown_preserves_ai }}
+            delete_mirror_snapshots  = {{ delete_mirror_snapshots }}
             cluster_stack_id = {{ cluster_stack_id | default('(none)') }}
             mirror_stack_id  = {{ mirror_stack_id  | default('(none)') }}
             ai cluster_id    = {{ cluster_id       | default('(none)') }}
@@ -125,8 +145,16 @@
     # These are paired with the mirror image: the discovery ignition
     # baked into the ECS image references infra_env_id; deleting either
     # in isolation leaves a broken pair.
+    #
+    # 跳过条件: teardown_preserves_ai=true（配快照恢复用，假设下次 mirror
+    # 从 snapshot 出来 CA + IP 都跟原来一样，AI install-config 里 PATCH 过
+    # 的 trustBundle + IDMS 都依然有效，所以 AI / infra-env / ECS image
+    # 可以完整复用，下次走 03 fast-path → 04 already_ready 跳过 → 06 → 07
+    # 一气呵成，不用重跑 01/02）。
     - name: Delete Assisted cluster + infra-env + ECS image
-      when: teardown_target in ['mirror', 'both']
+      when:
+        - teardown_target in ['mirror', 'both']
+        - not (teardown_preserves_ai | bool)
       block:
         - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
           when: cluster_id is defined and cluster_id | length > 0
@@ -307,21 +335,30 @@
               # 默认保留 → 下次 03 自动走 fast-path。
               mirror_snapshot_system_id: "{{ '' if (delete_mirror_snapshots | default(false) | bool) else (mirror_snapshot_system_id | default('')) }}"
               mirror_snapshot_data_id:   "{{ '' if (delete_mirror_snapshots | default(false) | bool) else (mirror_snapshot_data_id   | default('')) }}"
-              # Also clear the paired AI / image fields.
-              cluster_id: ''
-              infra_env_id: ''
-              ecs_image_id: ''
-              iso_path: ''
+              # AI / image / iso state：teardown_preserves_ai=true 时保留
+              # （让下次 snapshot 恢复后直接走 06+07，跳过 01/02），否则清空。
+              cluster_id:   "{{ cluster_id   | default('') if (teardown_preserves_ai | default(false) | bool) else '' }}"
+              infra_env_id: "{{ infra_env_id | default('') if (teardown_preserves_ai | default(false) | bool) else '' }}"
+              ecs_image_id: "{{ ecs_image_id | default('') if (teardown_preserves_ai | default(false) | bool) else '' }}"
+              iso_path:     "{{ iso_path     | default('') if (teardown_preserves_ai | default(false) | bool) else '' }}"
 
     - name: Teardown done
       ansible.builtin.debug:
         msg: |
-          ✓ split-teardown complete (target={{ teardown_target }}).
+          ✓ split-teardown complete (target={{ teardown_target }}, preserves_ai={{ teardown_preserves_ai }}, delete_snapshots={{ delete_mirror_snapshots }}).
 
           {% if teardown_target == 'cluster' %}
           mirror-stack is untouched.  Re-run:
             ansible-playbook ansible/playbooks/06-create-cluster-stack.yml
             ansible-playbook ansible/playbooks/07-install-cluster.yml
+          {% elif teardown_target == 'mirror' and (teardown_preserves_ai | bool) %}
+          mirror gone, AI cluster + infra-env + ECS image PRESERVED for snapshot-restore flow.
+          下次跑（mirror snapshot 没动 → 03 fast-path → 04 already_ready 跳过 → 06 → 07）：
+            ansible-playbook ansible/playbooks/03-create-mirror-stack.yml
+            ansible-playbook ansible/playbooks/04-prepare-mirror.yml
+            ansible-playbook ansible/playbooks/06-create-cluster-stack.yml
+            ansible-playbook ansible/playbooks/07-install-cluster.yml
+          ⚠️ 前提：snapshot 还在云上（DescribeSnapshots 查一下）；任何缺失，03 会自动降级到 fresh-path。
           {% elif teardown_target == 'mirror' %}
           mirror gone (along with AI cluster + ECS image).  Full rebuild:
             ansible-playbook ansible/playbooks/01-prepare-iso.yml
