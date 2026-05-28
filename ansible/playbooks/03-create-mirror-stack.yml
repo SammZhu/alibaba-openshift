@@ -44,12 +44,48 @@
     #     里指定 SnapshotId（ROS 原生支持）。
     # 没有快照 → 走传统空盘 + cloud-init bootstrap + Phase 04 完整导入。
     # 强制走慢路径：-e mirror_restore_from_snapshot=false
-    - name: 判定是否走快照恢复路径
+    - name: 判定是否走快照恢复路径（先看 state 是否有 ID）
       ansible.builtin.set_fact:
         _mirror_restore_from_snapshot: >-
           {{ (mirror_restore_from_snapshot | default(true) | bool)
              and (mirror_snapshot_system_id | default('') | length > 0)
              and (mirror_snapshot_data_id   | default('') | length > 0) }}
+
+    # 防御：state 里有 snapshot ID 不代表云上 snapshot 还在。
+    # 例如：99-teardown -e delete_mirror_snapshots=true 删了 image，由此
+    # 级联删了 system snapshot；又或者用户在控制台手动清过。这种情况
+    # CreateImage --SnapshotId 会拿到 InvalidSnapshotId.NotFound → 03 fail。
+    # 主动 DescribeSnapshots 验证两个 snapshot 都活着，否则降级 fresh-path。
+    - name: （快照路径）验证 system + data snapshot 在云上仍存在
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeSnapshots
+          - --RegionId
+          - "{{ region }}"
+          - --SnapshotIds
+          - '["{{ mirror_snapshot_system_id }}","{{ mirror_snapshot_data_id }}"]'
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _snap_verify
+      changed_when: false
+      failed_when: false
+      when: _mirror_restore_from_snapshot
+
+    - name: （快照路径）如果云上 snapshot 缺失则降级到 fresh-path
+      ansible.builtin.set_fact:
+        _mirror_restore_from_snapshot: false
+        _snapshot_missing_reason: >-
+          state 里记的 snapshot ID 在云上找不到（实际 {{ _snap_found_count }}/2）。
+          可能原因：99 -e delete_mirror_snapshots=true 级联删了，或者控制台手动清了。
+          走 fresh bring-up 路径重建 mirror；下次 05 会重新打快照。
+      vars:
+        _snap_found_count: "{{ (_snap_verify.stdout | default('{}') | from_json).Snapshots.Snapshot | default([]) | length }}"
+      when:
+        - _mirror_restore_from_snapshot
+        - _snap_verify.rc == 0
+        - ((_snap_verify.stdout | from_json).Snapshots.Snapshot | default([]) | length) < 2
 
     - name: 快照路径生效提示
       ansible.builtin.debug:
@@ -62,7 +98,8 @@
              ECS 起来后 Quay 已就绪，Phase 04 会被现有 "already prepared"
              检查直接跳过整个 download/install/import 流程。）
           {% else %}
-          → 走 fresh bring-up 路径（无快照或被显式禁用）。
+          → 走 fresh bring-up 路径{% if _snapshot_missing_reason is defined %}（自动降级）：
+            {{ _snapshot_missing_reason }}{% else %}（无快照或被显式禁用）{% endif %}。
             Phase 04 会完整执行 download tarball + install Quay + oc-mirror import。
           {% endif %}
 

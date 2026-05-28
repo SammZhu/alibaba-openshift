@@ -214,8 +214,11 @@
         # 这个 image 是 03 fast-path 临时产物（从 vda snapshot 派生），ROS
         # 把它当 ECS ImageId 用了一次后就再无引用。下次 03 fast-path 会从
         # snapshot 重新 CreateImage（多花 ~10 min 但 image 列表干净）。
-        # 注意：DeleteImage 必须用 --ImageId（不接受 --ImageName），所以
-        # 先 DescribeImages 按 name 查 ID，再 Delete。
+        #
+        # 注意：DeleteImage 必须用 --ImageId（不接受 --ImageName）；先
+        # DescribeImages 按 name 查 ID，再 Delete。
+        # 仅删 image 本身（CLI 默认不删 snapshot；要级联得在 console 手勾
+        # "同时删除快照"）。
         - name: 查找从快照派生的自定义 image (by name)
           ansible.builtin.command:
             argv:
