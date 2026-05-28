@@ -188,6 +188,19 @@
         - image_lookup.rc == 0
         - (image_lookup.stdout | from_json).Images.Image | length > 0
 
+    # Invalidate stale ecs_image_id from state.yml when cloud-side image is gone.
+    # Otherwise: state has m-xxx → load_state sets ecs_image_id → image_lookup
+    # finds 0 images by name → adopt-task skips → "Submit ImportImage" sees
+    # ecs_image_id is defined → skips → poll loops on a non-existent ID → bug.
+    - name: Invalidate stale ecs_image_id when cloud-side image not found
+      ansible.builtin.set_fact:
+        ecs_image_id: ""
+      when:
+        - image_lookup.rc == 0
+        - (image_lookup.stdout | from_json).Images.Image | length == 0
+        - ecs_image_id is defined
+        - ecs_image_id | length > 0
+
     - name: Submit ImportImage when needed
       ansible.builtin.command:
         argv:
@@ -243,10 +256,34 @@
       until: >-
         (image_poll.stdout | from_json).Images.Image | length > 0 and
         (image_poll.stdout | from_json).Images.Image[0].Status == 'Available'
+      # IMPORTANT: keep failed_when restricted to *real* terminal failures.
+      # Ansible's retries+until handles the "retries exhausted with until
+      # still false" case — when retries are spent it considers the task
+      # FAILED automatically.  An overly broad failed_when (e.g. one that
+      # returns false for the "image not found" intermediate state) was
+      # silently masking that auto-failure, letting Phase 02 declare
+      # success when no image ever existed.  The explicit assert below
+      # is the belt to that suspenders.
       failed_when: >-
         image_poll.rc != 0 or
         ((image_poll.stdout | from_json).Images.Image | length > 0 and
          (image_poll.stdout | from_json).Images.Image[0].Status in ['CreateFailed', 'Deprecated'])
+
+    - name: Hard-assert image is actually Available (catches all the silent-fail paths)
+      ansible.builtin.assert:
+        that:
+          - (image_poll.stdout | from_json).Images.Image | length > 0
+          - (image_poll.stdout | from_json).Images.Image[0].Status == 'Available'
+        fail_msg: |
+          ImportImage 提交后等了 30 分钟还是没看到 image (ImageId={{ ecs_image_id }}).
+          可能原因：
+            - OSS 里 ISO 已被前一次 02 的 cleanup 删掉，但 state.yml 残留 ecs_image_id
+              让本次 02 跳过了 ImportImage，进 poll 查的是不存在的 ID
+            - ImportImage 提交失败但被 fire-and-forget 吞了
+          排查：
+            aliyun ecs DescribeTasks --TaskAction ImportImage --RegionId {{ region }}
+            aliyun oss ls oss://{{ oss_bucket }}/{{ oss_object }}
+            sed -i '/^ecs_image_id:/d' ansible/state.yml  # 清残留后重跑 02
 
     # ── Persist state ─────────────────────────────────────────────────────
     - name: Save state
