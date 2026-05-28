@@ -210,9 +210,54 @@
           failed_when: false
           changed_when: false
 
+        # ── 自定义 image 永远删（不管 delete_mirror_snapshots） ────────────────
+        # 这个 image 是 03 fast-path 临时产物（从 vda snapshot 派生），ROS
+        # 把它当 ECS ImageId 用了一次后就再无引用。下次 03 fast-path 会从
+        # snapshot 重新 CreateImage（多花 ~10 min 但 image 列表干净）。
+        # 注意：DeleteImage 必须用 --ImageId（不接受 --ImageName），所以
+        # 先 DescribeImages 按 name 查 ID，再 Delete。
+        - name: 查找从快照派生的自定义 image (by name)
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DescribeImages
+              - --RegionId
+              - "{{ region }}"
+              - --ImageName
+              - "{{ cluster_name }}-mirror-system-from-snap"
+              - --ImageOwnerAlias
+              - self
+              - --profile
+              - "{{ aliyun_profile }}"
+          register: _snap_image_lookup
+          changed_when: false
+          failed_when: false
+
+        - name: 删除从快照派生的自定义 image（默认行为，永远删）
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DeleteImage
+              - --RegionId
+              - "{{ region }}"
+              - --ImageId
+              - "{{ item.ImageId }}"
+              - --Force
+              - "true"
+              - --profile
+              - "{{ aliyun_profile }}"
+          loop: "{{ (_snap_image_lookup.stdout | default('{}') | from_json).Images.Image | default([]) }}"
+          loop_control:
+            label: "{{ item.ImageId }} ({{ item.ImageName }})"
+          failed_when: false
+          changed_when: true
+
         # ── 可选：连同 mirror snapshot 一起删（默认保留，便于下次 fast-path 重建）
         # 用法：-e delete_mirror_snapshots=true
-        # 不删时：下次跑 03 会用同名快照创建 image 并 fast-path 起 ECS
+        # 不删时：下次跑 03 会用同名 snapshot 重新 CreateImage（一次性 ~10
+        #         min 等 image Available）+ fast-path 起 ECS。
         # 删后：下次跑 03 检测不到 snapshot id（被清出 state）→ 走 fresh
         #       bring-up 路径，Phase 04 会完整执行 ~1 小时 import。
         - name: 删除 mirror snapshot（仅当 delete_mirror_snapshots=true）
@@ -234,24 +279,6 @@
           loop:
             - "{{ mirror_snapshot_system_id | default('') }}"
             - "{{ mirror_snapshot_data_id   | default('') }}"
-          failed_when: false
-          changed_when: true
-
-        - name: 删除从快照派生的自定义 image（仅当 delete_mirror_snapshots=true）
-          when: delete_mirror_snapshots | default(false) | bool
-          ansible.builtin.command:
-            argv:
-              - aliyun
-              - ecs
-              - DeleteImage
-              - --RegionId
-              - "{{ region }}"
-              - --ImageName
-              - "{{ cluster_name }}-mirror-system-from-snap"
-              - --Force
-              - "true"
-              - --profile
-              - "{{ aliyun_profile }}"
           failed_when: false
           changed_when: true
 
