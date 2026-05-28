@@ -205,7 +205,7 @@
           - --Architecture
           - x86_64
           - --DiskDeviceMapping.1.Format
-          - ISO
+          - RAW
           - --DiskDeviceMapping.1.OSSBucket
           - "{{ oss_bucket }}"
           - --DiskDeviceMapping.1.OSSObject
