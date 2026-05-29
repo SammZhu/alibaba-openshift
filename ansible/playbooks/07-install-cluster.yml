@@ -106,6 +106,8 @@
               | list | length) > 0 }}
 
     - name: List all ECS instances in cluster VPC
+      # Split-architecture: VPC is owned by mirror-stack; state stores it as
+      # mirror_vpc_id (the LEGACY monolithic name `vpc_id` is gone after the split).
       ansible.builtin.command:
         argv:
           - aliyun
@@ -114,7 +116,7 @@
           - --RegionId
           - "{{ region }}"
           - --VpcId
-          - "{{ vpc_id }}"
+          - "{{ mirror_vpc_id }}"
           - --profile
           - "{{ aliyun_profile }}"
       register: vpc_instances_raw
