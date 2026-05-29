@@ -4,7 +4,20 @@
 # ── Cluster identity ─────────────────────────────────────────────────────────
 cluster_name:        cluster1
 base_domain:         example.local
-openshift_version:   "4.20"
+# ⚠️ Pin to a specific patch (X.Y.Z), NOT channel form (X.Y).
+# Single source of truth — Phase 01 creates AI cluster with this,
+# Phase 04 PATCHes AI to enforce this, build-mirror-tarball.sh's
+# OPENSHIFT_VERSION should match this (set OPENSHIFT_VERSION=X.Y.Z
+# in env before running the script).
+#
+# Channel form ("4.20") makes AI auto-resolve to latest patch via
+# Cincinnati at cluster-create time — but your mirror tarball was
+# built for a specific patch.  Any drift = master ECS hits "Failed
+# to fetch container images" and AI silently reverts cluster from
+# preparing-for-installation back to ready without retrying.
+#
+# 04 has a hard assert that fails fast if this is channel form.
+openshift_version:   "4.20.22"
 
 # ── Alibaba Cloud ────────────────────────────────────────────────────────────
 region:              cn-wulanchabu

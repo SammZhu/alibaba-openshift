@@ -636,6 +636,45 @@
     # ── Step 11: PATCH AI cluster install-config + infra-env trust bundle ───
     - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
 
+    # ── Pin AI cluster openshift_version to the value in group_vars ──────────
+    # Single source of truth: openshift_version in group_vars/all.yml.
+    # Phase 01 creates the AI cluster with this value, but when it's channel
+    # form ("4.20") AI resolves to whatever Cincinnati says is latest at
+    # creation time — e.g. 4.20.23.  If your mirror tarball + isc were built
+    # for an earlier patch (e.g. 4.20.22, common when you pin OPENSHIFT_VERSION
+    # for the build script), masters fail to fetch the 4.20.23-specific
+    # release images and AI silently reverts cluster status without retrying.
+    #
+    # The safeguard: PATCH AI cluster.openshift_version with the exact value
+    # from group_vars on every 04 run.  Idempotent (same value = no change).
+    #
+    # ⚠️ This only works if you pinned a SPECIFIC patch in all.yml.
+    # `openshift_version: "4.20.22"` → mirror, AI cluster, install all aligned
+    # `openshift_version: "4.20"`    → AI keeps drifting to latest, PATCH is no-op,
+    #                                   install will keep breaking when mirror lags
+    - name: Assert openshift_version is pinned to a specific patch (X.Y.Z form)
+      ansible.builtin.assert:
+        that:
+          - openshift_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+        fail_msg: |
+          openshift_version='{{ openshift_version }}' looks like channel form (X.Y).
+          Pin it to a specific patch (X.Y.Z) in group_vars/all.yml — otherwise
+          AI auto-resolves to latest patch and drifts off whatever your mirror
+          actually has, causing install to silently fail in preparing-for-installation.
+          Example: openshift_version: "4.20.22"
+
+    - name: PATCH AI cluster.openshift_version to {{ openshift_version }} (from group_vars)
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ ai_access_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          openshift_version: "{{ openshift_version }}"
+        status_code: [201]
+
     - name: Load mirror CA cert content (for PATCH)
       ansible.builtin.slurp:
         src: "{{ output_dir }}/mirror-ca.crt"
