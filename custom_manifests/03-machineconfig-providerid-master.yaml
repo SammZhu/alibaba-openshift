@@ -34,28 +34,15 @@ spec:
       files:
         - path: /usr/local/bin/alibaba-providerid.sh
           mode: 0755
+          # ⚠️ Use `source:` (data URI), NOT `contents.inline:`.  MCO has a
+          # bug rendering `inline` form for MachineConfig storage.files —
+          # the inline content gets DROPPED in the rendered MC but
+          # `overwrite: true` (auto-added) stays, producing an invalid
+          # Ignition file:
+          #   "$.storage.files[N].overwrite — overwrite must be false if
+          #    source is unspecified"
+          # MCS then returns HTTP 500 to all master/worker ignition fetches
+          # → bootstrap deadlock, install stuck in Configuring.
+          # data:text/plain;base64,<base64-of-script>:
           contents:
-            inline: |
-              #!/bin/bash
-              set -euo pipefail
-
-              METADATA_URL="http://100.100.100.200/latest/meta-data"
-              REGION=$(curl -sf "${METADATA_URL}/region-id")
-              INSTANCE_ID=$(curl -sf "${METADATA_URL}/instance-id")
-
-              if [[ -z "${REGION}" || -z "${INSTANCE_ID}" ]]; then
-                echo "Failed to fetch Alibaba Cloud metadata" >&2
-                exit 1
-              fi
-
-              PROVIDER_ID="alicloud://${REGION}.${INSTANCE_ID}"
-              echo "Setting ProviderID: ${PROVIDER_ID}"
-
-              mkdir -p /etc/kubernetes
-              cat > /etc/systemd/system/kubelet.service.d/20-providerid.conf <<EOF
-              [Service]
-              Environment="KUBELET_PROVIDERID=${PROVIDER_ID}"
-              EOF
-
-              touch /etc/kubernetes/node-providerid
-              systemctl daemon-reload
+            source: "data:text/plain;charset=utf-8;base64,IyEvYmluL2Jhc2gKc2V0IC1ldW8gcGlwZWZhaWwKCk1FVEFEQVRBX1VSTD0iaHR0cDovLzEwMC4xMDAuMTAwLjIwMC9sYXRlc3QvbWV0YS1kYXRhIgpSRUdJT049JChjdXJsIC1zZiAiJHtNRVRBREFUQV9VUkx9L3JlZ2lvbi1pZCIpCklOU1RBTkNFX0lEPSQoY3VybCAtc2YgIiR7TUVUQURBVEFfVVJMfS9pbnN0YW5jZS1pZCIpCgppZiBbWyAteiAiJHtSRUdJT059IiB8fCAteiAiJHtJTlNUQU5DRV9JRH0iIF1dOyB0aGVuCiAgZWNobyAiRmFpbGVkIHRvIGZldGNoIEFsaWJhYmEgQ2xvdWQgbWV0YWRhdGEiID4mMgogIGV4aXQgMQpmaQoKUFJPVklERVJfSUQ9ImFsaWNsb3VkOi8vJHtSRUdJT059LiR7SU5TVEFOQ0VfSUR9IgplY2hvICJTZXR0aW5nIFByb3ZpZGVySUQ6ICR7UFJPVklERVJfSUR9IgoKbWtkaXIgLXAgL2V0Yy9rdWJlcm5ldGVzCmNhdCA+IC9ldGMvc3lzdGVtZC9zeXN0ZW0va3ViZWxldC5zZXJ2aWNlLmQvMjAtcHJvdmlkZXJpZC5jb25mIDw8RU9GCltTZXJ2aWNlXQpFbnZpcm9ubWVudD0iS1VCRUxFVF9QUk9WSURFUklEPSR7UFJPVklERVJfSUR9IgpFT0YKCnRvdWNoIC9ldGMva3ViZXJuZXRlcy9ub2RlLXByb3ZpZGVyaWQKc3lzdGVtY3RsIGRhZW1vbi1yZWxvYWQK"
