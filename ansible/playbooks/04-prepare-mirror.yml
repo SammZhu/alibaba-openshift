@@ -542,18 +542,35 @@
     # file instead, if you want a runtime gate.  We already trust the
     # build-side "✓ 192/192 + ✓ 3/3" check from oc-mirror v2.)
 
-    # ── Add commit-tag aliases for rhai images (BEFORE Reclaim) ──────────────
+    # Free ~42 GB on the data disk: the import is complete, so neither the
+    # outer tarball nor the extracted mirror_*.tar chunks are needed
+    # anymore.  oc-mirror workspace + the v2 archive files were the source
+    # of truth for the just-finished push; deleting them is safe.
+    - name: Reclaim disk after import (drop tarball + extracted chunks)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        rm -f  /var/lib/quay-storage/mirror-tarball.tar
+        rm -rf /var/lib/quay-storage/extracted
+        df -h /var/lib/quay-storage
+        REMOTE
+      when: already_ready.rc != 0
+
+    # ── Add commit-tag aliases for rhai images (ALWAYS runs, idempotent) ─────
     # The isc uses @sha256:digest form for additionalImages so oc-mirror v2
     # mirrors them deterministically.  But the AI discovery agent's
     # agent.service is hard-coded to pull by commit-tag form (e.g.
     # rhai/assisted-installer-agent-rhel9:008935c33...).  Without an
     # additional tag→digest alias on mirror, master ECS hit "manifest unknown"
     # and agent.service crash-loops, hosts never register with AI.
-    # build-mirror-tarball.sh writes a TSV (repo<TAB>tag<TAB>digest) and
-    # uploads it as OSS sibling; here we download it and use `podman pull
-    # + tag + push` to alias each digest under its commit-tag on the mirror.
-    # The push is cheap — Quay dedupes by digest, no actual blob transfer,
-    # just a manifest write.
+    #
+    # ⚠️ This block runs even when already_ready.rc == 0 (snapshot-restore
+    # path), because:
+    #   - The snapshot may have been taken BEFORE this aliasing logic existed
+    #   - The AI commit-tag may have changed since the snapshot was created
+    #     (Red Hat updates discovery agent every few days)
+    # Re-running is idempotent — podman tag+push on an existing tag pointer
+    # is essentially a manifest no-op (Quay dedupes by digest).  Cost ~15 s.
     - name: Download tag-mapping.tsv from OSS (commit-tag → digest aliases)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
@@ -565,10 +582,9 @@
           --region "{{ region }}" --force
         wc -l /var/lib/quay-storage/tag-mapping.tsv
         REMOTE
-      when: already_ready.rc != 0
       changed_when: true
 
-    - name: Add commit-tag aliases for rhai images on mirror
+    - name: Add commit-tag aliases for rhai images on mirror (always; idempotent)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
@@ -581,25 +597,10 @@
           podman tag                       "$REG/$REPO@$DIGEST" "$REG/$REPO:$TAG"
           podman push --tls-verify=false   "$REG/$REPO:$TAG"
         done < /var/lib/quay-storage/tag-mapping.tsv
-        echo "✓ all commit-tag aliases added"
+        rm -f /var/lib/quay-storage/tag-mapping.tsv
+        echo "✓ all commit-tag aliases ensured"
         REMOTE
-      when: already_ready.rc != 0
       changed_when: true
-
-    # Free ~42 GB on the data disk: the import is complete, so neither the
-    # outer tarball nor the extracted mirror_*.tar chunks are needed
-    # anymore.  oc-mirror workspace + the v2 archive files were the source
-    # of truth for the just-finished push; deleting them is safe.
-    - name: Reclaim disk after import (drop tarball + extracted chunks)
-      ansible.builtin.shell: |
-        {{ _ssh_root_mirror }} bash <<'REMOTE'
-        set -euxo pipefail
-        rm -f  /var/lib/quay-storage/mirror-tarball.tar
-        rm -rf /var/lib/quay-storage/extracted
-        rm -f  /var/lib/quay-storage/tag-mapping.tsv
-        df -h /var/lib/quay-storage
-        REMOTE
-      when: already_ready.rc != 0
 
     # ── Step 9: expose CA + signal ready ────────────────────────────────────
     - name: Expose CA cert + write ready signal
