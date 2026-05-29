@@ -354,6 +354,41 @@
         - cluster_poll.json.status is defined
         - cluster_poll.json.status in ['pending-for-input', 'installing-pending-user-action', 'error', 'cancelled']
 
+    # ── Inject per-registry mirror CA on each master (live ISO) ──────────────
+    #
+    # The infra-env's additional_trust_bundle alone is NOT enough: it writes
+    # the CA to /etc/pki/ca-trust/source/anchors/ but `update-ca-trust extract`
+    # isn't run during RHCOS Live ignition, AND containers/image library
+    # (skopeo / ostree-container / cri-o) doesn't read the system trust store.
+    # Without /etc/containers/certs.d/<mirror>:<port>/ca.crt, the cluster's
+    # rhel-coreos image pull during "Starting installation" stage falls back
+    # from mirror → upstream quay.io → cross-border timeout → AI 30-min kill.
+    #
+    # 04's recent PATCH to ignition_config_override bakes this CA into FUTURE
+    # discovery-ISO downloads.  But for THIS install (existing live ISO),
+    # we have to scp the file in here, before triggering install.
+    # Idempotent — re-running 07 just re-writes the same file.
+    - name: Inject mirror CA into /etc/containers/certs.d/ on each host
+      ansible.builtin.shell: |
+        set -euo pipefail
+        SSH_BASE="-i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
+        PROXY="ssh $SSH_BASE -W %h:%p root@{{ jump_host_ip }}"
+        scp $SSH_BASE -o "ProxyCommand=$PROXY" \
+            {{ mirror_ca_cert_path }} core@{{ item.ip }}:/tmp/mirror-ca.crt
+        ssh $SSH_BASE -o "ProxyCommand=$PROXY" core@{{ item.ip }} \
+            "sudo mkdir -p /etc/containers/certs.d/{{ mirror_private_ip }}:8443 \
+          && sudo cp /tmp/mirror-ca.crt /etc/containers/certs.d/{{ mirror_private_ip }}:8443/ca.crt \
+          && sudo rm -f /tmp/mirror-ca.crt \
+          && echo ✓ CA installed on {{ item.ip }}"
+      loop: "{{ cluster_hosts }}"
+      loop_control:
+        label: "{{ item.ip }}"
+      when:
+        - mirror_enabled | default(false) | bool
+        - mirror_ca_cert_path is defined
+        - mirror_ca_cert_path | length > 0
+      changed_when: true
+
     # ── Install ───────────────────────────────────────────────────────────
     # (No SLB self-loop hack needed — ROS template uses NLB, which supports
     #  hairpin / backend → VIP loopback natively.)

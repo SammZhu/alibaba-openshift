@@ -766,6 +766,64 @@
         body_format: json
         status_code: [200, 201]
 
+    # ── Extend infra-env ignition_config_override with per-registry CA ─────
+    #
+    # additional_trust_bundle drops the CA into /etc/pki/ca-trust/source/anchors/
+    # but `update-ca-trust extract` doesn't run during RHCOS Live ignition →
+    # system CA bundle stays stale.  Worse, the containers/image library
+    # (used by skopeo / ostree-container / cri-o) does NOT consult the system
+    # trust store — it only looks at /etc/containers/certs.d/<host>:<port>/
+    # for per-registry CAs.
+    #
+    # Symptom we hit: `ostree container image pull` for the rhel-coreos
+    # release image redirected through registries.conf to mirror, TLS handshake
+    # failed (no CA in certs.d), fell back to upstream quay.io across-border,
+    # hung indefinitely until AI's 30-min stage timeout killed the install.
+    #
+    # Fix: read the existing ignition_config_override from infra-env, append
+    # /etc/containers/certs.d/<mirror>:8443/ca.crt to it, PATCH back.  Now
+    # every future discovery-ISO download has the file baked in (gone from
+    # tmpfs on reboot, but re-injected on every fresh boot).
+    - name: GET current infra-env to extract existing ignition_config_override
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}"
+        method: GET
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        return_content: true
+      register: _infra_env_get
+
+    - name: Build extended ignition_config_override with mirror CA in certs.d
+      ansible.builtin.set_fact:
+        _extended_ignition_override: >-
+          {{ (_infra_env_get.json.ignition_config_override | default('{"ignition":{"version":"3.1.0"},"storage":{"files":[]},"systemd":{"units":[]}}') | from_json)
+             | combine({
+                 'storage': {
+                   'files': (((_infra_env_get.json.ignition_config_override | default('{"storage":{"files":[]}}') | from_json).storage.files | default([]))
+                             | rejectattr('path', 'equalto', '/etc/containers/certs.d/' + mirror_private_ip + ':8443/ca.crt') | list)
+                            + [{
+                                'path': '/etc/containers/certs.d/' + mirror_private_ip + ':8443/ca.crt',
+                                'mode': 420,
+                                'overwrite': true,
+                                'contents': {
+                                  'source': 'data:text/plain;base64,' + mirror_ca_slurp.content
+                                }
+                              }]
+                 }
+               }, recursive=True) }}
+      no_log: true
+
+    - name: PATCH AI infra-env ignition_config_override (per-registry CA in certs.d)
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ ai_access_token }}"
+          Content-Type: application/json
+        body:
+          ignition_config_override: "{{ _extended_ignition_override | to_json }}"
+        body_format: json
+        status_code: [200, 201]
+
     - name: Mirror prepare done
       ansible.builtin.debug:
         msg: |
