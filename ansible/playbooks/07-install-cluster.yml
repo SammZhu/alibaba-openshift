@@ -50,8 +50,38 @@
       register: cluster_pre
 
     # Do NOT reset a cluster that is currently mid-install or already done.
-    # Only states that signal "needs operator action to make forward progress"
-    # belong here:
+    # Step 1: gather both cluster state AND host states BEFORE making any
+    # reset/reboot decisions.  Previously cluster status was read once,
+    # decision frozen, then we'd reboot hosts → AI detects unexpected
+    # restart → cluster transitions to 'error' AFTER our decision frame.
+    # Result: we replaced disks without first cancel+reset'ing the cluster,
+    # so AI kept host records in stale error/installing states even after
+    # the new agents registered → 07 deadlocked in 'Poll for hosts to
+    # discover' until the operator manually ran cancel+reset via curl.
+    - name: Check host statuses
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts"
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        return_content: true
+      register: hosts_after_reset
+
+    - name: Determine whether nodes need a reboot (based on host states)
+      ansible.builtin.set_fact:
+        nodes_need_reboot: >-
+          {{ (hosts_after_reset.json
+              | selectattr('status', 'in', [
+                  'installing', 'installing-in-progress', 'resetting',
+                  'installing-pending-user-action',
+                  'resetting-pending-user-action', 'error'
+                ])
+              | list | length) > 0 }}
+
+    # Step 2: needs_reset triggers when EITHER the cluster is in a
+    # cancel+reset-required state OR we're about to reboot nodes (because
+    # rebooting without a reset leaves AI thinking they unexpectedly died
+    # and stuck in 'error' state with no recovery path).
+    #
+    # Cluster states that demand reset:
     #   error                            — bootkube / etcd / etc. failed
     #   cancelled                        — operator cancelled previously
     #   installing-pending-user-action   — install paused, waiting for input
@@ -64,7 +94,8 @@
         needs_reset: >-
           {{ cluster_pre.json.status in [
                'error', 'cancelled', 'installing-pending-user-action'
-             ] }}
+             ]
+             or nodes_need_reboot | bool }}
 
     - name: Cancel installation (AI)
       ansible.builtin.uri:
@@ -81,35 +112,6 @@
         headers: { Authorization: "Bearer {{ ai_access_token }}" }
         status_code: [202, 409]
       when: needs_reset | bool
-
-    # Check host status (decoupled from needs_reset).  Hosts can require a
-    # reboot even when the cluster itself doesn't need cancel+reset — e.g.
-    # AI's reset action puts each host into 'resetting-pending-user-action'
-    # state while cluster reports 'insufficient', and AI explicitly tells
-    # us "Host requires booting into the discovery image to complete
-    # resetting the installation".  Gating reboot on needs_reset misses
-    # that case → 07 deadlocks polling for hosts to discover that won't.
-    - name: Check host statuses
-      ansible.builtin.uri:
-        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts"
-        headers: { Authorization: "Bearer {{ ai_access_token }}" }
-        return_content: true
-      register: hosts_after_reset
-
-    - name: Determine whether nodes need a reboot
-      # Reboot any host stuck in an install-mode state — these include both
-      # mid-install (installing*/resetting/error) AND the explicit
-      # *-pending-user-action signals where AI is literally waiting for a
-      # boot-into-discovery to proceed.  Independent of needs_reset.
-      ansible.builtin.set_fact:
-        nodes_need_reboot: >-
-          {{ (hosts_after_reset.json
-              | selectattr('status', 'in', [
-                  'installing', 'installing-in-progress', 'resetting',
-                  'installing-pending-user-action',
-                  'resetting-pending-user-action', 'error'
-                ])
-              | list | length) > 0 }}
 
     - name: List all ECS instances in cluster VPC
       # Split-architecture: VPC is owned by mirror-stack; state stores it as
