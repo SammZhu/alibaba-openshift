@@ -264,7 +264,9 @@
         - (_reboot_plan | default([]) | selectattr('method', 'equalto', 'ReplaceSystemDisk') | list | length) > 0
 
     - name: ReplaceSystemDisk for hosts past Rebooting stage (vda overwritten by clone)
-      # Aliyun auto-starts the instance after replace — no separate StartInstance needed.
+      # Verified empirically: Aliyun does NOT auto-start after ReplaceSystemDisk
+      # (some docs claim it does — they're wrong, or describe a different code
+      # path).  Instance stays Stopped → explicit StartInstance below.
       ansible.builtin.command:
         argv:
           - aliyun
@@ -285,6 +287,25 @@
         - nodes_need_reboot | bool
         - ecs_image_id is defined
         - ecs_image_id | length > 0
+
+    - name: StartInstance for replaced hosts (Aliyun doesn't auto-start)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - StartInstance
+          - --RegionId
+          - "{{ region }}"
+          - --InstanceId
+          - "{{ item.id }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      loop: "{{ _reboot_plan | default([]) | selectattr('method', 'equalto', 'ReplaceSystemDisk') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - nodes_need_reboot | bool
+        - (_reboot_plan | default([]) | selectattr('method', 'equalto', 'ReplaceSystemDisk') | list | length) > 0
 
     - name: Force-reboot for hosts still on discovery ISO (vda intact)
       # --ForceStop=true = power-off + power-on (硬重启).  Required when
