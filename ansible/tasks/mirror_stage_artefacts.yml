@@ -101,13 +101,24 @@
 # Cloud-init constructs the versioned URL for oc + oc-mirror download.  The
 # previous /latest/ symlinks on mirror.openshift.com are 404 now; URLs must
 # pin to a specific patch (e.g. .../ocp/4.20.22/oc-mirror.tar.gz).
-- name: Mirror — discover OpenShift patch version (from Cincinnati)
+#
+# Three sources, in priority order:
+#   1. -e openshift_patch_version=X.Y.Z (explicit override)
+#   2. openshift_version itself when already X.Y.Z form (the recommended setup —
+#      single source of truth in group_vars/all.yml; see 04's assert)
+#   3. Cincinnati graph lookup for stable-X.Y channel (legacy/channel-form path)
+- name: Mirror — discover OpenShift patch version
   ansible.builtin.shell: |
     V={{ (openshift_patch_version | default('')) | quote }}
+    OSV={{ openshift_version | quote }}
     if [ -n "$V" ]; then
       echo "$V"
+    elif echo "$OSV" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+      # openshift_version is already specific patch; use as-is (no Cincinnati needed)
+      echo "$OSV"
     else
-      curl -sfSL "https://api.openshift.com/api/upgrades_info/v1/graph?channel=stable-{{ openshift_version }}" \
+      # Channel form (e.g. "4.20") — ask Cincinnati for the latest in this channel
+      curl -sfSL "https://api.openshift.com/api/upgrades_info/v1/graph?channel=stable-$OSV" \
         -H 'Accept: application/json' \
         | jq -r '.nodes[].version' | sort -V | tail -1
     fi
@@ -122,8 +133,14 @@
   ansible.builtin.assert:
     that: _openshift_patch_version | length > 0
     fail_msg: |
-      Could not auto-discover OpenShift patch version for channel
-      stable-{{ openshift_version }}.  Override with -e openshift_patch_version=X.Y.Z.
+      Could not derive OpenShift patch version.
+      Tried (in order):
+        1. -e openshift_patch_version=X.Y.Z       — not set
+        2. openshift_version (group_vars/all.yml) — '{{ openshift_version }}'
+           (must be X.Y.Z to use directly)
+        3. Cincinnati graph for stable-{{ openshift_version }} — empty/404
+      Set openshift_version to a specific patch in all.yml (e.g. "4.20.22"),
+      OR run with `-e openshift_patch_version=X.Y.Z` to override.
 
 - name: Mirror — write local OpenShift patch version marker
   ansible.builtin.copy:
