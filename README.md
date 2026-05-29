@@ -213,11 +213,12 @@ ansible-playbook ansible/playbooks/99-teardown.yml \
   -e teardown_target=cluster -e teardown_confirmed=true
 ansible-playbook ansible/playbooks/06-create-cluster-stack.yml
 ansible-playbook ansible/playbooks/07-install-cluster.yml
-
-# Full teardown (also removes mirror + AI cluster + ECS image):
-ansible-playbook ansible/playbooks/99-teardown.yml \
-  -e teardown_target=both -e teardown_confirmed=true
 ```
+
+> **完整 teardown 参考**：模式矩阵 / 互斥规则 / state 字段处置 / 典型场景 / 故障排查
+> → [`docs/TEARDOWN.md`](docs/TEARDOWN.md)
+> 包含 `teardown_target` × `teardown_preserves_ai` × `delete_mirror_snapshots` 所有合法组合。
+> snapshot-restore 场景下用 `-e teardown_preserves_ai=true` 可把重建时间压到 ~10 min。
 
 ### Which to pick?
 
