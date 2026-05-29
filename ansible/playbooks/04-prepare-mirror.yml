@@ -571,6 +571,13 @@
     #     (Red Hat updates discovery agent every few days)
     # Re-running is idempotent — podman tag+push on an existing tag pointer
     # is essentially a manifest no-op (Quay dedupes by digest).  Cost ~15 s.
+
+    # Refresh the OSS-side tag-mapping.tsv first — covers two cases:
+    #   - build-mirror-tarball.sh was an older version that didn't write it
+    #   - AI rotated commit-tags since the last build (happens every few days)
+    # Cheap (~10 s for 3× skopeo inspect), always safe to re-run.
+    - ansible.builtin.include_tasks: ../tasks/refresh_tag_mapping.yml
+
     - name: Download tag-mapping.tsv from OSS (commit-tag → digest aliases)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'

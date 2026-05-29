@@ -1,0 +1,120 @@
+---
+# Refresh tag-mapping.tsv (commit-tag → digest) in OSS.
+#
+# Mirrors the same logic as the "discover AI image refs → skopeo inspect →
+# write TSV" section of scripts/build-mirror-tarball.sh, so we don't
+# require a full build-script re-run just to pick up updated AI commit-tags.
+#
+# Why this needs to live in ansible (not just in build-script):
+#   - Red Hat ships new discovery-agent every few days → tag rotates →
+#     master ECS image (which hard-codes the tag in agent.service) gets
+#     stale faster than the mirror tarball does
+#   - Refreshing the TSV is cheap (~10 s for 3× skopeo inspect)
+#   - 04 always reads + applies, so refresh-before-apply keeps tags fresh
+#
+# Requirements on the ansible control host:
+#   - skopeo installed
+#   - {{ offline_token_file }} readable (long-lived Red Hat token)
+#   - {{ pull_secret_file }} readable (registry.redhat.io creds for skopeo)
+#   - {{ aliyun_profile }} configured in ~/.aliyun/config.json
+#
+# Inputs (vars already in scope from group_vars / state):
+#   - offline_token_file, pull_secret_file, aliyun_profile
+#   - assisted_api, sso_url
+#   - oss_bucket, mirror_oss_object, region
+#
+# Side effects:
+#   - sets fact `ai_access_token` (via assisted_token.yml)
+#   - writes {{ output_dir }}/tag-mapping.tsv locally
+#   - uploads to oss://{{ oss_bucket }}/{{ mirror_oss_object }}.tag-mapping.tsv
+
+- ansible.builtin.include_tasks: assisted_token.yml
+
+- name: AI — fetch current component versions
+  ansible.builtin.uri:
+    url: "{{ assisted_api }}/component-versions"
+    method: GET
+    headers: { Authorization: "Bearer {{ ai_access_token }}" }
+    return_content: true
+  register: _ai_versions
+
+- name: Read Red Hat pull secret (for skopeo registry.redhat.io creds)
+  ansible.builtin.slurp:
+    src: "{{ pull_secret_file }}"
+  register: _ps_slurp
+  no_log: true
+
+- name: Extract registry.redhat.io creds (user:pass)
+  ansible.builtin.set_fact:
+    _rh_creds: "{{ (_ps_slurp.content | b64decode | from_json).auths['registry.redhat.io'].auth | b64decode }}"
+  no_log: true
+
+- name: skopeo inspect each rhai image → resolve commit-tag to digest
+  ansible.builtin.command:
+    argv:
+      - skopeo
+      - inspect
+      - --no-tags
+      - --creds
+      - "{{ _rh_creds }}"
+      - "docker://{{ _ai_versions.json.versions[item] }}"
+  loop:
+    - discovery-agent
+    - assisted-installer
+    - assisted-installer-controller
+  register: _skopeo_results
+  changed_when: false
+  no_log: true   # creds are in argv
+
+- name: Build tag-mapping.tsv (repo<TAB>tag<TAB>digest)
+  ansible.builtin.copy:
+    dest: "{{ output_dir }}/tag-mapping.tsv"
+    mode: "0644"
+    content: |
+      {% for r in _skopeo_results.results -%}
+      {%- set img        = _ai_versions.json.versions[r.item] -%}
+      {%- set repo_path  = img | regex_replace('^registry.redhat.io/', '') | regex_replace(':.*$', '') -%}
+      {%- set commit_tag = img | regex_replace('^.*:', '') -%}
+      {%- set digest     = (r.stdout | from_json).Digest -%}
+      {{ repo_path }}	{{ commit_tag }}	{{ digest }}
+      {% endfor %}
+
+- name: Show generated tag-mapping
+  ansible.builtin.command: cat "{{ output_dir }}/tag-mapping.tsv"
+  register: _tag_mapping_preview
+  changed_when: false
+
+- name: Show tag-mapping preview
+  ansible.builtin.debug:
+    msg: |
+      tag-mapping.tsv:
+      {{ _tag_mapping_preview.stdout }}
+
+- name: Read OSS AK/SK from aliyun profile (ossutil does not understand --profile)
+  ansible.builtin.shell: |
+    jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret' \
+      ~/.aliyun/config.json
+  register: _rtm_oss_creds_raw
+  changed_when: false
+  no_log: true
+
+- name: Set OSS facts
+  ansible.builtin.set_fact:
+    _rtm_oss_ak: "{{ _rtm_oss_creds_raw.stdout.split(' ')[0] }}"
+    _rtm_oss_sk: "{{ _rtm_oss_creds_raw.stdout.split(' ')[1] }}"
+  no_log: true
+
+- name: Upload tag-mapping.tsv to OSS (sibling of tarball)
+  ansible.builtin.command:
+    argv:
+      - aliyun
+      - oss
+      - cp
+      - "{{ output_dir }}/tag-mapping.tsv"
+      - "oss://{{ oss_bucket }}/{{ mirror_oss_object }}.tag-mapping.tsv"
+      - "--endpoint=oss-{{ region }}.aliyuncs.com"
+      - "--access-key-id={{ _rtm_oss_ak }}"
+      - "--access-key-secret={{ _rtm_oss_sk }}"
+      - -f
+  changed_when: true
+  no_log: true
