@@ -130,6 +130,11 @@
       when: nodes_need_reboot | bool
 
     - name: Reboot cluster nodes (master + worker, skip jump host)
+      # --ForceStop=true equals power-off + power-on (硬重启).  Required
+      # when nodes are hung in a pre-install state (agent.service waiting
+      # forever for AI commands that won't come because cluster is in error).
+      # Default graceful reboot sends ACPI signal — a hung user-space ignores
+      # it and the API call silently returns ok without actually rebooting.
       ansible.builtin.command:
         argv:
           - aliyun
@@ -139,6 +144,8 @@
           - "{{ region }}"
           - --InstanceId
           - "{{ item }}"
+          - --ForceStop
+          - "true"
           - --profile
           - "{{ aliyun_profile }}"
       loop: >-
