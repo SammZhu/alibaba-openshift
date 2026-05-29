@@ -82,25 +82,31 @@
         status_code: [202, 409]
       when: needs_reset | bool
 
-    # Check host status after reset: nodes that were in discovery/known state
-    # (install failed at preparation stage) do NOT need a reboot — they are
-    # already running the discovery agent.  Only reboot nodes that actually
-    # started installing (status installing/resetting/error).
-    - name: Check host statuses after reset
+    # Check host status (decoupled from needs_reset).  Hosts can require a
+    # reboot even when the cluster itself doesn't need cancel+reset — e.g.
+    # AI's reset action puts each host into 'resetting-pending-user-action'
+    # state while cluster reports 'insufficient', and AI explicitly tells
+    # us "Host requires booting into the discovery image to complete
+    # resetting the installation".  Gating reboot on needs_reset misses
+    # that case → 07 deadlocks polling for hosts to discover that won't.
+    - name: Check host statuses
       ansible.builtin.uri:
         url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts"
         headers: { Authorization: "Bearer {{ ai_access_token }}" }
         return_content: true
       register: hosts_after_reset
-      when: needs_reset | bool
 
     - name: Determine whether nodes need a reboot
+      # Reboot any host stuck in an install-mode state — these include both
+      # mid-install (installing*/resetting/error) AND the explicit
+      # *-pending-user-action signals where AI is literally waiting for a
+      # boot-into-discovery to proceed.  Independent of needs_reset.
       ansible.builtin.set_fact:
         nodes_need_reboot: >-
-          {{ needs_reset | bool and
-             (hosts_after_reset.json
+          {{ (hosts_after_reset.json
               | selectattr('status', 'in', [
                   'installing', 'installing-in-progress', 'resetting',
+                  'installing-pending-user-action',
                   'resetting-pending-user-action', 'error'
                 ])
               | list | length) > 0 }}
