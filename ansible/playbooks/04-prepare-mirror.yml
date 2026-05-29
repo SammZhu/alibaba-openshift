@@ -542,6 +542,50 @@
     # file instead, if you want a runtime gate.  We already trust the
     # build-side "✓ 192/192 + ✓ 3/3" check from oc-mirror v2.)
 
+    # ── Add commit-tag aliases for rhai images (BEFORE Reclaim) ──────────────
+    # The isc uses @sha256:digest form for additionalImages so oc-mirror v2
+    # mirrors them deterministically.  But the AI discovery agent's
+    # agent.service is hard-coded to pull by commit-tag form (e.g.
+    # rhai/assisted-installer-agent-rhel9:008935c33...).  Without an
+    # additional tag→digest alias on mirror, master ECS hit "manifest unknown"
+    # and agent.service crash-loops, hosts never register with AI.
+    # build-mirror-tarball.sh writes a TSV (repo<TAB>tag<TAB>digest) and
+    # uploads it as OSS sibling; here we download it and use `podman pull
+    # + tag + push` to alias each digest under its commit-tag on the mirror.
+    # The push is cheap — Quay dedupes by digest, no actual blob transfer,
+    # just a manifest write.
+    - name: Download tag-mapping.tsv from OSS (commit-tag → digest aliases)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        aliyun oss cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}.tag-mapping.tsv" \
+          /var/lib/quay-storage/tag-mapping.tsv \
+          --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
+          --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
+          --region "{{ region }}" --force
+        wc -l /var/lib/quay-storage/tag-mapping.tsv
+        REMOTE
+      when: already_ready.rc != 0
+      changed_when: true
+
+    - name: Add commit-tag aliases for rhai images on mirror
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        export HOME=/root  # so podman picks up /root/.docker/config.json
+        REG=10.0.16.4:8443
+        while IFS=$'\t' read -r REPO TAG DIGEST; do
+          [ -z "$REPO" ] && continue
+          echo "=== aliasing $REG/$REPO@$DIGEST → :$TAG ==="
+          podman pull  --tls-verify=false "$REG/$REPO@$DIGEST"
+          podman tag                       "$REG/$REPO@$DIGEST" "$REG/$REPO:$TAG"
+          podman push --tls-verify=false   "$REG/$REPO:$TAG"
+        done < /var/lib/quay-storage/tag-mapping.tsv
+        echo "✓ all commit-tag aliases added"
+        REMOTE
+      when: already_ready.rc != 0
+      changed_when: true
+
     # Free ~42 GB on the data disk: the import is complete, so neither the
     # outer tarball nor the extracted mirror_*.tar chunks are needed
     # anymore.  oc-mirror workspace + the v2 archive files were the source
@@ -552,6 +596,7 @@
         set -euxo pipefail
         rm -f  /var/lib/quay-storage/mirror-tarball.tar
         rm -rf /var/lib/quay-storage/extracted
+        rm -f  /var/lib/quay-storage/tag-mapping.tsv
         df -h /var/lib/quay-storage
         REMOTE
       when: already_ready.rc != 0

@@ -172,8 +172,20 @@ EOF
 # has them base64-encoded under .auths["registry.redhat.io"].auth.
 _REDHAT_CREDS=$(jq -r '.auths["registry.redhat.io"].auth' "$PULL_SECRET" | base64 -d)
 echo "  additionalImages:" >> imageset-config.yaml
+# Also write tag → digest mapping as TSV.  Why: oc-mirror v2 with @sha256:
+# isc loses the original tag — only the digest gets into the mirror.  But
+# the AI discovery agent's agent.service references the image by its
+# commit-tag form (e.g. .../assisted-installer-agent-rhel9:008935c33...),
+# not by digest.  Without a tag alias on mirror, podman pull returns
+# "manifest unknown" and agent.service crash-loops.
+# Phase 04 reads this TSV after import and adds tag aliases via podman
+# tag + push (cheap — Quay dedupes by digest, no actual blob transfer).
+TAG_MAPPING="$WORK_DIR/tag-mapping.tsv"
+: > "$TAG_MAPPING"
 for IMG in "$AI_AGENT_IMAGE" "$AI_INSTALLER_IMAGE" "$AI_CONTROLLER_IMAGE"; do
-  REPO="${IMG%:*}"   # strip tag
+  REPO="${IMG%:*}"            # registry.redhat.io/rhai/X
+  TAG="${IMG##*:}"            # commit hash
+  REPO_PATH="${REPO#registry.redhat.io/}"  # rhai/X — what the mirror exposes
   DIGEST=$(skopeo inspect --no-tags --creds "$_REDHAT_CREDS" "docker://$IMG" 2>/dev/null \
              | jq -r .Digest)
   if [[ -z "$DIGEST" || "$DIGEST" == "null" ]]; then
@@ -181,8 +193,11 @@ for IMG in "$AI_AGENT_IMAGE" "$AI_INSTALLER_IMAGE" "$AI_CONTROLLER_IMAGE"; do
     exit 1
   fi
   echo "    - name: ${REPO}@${DIGEST}" >> imageset-config.yaml
-  echo "    → pinned ${IMG##*:} → ${DIGEST}"
+  # TSV columns: <repo-without-registry>  <commit-tag>  <digest>
+  printf '%s\t%s\t%s\n' "$REPO_PATH" "$TAG" "$DIGEST" >> "$TAG_MAPPING"
+  echo "    → pinned ${TAG} → ${DIGEST}"
 done
+echo "    → tag mapping written to $TAG_MAPPING"
 
 # Optional: mirror operator catalogs (post-install OperatorHub) so installing
 # any operator from those catalogs also works fully offline.
@@ -348,6 +363,11 @@ aliyun oss cp "${TARBALL_PATH}.sha256" "oss://${OSS_BUCKET}/${OSS_OBJECT}.sha256
 # etc.) without re-shipping the 22 GB tarball.
 echo "[6b/8] Uploading imageset-config.yaml as OSS sibling..."
 aliyun oss cp "imageset-config.yaml" "oss://${OSS_BUCKET}/${OSS_OBJECT}.imageset-config.yaml" \
+    --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
+    --force
+
+echo "[6c/8] Uploading tag-mapping.tsv (commit-tag → digest aliases) as OSS sibling..."
+aliyun oss cp "$TAG_MAPPING" "oss://${OSS_BUCKET}/${OSS_OBJECT}.tag-mapping.tsv" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
     --force
 
