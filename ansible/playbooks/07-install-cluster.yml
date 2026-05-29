@@ -129,12 +129,113 @@
       changed_when: false
       when: nodes_need_reboot | bool
 
-    - name: Reboot cluster nodes (master + worker, skip jump host)
-      # --ForceStop=true equals power-off + power-on (硬重启).  Required
-      # when nodes are hung in a pre-install state (agent.service waiting
-      # forever for AI commands that won't come because cluster is in error).
-      # Default graceful reboot sends ACPI signal — a hung user-space ignores
-      # it and the API call silently returns ok without actually rebooting.
+    # Build a per-instance recovery plan.  Two methods, depending on whether
+    # the node already underwent assisted-installer's graceful reboot stage:
+    #
+    #   RebootForce  — vda still has the discovery ISO content
+    #                  (node hung BEFORE assisted-installer's Rebooting stage,
+    #                   so clone-vdb-to-vda.service ExecStop never fired).
+    #                  A power-cycle + boot from same vda comes back to the
+    #                   discovery ISO, agent re-registers cleanly.
+    #
+    #   ReplaceSystemDisk — vda was OVERWRITTEN by clone-vdb-to-vda during
+    #                  the Rebooting stage.  Now vda contains the half-installed
+    #                  RHCOS layout; a plain reboot just lands on that broken
+    #                  install (no agent, no discovery, no recovery path).
+    #                  Must re-image vda from the Phase 02 discovery ECS image
+    #                  to get back to a fresh discovery ISO state.
+    #
+    # Decision boundary: AI host.progress.current_stage at the time of the
+    # last error.  Stages 'Rebooting' or later imply clone-vdb-to-vda has run.
+    - name: Build IP→AI-stage map for affected hosts
+      ansible.builtin.set_fact:
+        _host_stage_by_ip: |
+          {%- set out = {} -%}
+          {%- for h in hosts_after_reset.json -%}
+            {%- if h.inventory|default('')|length > 0 -%}
+              {%- set inv = h.inventory | from_json -%}
+              {%- set ip_cidr = inv.interfaces | map(attribute='ipv4_addresses') | flatten | first | default('') -%}
+              {%- set ip = ip_cidr.split('/')[0] -%}
+              {%- set stage = h.progress.current_stage | default('') -%}
+              {%- if ip -%}{%- set _ = out.update({ip: stage}) -%}{%- endif -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ out }}
+      when: nodes_need_reboot | bool
+
+    - name: Build per-instance reboot plan (RebootForce vs ReplaceSystemDisk)
+      ansible.builtin.set_fact:
+        _reboot_plan: |
+          {%- set plan = [] -%}
+          {%- set advanced = ['Rebooting', 'Waiting for ignition', 'Configuring',
+                              'Joined', 'Waiting for control plane',
+                              'Waiting for bootkube', 'Waiting for controller',
+                              'Done'] -%}
+          {%- for ecs in (vpc_instances_raw.stdout | from_json).Instances.Instance -%}
+            {%- if 'jumphost' not in ecs.InstanceName -%}
+              {%- set ip = ecs.VpcAttributes.PrivateIpAddress.IpAddress[0] -%}
+              {%- set stage = _host_stage_by_ip[ip] | default('') -%}
+              {%- set method = 'ReplaceSystemDisk' if stage in advanced else 'RebootForce' -%}
+              {%- set _ = plan.append({
+                    'id': ecs.InstanceId, 'name': ecs.InstanceName,
+                    'ip': ip, 'stage': stage, 'method': method
+                  }) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ plan }}
+      when: nodes_need_reboot | bool
+
+    - name: Show reboot plan
+      ansible.builtin.debug:
+        msg: |
+          Recovery plan ({{ _reboot_plan | length }} hosts):
+          {% for h in _reboot_plan %}
+            {{ h.name }} ({{ h.ip }}) stage="{{ h.stage }}" → {{ h.method }}
+          {% endfor %}
+      when: nodes_need_reboot | bool
+
+    - name: Sanity — ecs_image_id required when any host needs ReplaceSystemDisk
+      ansible.builtin.assert:
+        that:
+          - ecs_image_id is defined
+          - ecs_image_id | length > 0
+        fail_msg: |
+          At least one host needs ReplaceSystemDisk (vda was overwritten by
+          clone-vdb-to-vda during a prior install attempt) but ecs_image_id
+          is not set in state.yml.  Re-run Phase 02 to (re)build the
+          discovery ECS image first.
+      when:
+        - nodes_need_reboot | bool
+        - (_reboot_plan | default([]) | selectattr('method', 'equalto', 'ReplaceSystemDisk') | list | length) > 0
+
+    - name: ReplaceSystemDisk for hosts past Rebooting stage (vda overwritten by clone)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - ReplaceSystemDisk
+          - --RegionId
+          - "{{ region }}"
+          - --InstanceId
+          - "{{ item.id }}"
+          - --ImageId
+          - "{{ ecs_image_id }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      loop: "{{ _reboot_plan | default([]) | selectattr('method', 'equalto', 'ReplaceSystemDisk') | list }}"
+      loop_control:
+        label: "{{ item.name }} (stage={{ item.stage }})"
+      when:
+        - nodes_need_reboot | bool
+        - ecs_image_id is defined
+        - ecs_image_id | length > 0
+
+    - name: Force-reboot for hosts still on discovery ISO (vda intact)
+      # --ForceStop=true = power-off + power-on (硬重启).  Required when
+      # nodes are hung in a pre-install state (agent.service waiting for AI
+      # commands that won't come because cluster is in error).  Default
+      # graceful reboot sends ACPI which a hung user-space ignores → API
+      # returns ok without actually rebooting.
       ansible.builtin.command:
         argv:
           - aliyun
@@ -143,16 +244,14 @@
           - --RegionId
           - "{{ region }}"
           - --InstanceId
-          - "{{ item }}"
+          - "{{ item.id }}"
           - --ForceStop
           - "true"
           - --profile
           - "{{ aliyun_profile }}"
-      loop: >-
-        {{ (vpc_instances_raw.stdout | from_json).Instances.Instance
-           | rejectattr('InstanceName', 'search', 'jumphost')
-           | map(attribute='InstanceId') | list }}
-      loop_control: { label: "{{ item }}" }
+      loop: "{{ _reboot_plan | default([]) | selectattr('method', 'equalto', 'RebootForce') | list }}"
+      loop_control:
+        label: "{{ item.name }} (stage={{ item.stage }})"
       when: nodes_need_reboot | bool
 
     - name: Wait 60 s for nodes to start rebooting before polling
