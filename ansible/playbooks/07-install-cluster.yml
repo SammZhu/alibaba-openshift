@@ -164,6 +164,11 @@
       when: nodes_need_reboot | bool
 
     - name: Build per-instance reboot plan (RebootForce vs ReplaceSystemDisk)
+      # Exclude infra ECS that are NOT cluster nodes:
+      #   - jumphost (mirror-stack)
+      #   - mirror-registry (mirror-stack)
+      # Only cluster-stack masters and workers should be rebooted.  cluster
+      # nodes' InstanceName follows ${ClusterName}-master-N / -worker-N.
       ansible.builtin.set_fact:
         _reboot_plan: |
           {%- set plan = [] -%}
@@ -172,7 +177,7 @@
                               'Waiting for bootkube', 'Waiting for controller',
                               'Done'] -%}
           {%- for ecs in (vpc_instances_raw.stdout | from_json).Instances.Instance -%}
-            {%- if 'jumphost' not in ecs.InstanceName -%}
+            {%- if ecs.InstanceName is search('-(master|worker|compute)-?\\d*$') -%}
               {%- set ip = ecs.VpcAttributes.PrivateIpAddress.IpAddress[0] -%}
               {%- set stage = _host_stage_by_ip[ip] | default('') -%}
               {%- set method = 'ReplaceSystemDisk' if stage in advanced else 'RebootForce' -%}
@@ -208,7 +213,58 @@
         - nodes_need_reboot | bool
         - (_reboot_plan | default([]) | selectattr('method', 'equalto', 'ReplaceSystemDisk') | list | length) > 0
 
+    # ReplaceSystemDisk requires the ECS to be Stopped first (Aliyun API
+    # rejects with IncorrectInstanceStatus otherwise).  Sequence per host:
+    #   1. StopInstance --ForceStop=true   (sync; returns immediately)
+    #   2. Poll until Status == Stopped     (typ. 30-60 s)
+    #   3. ReplaceSystemDisk                (Aliyun auto-starts after replace)
+    - name: Stop hosts that need ReplaceSystemDisk (force)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - StopInstance
+          - --RegionId
+          - "{{ region }}"
+          - --InstanceId
+          - "{{ item.id }}"
+          - --ForceStop
+          - "true"
+          - --profile
+          - "{{ aliyun_profile }}"
+      loop: "{{ _reboot_plan | default([]) | selectattr('method', 'equalto', 'ReplaceSystemDisk') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - nodes_need_reboot | bool
+        - (_reboot_plan | default([]) | selectattr('method', 'equalto', 'ReplaceSystemDisk') | list | length) > 0
+
+    - name: Wait for those hosts to reach Stopped (up to 5 min)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeInstances
+          - --RegionId
+          - "{{ region }}"
+          - --InstanceIds
+          - '["{{ item.id }}"]'
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _stop_poll
+      retries: 30
+      delay: 10
+      until: (_stop_poll.stdout | from_json).Instances.Instance[0].Status == 'Stopped'
+      changed_when: false
+      loop: "{{ _reboot_plan | default([]) | selectattr('method', 'equalto', 'ReplaceSystemDisk') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - nodes_need_reboot | bool
+        - (_reboot_plan | default([]) | selectattr('method', 'equalto', 'ReplaceSystemDisk') | list | length) > 0
+
     - name: ReplaceSystemDisk for hosts past Rebooting stage (vda overwritten by clone)
+      # Aliyun auto-starts the instance after replace — no separate StartInstance needed.
       ansible.builtin.command:
         argv:
           - aliyun
