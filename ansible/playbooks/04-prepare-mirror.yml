@@ -636,22 +636,24 @@
     # ── Step 11: PATCH AI cluster install-config + infra-env trust bundle ───
     - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
 
-    # ── Pin AI cluster openshift_version to the value in group_vars ──────────
+    # ── Verify AI cluster.openshift_version matches group_vars ───────────────
     # Single source of truth: openshift_version in group_vars/all.yml.
-    # Phase 01 creates the AI cluster with this value, but when it's channel
-    # form ("4.20") AI resolves to whatever Cincinnati says is latest at
-    # creation time — e.g. 4.20.23.  If your mirror tarball + isc were built
-    # for an earlier patch (e.g. 4.20.22, common when you pin OPENSHIFT_VERSION
-    # for the build script), masters fail to fetch the 4.20.23-specific
-    # release images and AI silently reverts cluster status without retrying.
+    # Phase 01 creates the AI cluster with this value; AI's openshift_version
+    # is IMMUTABLE post-create (AI v2 API rejects PATCH on this field), so
+    # all we can do here is verify alignment + fail loud on mismatch.
     #
-    # The safeguard: PATCH AI cluster.openshift_version with the exact value
-    # from group_vars on every 04 run.  Idempotent (same value = no change).
+    # Common mismatch sources:
+    #   - all.yml had channel form "4.20" → AI resolved to latest patch
+    #     (e.g. 4.20.23) at create time; mirror was built for older patch
+    #   - all.yml's openshift_version got bumped after cluster was created
+    #     without re-creating the cluster
     #
-    # ⚠️ This only works if you pinned a SPECIFIC patch in all.yml.
-    # `openshift_version: "4.20.22"` → mirror, AI cluster, install all aligned
-    # `openshift_version: "4.20"`    → AI keeps drifting to latest, PATCH is no-op,
-    #                                   install will keep breaking when mirror lags
+    # Recovery on mismatch: re-create the AI cluster (full re-run of Phase 01)
+    # with the right value pinned in all.yml first.  Since ECS image's baked
+    # ignition references the OLD infra-env id, that also forces re-running
+    # 02 + 06 (new image + new cluster-stack).  Mirror itself is fine to keep.
+    # See docs/TEARDOWN.md "OCP version change" scenario for the playbook
+    # sequence (uses 99 -e cluster_includes_ai=true to drop only the AI half).
     - name: Assert openshift_version is pinned to a specific patch (X.Y.Z form)
       ansible.builtin.assert:
         that:
@@ -659,21 +661,39 @@
         fail_msg: |
           openshift_version='{{ openshift_version }}' looks like channel form (X.Y).
           Pin it to a specific patch (X.Y.Z) in group_vars/all.yml — otherwise
-          AI auto-resolves to latest patch and drifts off whatever your mirror
-          actually has, causing install to silently fail in preparing-for-installation.
+          AI auto-resolves to latest patch at cluster create time and drifts
+          off whatever your mirror actually has.  AI v2 API does not allow
+          changing this after the cluster is created, so getting it wrong
+          requires re-creating the cluster.
           Example: openshift_version: "4.20.22"
 
-    - name: PATCH AI cluster.openshift_version to {{ openshift_version }} (from group_vars)
+    - name: Get current AI cluster.openshift_version
       ansible.builtin.uri:
         url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
-        method: PATCH
-        headers:
-          Authorization: "Bearer {{ ai_access_token }}"
-          Content-Type: application/json
-        body_format: json
-        body:
-          openshift_version: "{{ openshift_version }}"
-        status_code: [201]
+        method: GET
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        return_content: true
+      register: _ai_cluster_get
+
+    - name: Assert AI cluster version matches group_vars (drift detection)
+      ansible.builtin.assert:
+        that:
+          - _ai_cluster_get.json.openshift_version == openshift_version
+        fail_msg: |
+          AI cluster {{ cluster_id }} is on openshift_version={{ _ai_cluster_get.json.openshift_version }}
+          but group_vars/all.yml says {{ openshift_version }}.  AI v2 API does NOT allow
+          changing openshift_version after create, so the cluster must be re-created.
+
+          Recovery (preserves mirror — only re-does AI/infra-env/ECS image/cluster-stack):
+            1. Confirm all.yml openshift_version is set correctly first.
+            2. ansible-playbook ansible/playbooks/99-teardown.yml \
+                 -e teardown_target=cluster -e cluster_includes_ai=true \
+                 -e teardown_confirmed=true
+            3. ansible-playbook ansible/playbooks/01-prepare-iso.yml
+            4. ansible-playbook ansible/playbooks/02-import-image.yml
+            5. ansible-playbook ansible/playbooks/04-prepare-mirror.yml
+            6. ansible-playbook ansible/playbooks/06-create-cluster-stack.yml
+            7. ansible-playbook ansible/playbooks/07-install-cluster.yml
 
     - name: Load mirror CA cert content (for PATCH)
       ansible.builtin.slurp:

@@ -36,6 +36,9 @@
     teardown_confirmed: false
     teardown_preserves_ai: false    # mirror teardown 时是否保留 AI cluster + infra-env + ECS image
     delete_mirror_snapshots: false  # 是否连同 mirror snapshot 一起删
+    cluster_includes_ai: false      # cluster teardown 时是否也拆 AI cluster + infra-env + ECS image
+                                    # 用于 OCP 版本更换：mirror 保留，但 AI cluster 必须重建
+                                    # （AI v2 API 不允许 PATCH openshift_version，版本不可变）
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
     - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
@@ -140,21 +143,34 @@
               forward_zone_id: ''
               reverse_zone_id1: ''
               reverse_zone_id2: ''
+              # When cluster_includes_ai=true, also clear AI/image/iso fields
+              # so the next 01 doesn't try to adopt the just-deleted cluster.
+              cluster_id:   "{{ '' if (cluster_includes_ai | default(false) | bool) else (cluster_id | default('')) }}"
+              infra_env_id: "{{ '' if (cluster_includes_ai | default(false) | bool) else (infra_env_id | default('')) }}"
+              ecs_image_id: "{{ '' if (cluster_includes_ai | default(false) | bool) else (ecs_image_id | default('')) }}"
+              iso_path:     "{{ '' if (cluster_includes_ai | default(false) | bool) else (iso_path | default('')) }}"
 
-    # ── 2. AI cluster + infra-env + ECS image (only with mirror teardown) ──
-    # These are paired with the mirror image: the discovery ignition
-    # baked into the ECS image references infra_env_id; deleting either
-    # in isolation leaves a broken pair.
+    # ── 2. AI cluster + infra-env + ECS image ────────────────────────────────
+    # These are paired: the discovery ignition baked into the ECS image
+    # references infra_env_id; deleting either in isolation leaves a broken pair.
     #
-    # 跳过条件: teardown_preserves_ai=true（配快照恢复用，假设下次 mirror
-    # 从 snapshot 出来 CA + IP 都跟原来一样，AI install-config 里 PATCH 过
-    # 的 trustBundle + IDMS 都依然有效，所以 AI / infra-env / ECS image
-    # 可以完整复用，下次走 03 fast-path → 04 already_ready 跳过 → 06 → 07
-    # 一气呵成，不用重跑 01/02）。
+    # Triggers (delete all three):
+    #   - teardown_target=mirror|both AND not teardown_preserves_ai
+    #     (mirror is being rebuilt → new CA/IP → AI must be rebuilt too)
+    #   - teardown_target=cluster AND cluster_includes_ai=true
+    #     (OCP version change scenario: mirror preserved, but AI cluster
+    #      must be re-created because AI v2 API doesn't allow PATCHing
+    #      openshift_version on an existing cluster)
+    #
+    # Skip (keep all three):
+    #   - default cluster teardown (mirror untouched + AI valid for re-use)
+    #   - mirror teardown with teardown_preserves_ai=true
+    #     (snapshot restore expected — CA/IP preserved, AI install-config still valid)
     - name: Delete Assisted cluster + infra-env + ECS image
-      when:
-        - teardown_target in ['mirror', 'both']
-        - not (teardown_preserves_ai | bool)
+      when: >-
+        (teardown_target in ['mirror', 'both'] and not (teardown_preserves_ai | bool))
+        or
+        (teardown_target == 'cluster' and (cluster_includes_ai | bool))
       block:
         - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
           when: cluster_id is defined and cluster_id | length > 0
@@ -345,9 +361,17 @@
     - name: Teardown done
       ansible.builtin.debug:
         msg: |
-          ✓ split-teardown complete (target={{ teardown_target }}, preserves_ai={{ teardown_preserves_ai }}, delete_snapshots={{ delete_mirror_snapshots }}).
+          ✓ split-teardown complete (target={{ teardown_target }}, preserves_ai={{ teardown_preserves_ai }}, delete_snapshots={{ delete_mirror_snapshots }}, cluster_includes_ai={{ cluster_includes_ai }}).
 
-          {% if teardown_target == 'cluster' %}
+          {% if teardown_target == 'cluster' and (cluster_includes_ai | bool) %}
+          cluster-stack + AI cluster + infra-env + ECS image all gone (mirror PRESERVED).
+          Typical case: OCP openshift_version change.  Re-run:
+            ansible-playbook ansible/playbooks/01-prepare-iso.yml         # new AI cluster + infra-env with new version
+            ansible-playbook ansible/playbooks/02-import-image.yml        # new ECS image from new infra-env's ignition
+            ansible-playbook ansible/playbooks/04-prepare-mirror.yml      # re-PATCH new install-config (mirror itself skips heavy work)
+            ansible-playbook ansible/playbooks/06-create-cluster-stack.yml
+            ansible-playbook ansible/playbooks/07-install-cluster.yml
+          {% elif teardown_target == 'cluster' %}
           mirror-stack is untouched.  Re-run:
             ansible-playbook ansible/playbooks/06-create-cluster-stack.yml
             ansible-playbook ansible/playbooks/07-install-cluster.yml
