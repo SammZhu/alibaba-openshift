@@ -246,12 +246,22 @@ Resources:
         Version: '1'
         Statement:
           # ── ECS lifecycle (CCM + CAPA) ──────────────────────────────────────
+          # NOTE: CCM v2.x calls more actions than v1.x.  When you see a
+          # "Forbidden.RAM ... AuthAction: ecs:Foo" error in CCM logs,
+          # add ecs:Foo here, refresh the role, then restart CCM.
+          # 2026-05-30: added DescribeNetworkInterfaces +
+          # ModifyNetworkInterfaceAttribute (CCM v2.14.0 needs them to
+          # disable source-dest-check during node init — without these
+          # node-controller can't init node, taint stays, deadlock).
           - Effect: Allow
             Action:
               - ecs:DescribeInstances
+              - ecs:DescribeInstanceAttribute
               - ecs:DescribeInstanceTypes
               - ecs:DescribeRegions
               - ecs:DescribeZones
+              - ecs:DescribeNetworkInterfaces
+              - ecs:ModifyNetworkInterfaceAttribute
               - ecs:RunInstances
               - ecs:StopInstance
               - ecs:DeleteInstance
@@ -259,7 +269,10 @@ Resources:
               - ecs:TagResources
               - ecs:ListTagResources
             Resource: ['*']
-          # ── SLB (CCM LoadBalancer service) ──────────────────────────────────
+          # ── SLB / NLB (CCM LoadBalancer service) ────────────────────────────
+          # NLB-specific actions added 2026-05-30 — CCM v2.x uses NLB by
+          # default when service annotation specifies LoadBalancerType=nlb
+          # (or for IPv6-aware services).
           - Effect: Allow
             Action:
               - slb:CreateLoadBalancer
@@ -272,6 +285,18 @@ Resources:
               - slb:StopLoadBalancerListener
               - slb:DescribeLoadBalancerAttribute
               - slb:SetLoadBalancerDeleteProtection
+              - nlb:CreateLoadBalancer
+              - nlb:DeleteLoadBalancer
+              - nlb:ListLoadBalancers
+              - nlb:GetLoadBalancerAttribute
+              - nlb:CreateServerGroup
+              - nlb:DeleteServerGroup
+              - nlb:ListServerGroups
+              - nlb:AddServersToServerGroup
+              - nlb:RemoveServersFromServerGroup
+              - nlb:CreateListener
+              - nlb:DeleteListener
+              - nlb:ListListeners
             Resource: ['*']
           # ── VPC / VSwitch (CCM + CAPA network) ──────────────────────────────
           - Effect: Allow

@@ -106,6 +106,15 @@ rules:
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, list, watch, create, update]
+  # CCM v2.x watches EndpointSlice (replaces v1 Endpoints for LB backend
+  # tracking, modern k8s preferred API).  Without this, CCM logs
+  #   "endpointslices.discovery.k8s.io is forbidden: User
+  #    system:serviceaccount:alibaba-cloud-controller-manager:
+  #    cloud-controller-manager cannot list resource endpointslices ..."
+  # and reflector tight-loops every ~5 s.  Observed 2026-05-30.
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -223,6 +232,32 @@ spec:
             - --leader-elect-resource-namespace=alibaba-cloud-controller-manager
             - --health-probe-bind-addr=:10258
             - -v=2
+          # Override InClusterConfig kube-apiserver target.  By default Go's
+          # client-go reads KUBERNETES_SERVICE_HOST/PORT from env (set by
+          # kubelet to "kubernetes.default.svc" → ClusterIP 172.30.0.1).
+          # ClusterIP NAT requires kube-proxy or OVN-kubernetes-node, but
+          # CCM is in the BOOT chain *before* OVN can deploy — CNO needs
+          # nodes Ready, which needs CCM to remove cloudprovider.uninitialized
+          # taint, which needs CCM to be running.  Observed 2026-05-30:
+          # CCM stuck at `dial tcp 172.30.0.1:443: i/o timeout` (no NAT
+          # available pre-OVN) → leader election never completes → taint
+          # never removed → cluster install deadlocks.
+          #
+          # Workaround: point CCM directly at api-int.<cluster>.<base> via
+          # NLB.  hostNetwork pod, uses host DNS resolver which picks up
+          # the PrivateZone record, NLB hairpins to bootstrap kube-apiserver.
+          # Bypasses ClusterIP entirely.
+          #
+          # TODO: ${BASE_DOMAIN} should be templated per-cluster.  For now
+          # this assumes cluster=aliocp1 base=example.local; in 07 we slurp
+          # this manifest as-is — no Jinja render — so it's hardcoded.
+          # Better: make 07 template-render this file, OR have CCM read
+          # this URL from a downward-API field.
+          env:
+            - name: KUBERNETES_SERVICE_HOST
+              value: api-int.aliocp1.example.local
+            - name: KUBERNETES_SERVICE_PORT
+              value: "6443"
           ports:
             - name: health
               containerPort: 10258
