@@ -199,15 +199,17 @@
               - -o
               - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
               - "root@{{ mirror_private_ip }}"
+              # 避免 bash array ${#arr[@]}—— Jinja2 把 `{#` 当注释起始符
+              # ("Missing end of comment tag")。用计数器 + 直接 echo 替代。
               - >-
                 set -e;
-                errs=();
-                [ -x /opt/mirror-registry ] || errs+=("opt-mirror-registry-missing");
-                [ -x /usr/local/bin/oc-mirror ] || errs+=("oc-mirror-missing");
-                for u in quay-app quay-postgres quay-redis quay-pod; do [ -f /etc/systemd/system/${u}.service ] || errs+=("systemd-${u}-missing"); done;
-                [ -d /var/lib/containers/storage/volumes/pg-storage ] || errs+=("pg-storage-volume-missing");
-                [ -s /root/.docker/config.json ] || errs+=("docker-auth-missing");
-                if [ ${#errs[@]} -gt 0 ]; then echo "FATAL: vda mirror-registry filesystem incomplete:"; for e in "${errs[@]}"; do echo "  - $e"; done; exit 1; fi;
+                ERRCT=0;
+                [ -x /opt/mirror-registry ] || { echo "MISSING: /opt/mirror-registry"; ERRCT=$((ERRCT+1)); };
+                [ -x /usr/local/bin/oc-mirror ] || { echo "MISSING: /usr/local/bin/oc-mirror"; ERRCT=$((ERRCT+1)); };
+                for u in quay-app quay-postgres quay-redis quay-pod; do [ -f /etc/systemd/system/${u}.service ] || { echo "MISSING: systemd unit ${u}.service"; ERRCT=$((ERRCT+1)); }; done;
+                [ -d /var/lib/containers/storage/volumes/pg-storage ] || { echo "MISSING: pg-storage podman volume"; ERRCT=$((ERRCT+1)); };
+                [ -s /root/.docker/config.json ] || { echo "MISSING: /root/.docker/config.json"; ERRCT=$((ERRCT+1)); };
+                [ "$ERRCT" -eq 0 ] || { echo "FATAL: $ERRCT vda mirror-registry files missing"; exit 1; };
                 echo "OK: vda filesystem sanity passed"
           register: _snap_sanity
           changed_when: false
@@ -514,6 +516,7 @@
                   - -o
                   - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
                   - "root@{{ mirror_private_ip }}"
+                  # 同样避开 ${#arr[@]}（{# 触发 Jinja 注释 parser）。
                   - >-
                     set -e;
                     for i in $(seq 1 30); do [ -b /dev/vdc ] && break; sleep 2; done;
@@ -524,15 +527,15 @@
                     mount -o ro /dev/vdc3 /mnt/snap-verify;
                     trap 'umount /mnt/snap-verify 2>/dev/null || true' EXIT;
                     M=/mnt/snap-verify;
-                    errs=();
-                    [ -x $M/opt/mirror-registry ] || errs+=("opt-mirror-registry-missing");
-                    [ -x $M/usr/local/bin/oc-mirror ] || errs+=("oc-mirror-missing");
-                    for u in quay-app quay-postgres quay-redis quay-pod; do [ -f $M/etc/systemd/system/${u}.service ] || errs+=("systemd-${u}-missing"); done;
-                    [ -d $M/var/lib/containers/storage/volumes/pg-storage ] || errs+=("pg-storage-volume-missing");
-                    [ -s $M/root/.docker/config.json ] || errs+=("docker-auth-missing");
+                    ERRCT=0;
+                    [ -x $M/opt/mirror-registry ] || { echo "MISSING: /opt/mirror-registry"; ERRCT=$((ERRCT+1)); };
+                    [ -x $M/usr/local/bin/oc-mirror ] || { echo "MISSING: /usr/local/bin/oc-mirror"; ERRCT=$((ERRCT+1)); };
+                    for u in quay-app quay-postgres quay-redis quay-pod; do [ -f $M/etc/systemd/system/${u}.service ] || { echo "MISSING: systemd unit ${u}.service"; ERRCT=$((ERRCT+1)); }; done;
+                    [ -d $M/var/lib/containers/storage/volumes/pg-storage ] || { echo "MISSING: pg-storage podman volume"; ERRCT=$((ERRCT+1)); };
+                    [ -s $M/root/.docker/config.json ] || { echo "MISSING: /root/.docker/config.json"; ERRCT=$((ERRCT+1)); };
                     PG_FILES=$(find $M/var/lib/containers/storage/volumes/pg-storage -type f 2>/dev/null | wc -l);
-                    if [ "$PG_FILES" -lt 50 ]; then errs+=("pg-storage-file-count-$PG_FILES-suspect-empty-postgres"); fi;
-                    if [ ${#errs[@]} -gt 0 ]; then echo "FATAL: new system snapshot content incomplete (E2E verification failed):"; for e in "${errs[@]}"; do echo "  - $e"; done; exit 1; fi;
+                    [ "$PG_FILES" -ge 50 ] || { echo "MISSING: pg-storage file count $PG_FILES (suspect empty Postgres)"; ERRCT=$((ERRCT+1)); };
+                    [ "$ERRCT" -eq 0 ] || { echo "FATAL: $ERRCT problems with snapshot content (E2E verification failed)"; exit 1; };
                     echo "OK: new system snapshot E2E verified (vdc3 mount ro, key files present, pg-storage file count=$PG_FILES)"
               changed_when: false
 
