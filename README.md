@@ -9,6 +9,8 @@ Supports two installation methods via the same ROS template — choose `Installa
 > - **手动 / 调试**：[`QUICKSTART.md`](QUICKSTART.md) —— 五个 Phase 分步指导
 > - **第一次跑 / 想理解每步原理**：[`docs/test-walkthrough.md`](docs/test-walkthrough.md) —— 含预期输出 + 故障排查
 > - **China region / 跨境拉 quay.io 不稳**：[`docs/MIRROR.md`](docs/MIRROR.md) —— 私有 mirror 完整方案（架构 / 成本 / 工作流 / 故障排查）
+> - **Alibaba CCM（platform=external 契约 / image / config / 升级）**：[`docs/CCM.md`](docs/CCM.md) —— CCM 设计 + 踩坑表
+> - **Teardown 模式**（cluster / mirror / both / 各种 flag）：[`docs/TEARDOWN.md`](docs/TEARDOWN.md)
 >
 > 本 README 是设计参考。
 
