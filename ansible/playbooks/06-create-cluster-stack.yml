@@ -65,8 +65,11 @@
             ParameterValue: "{{ mirror_zone_id2 | default(zone2) }}"
           - ParameterKey: NodeRamRoleName
             ParameterValue: "{{ mirror_node_ram_role }}"
+          # 'none' sentinel: Aliyun ROS Fn::Equals against "" is unreliable
+          # (HasJumpHost condition silently false), see cluster-stack.yaml
+          # JumpHostSecurityGroupId comment.
           - ParameterKey: JumpHostSecurityGroupId
-            ParameterValue: "{{ jump_host_sg_id | default('') }}"
+            ParameterValue: "{{ jump_host_sg_id if (jump_host_sg_id | default('') | length > 0) else 'none' }}"
           # ── cluster-specific ─────────────────────────────────────────
           - ParameterKey: ClusterName
             ParameterValue: "{{ cluster_name }}"

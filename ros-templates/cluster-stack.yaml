@@ -55,12 +55,18 @@ Parameters:
     Description: Node RAM role name — from mirror-stack NodeRamRoleName
   JumpHostSecurityGroupId:
     Type: String
-    Default: ""
+    Default: "none"
     Description: |
       Optional jump-host SG ID — from mirror-stack JumpHostSecurityGroupId
       output (only present when mirror-stack had EnableJumpHost=true).
-      When non-empty, this stack adds SSH ingress rules to the master /
+      When != "none", this stack adds SSH ingress rules to the master /
       worker SGs allowing core@ from the jump host.
+
+      Why "none" sentinel instead of "": Aliyun ROS's !Equals against
+      an empty string evaluates to FALSE even when the parameter IS
+      empty — observed 2026-05-30 with HasJumpHost condition silently
+      false despite JumpHostSecurityGroupId being correctly passed.
+      Result: SSH rules never created → 07 scp-CA-cert times out.
 
   # ── Cluster identity ────────────────────────────────────────────────────
   ClusterName:
@@ -148,7 +154,7 @@ Conditions:
   IsAgentBased: !Equals [!Ref InstallationMethod, Agent-based]
   IsAssisted:   !Equals [!Ref InstallationMethod, Assisted]
   HasWorkers:   !Not [!Equals [!Ref ComputeCount, 0]]
-  HasJumpHost:  !Not [!Equals [!Ref JumpHostSecurityGroupId, ""]]
+  HasJumpHost:  !Not [!Equals [!Ref JumpHostSecurityGroupId, "none"]]
 
 Resources:
   # ── Security Groups ──────────────────────────────────────────────────────
