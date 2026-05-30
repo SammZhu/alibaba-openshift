@@ -494,49 +494,46 @@
                  | selectattr('Status','equalto','In_use') | list | length) == 1
               changed_when: false
 
-            # mirror ECS 上：原 vda + vdb 都已 mounted，新盘出现为 vdc（无挂载）。
-            # 系统盘有 GPT 分区，根分区在 part 3（从 lsblk 看 vda3 = /）。
+            # mirror ECS: original vda + vdb already mounted; new attached
+            # disk shows up as vdc.  System disk uses GPT; root partition is
+            # part 3 (lsblk on live ECS shows vda3 mounted as root).
+            # Use command:argv: (NOT shell:) to bypass split_args tokenizer
+            # which trips on the bash array + ${} + = combinations.
             - name: 挂载新 vdc3 并检查文件树
-              ansible.builtin.shell: |
-                {{ _ssh_to_mirror }} bash <<'REMOTE'
-                set -e
-                # 等内核认到新盘（attach 完成不等于设备文件就绪）
-                for i in $(seq 1 30); do
-                  [ -b /dev/vdc ] && break
-                  sleep 2
-                done
-                [ -b /dev/vdc ] || { echo "FATAL: /dev/vdc 未出现"; lsblk; exit 1; }
-                # 等分区表加载
-                for i in $(seq 1 10); do
-                  [ -b /dev/vdc3 ] && break
-                  partprobe /dev/vdc 2>/dev/null || true
-                  sleep 2
-                done
-                [ -b /dev/vdc3 ] || { echo "FATAL: /dev/vdc3 不存在（分区表残缺？）"; lsblk /dev/vdc; exit 1; }
-                mkdir -p /mnt/snap-verify
-                mount -o ro /dev/vdc3 /mnt/snap-verify
-                trap 'umount /mnt/snap-verify 2>/dev/null || true' EXIT
-                M=/mnt/snap-verify
-                errs=()
-                [ -x $M/opt/mirror-registry ]                          || errs+=("/opt/mirror-registry missing")
-                [ -x $M/usr/local/bin/oc-mirror ]                      || errs+=("/usr/local/bin/oc-mirror missing")
-                for u in quay-app quay-postgres quay-redis quay-pod; do
-                  [ -f $M/etc/systemd/system/${u}.service ]            || errs+=("${u}.service missing")
-                done
-                [ -d $M/var/lib/containers/storage/volumes/pg-storage ] || errs+=("pg-storage volume missing")
-                [ -s $M/root/.docker/config.json ]                     || errs+=("/root/.docker/config.json missing")
-                # 额外：pg-storage 卷里 Postgres 数据目录必须非空
-                PG_FILES=$(find $M/var/lib/containers/storage/volumes/pg-storage -type f 2>/dev/null | wc -l)
-                if [ "$PG_FILES" -lt 50 ]; then
-                  errs+=("pg-storage 文件数 = $PG_FILES，疑似空 Postgres（健康 ≥ 100）")
-                fi
-                if [ ${#errs[@]} -gt 0 ]; then
-                  echo "FATAL: 新拍的 system snapshot 内容残缺（端到端验证不通过）："
-                  for e in "${errs[@]}"; do echo "  ✗ $e"; done
-                  exit 1
-                fi
-                echo "✓ 新 system snapshot 端到端验证通过（/dev/vdc3 挂载读取，关键文件齐全，Postgres 文件数=$PG_FILES）"
-                REMOTE
+              ansible.builtin.command:
+                argv:
+                  - ssh
+                  - -i
+                  - "{{ ssh_priv_key_file }}"
+                  - -o
+                  - StrictHostKeyChecking=no
+                  - -o
+                  - UserKnownHostsFile=/dev/null
+                  - -o
+                  - ConnectTimeout=10
+                  - -o
+                  - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
+                  - "root@{{ mirror_private_ip }}"
+                  - >-
+                    set -e;
+                    for i in $(seq 1 30); do [ -b /dev/vdc ] && break; sleep 2; done;
+                    [ -b /dev/vdc ] || { echo "FATAL: /dev/vdc not appearing"; lsblk; exit 1; };
+                    for i in $(seq 1 10); do [ -b /dev/vdc3 ] && break; partprobe /dev/vdc 2>/dev/null || true; sleep 2; done;
+                    [ -b /dev/vdc3 ] || { echo "FATAL: /dev/vdc3 missing (partition table?)"; lsblk /dev/vdc; exit 1; };
+                    mkdir -p /mnt/snap-verify;
+                    mount -o ro /dev/vdc3 /mnt/snap-verify;
+                    trap 'umount /mnt/snap-verify 2>/dev/null || true' EXIT;
+                    M=/mnt/snap-verify;
+                    errs=();
+                    [ -x $M/opt/mirror-registry ] || errs+=("opt-mirror-registry-missing");
+                    [ -x $M/usr/local/bin/oc-mirror ] || errs+=("oc-mirror-missing");
+                    for u in quay-app quay-postgres quay-redis quay-pod; do [ -f $M/etc/systemd/system/${u}.service ] || errs+=("systemd-${u}-missing"); done;
+                    [ -d $M/var/lib/containers/storage/volumes/pg-storage ] || errs+=("pg-storage-volume-missing");
+                    [ -s $M/root/.docker/config.json ] || errs+=("docker-auth-missing");
+                    PG_FILES=$(find $M/var/lib/containers/storage/volumes/pg-storage -type f 2>/dev/null | wc -l);
+                    if [ "$PG_FILES" -lt 50 ]; then errs+=("pg-storage-file-count-$PG_FILES-suspect-empty-postgres"); fi;
+                    if [ ${#errs[@]} -gt 0 ]; then echo "FATAL: new system snapshot content incomplete (E2E verification failed):"; for e in "${errs[@]}"; do echo "  - $e"; done; exit 1; fi;
+                    echo "OK: new system snapshot E2E verified (vdc3 mount ro, key files present, pg-storage file count=$PG_FILES)"
               changed_when: false
 
           rescue:
