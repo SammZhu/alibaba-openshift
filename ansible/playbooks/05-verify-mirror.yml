@@ -365,6 +365,14 @@
       vars:
         _snap_system_name: "{{ cluster_name }}-mirror-system"
         _snap_data_name:   "{{ cluster_name }}-mirror-data"
+        # 第一个 block 的 vars 不会继承到这里——重新声明，否则下面的
+        # post-snapshot verify cleanup 任务用 {{ _ssh_to_mirror }} 会
+        # "undefined variable"。
+        _ssh_to_mirror: >-
+          ssh -i {{ ssh_priv_key_file }}
+          -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+          -o "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
+          root@{{ mirror_private_ip }}
       block:
         - name: 等待两个快照传到 OSS 完成（Progress=100%；最长 30 min）
           ansible.builtin.command:
