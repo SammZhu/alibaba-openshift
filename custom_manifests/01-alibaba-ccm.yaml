@@ -1,4 +1,31 @@
 ---
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║ ⚠️  CURRENTLY DISABLED in ansible/playbooks/07-install-cluster.yml      ║
+# ║                                                                          ║
+# ║ Image `registry.k8s.io/provider-alibaba-cloud/                          ║
+# ║   alibaba-cloud-controller-manager:v2.14.0` does not exist (the repo    ║
+# ║ is registered but no manifest is published — verified 2026-05-30).     ║
+# ║                                                                          ║
+# ║ Alibaba's own ACK build `registry.cn-hangzhou.aliyuncs.com/             ║
+# ║   acs/cloud-controller-manager-amd64:v2.14.0` IS pullable but is a     ║
+# ║ different binary (path /cloud-controller-manager, JSON config format,  ║
+# ║ different flag set — no --secure-port, no --cloud-provider).            ║
+# ║                                                                          ║
+# ║ Until resolved (build upstream from source OR rewrite manifest for     ║
+# ║ Alibaba ACK CCM), this file is kept for reference but 07 does NOT      ║
+# ║ upload it.  Cluster install runs without CCM; node providerID is      ║
+# ║ instead set by 03-machineconfig-providerid-{master,worker}.yaml         ║
+# ║ (kubelet drop-in shell script).                                         ║
+# ║                                                                          ║
+# ║ Workaround needed during install: untaint                              ║
+# ║   node.cloudprovider.kubernetes.io/uninitialized:NoSchedule             ║
+# ║ from all nodes once they register (see 07 comment block).               ║
+# ║                                                                          ║
+# ║ Bugs fixed today that will matter when CCM is re-enabled:               ║
+# ║   - trusted-ca volume: configMap.optional=true (see volumes block)     ║
+# ║     to avoid chicken-and-egg with CNO injecting ca-bundle.crt.          ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
 # Alibaba Cloud Controller Manager — External Platform deployment
 # Source: https://github.com/kubernetes/cloud-provider-alibaba-cloud
 #
@@ -237,6 +264,18 @@ spec:
         - name: trusted-ca
           configMap:
             name: ccm-trusted-ca
+            # optional: true — CNO injects ca-bundle.crt into this ConfigMap
+            # via the `config.openshift.io/inject-trusted-cabundle: "true"`
+            # annotation, but that injection happens AFTER CCM has already
+            # been scheduled (CNO can't deploy without CCM removing the
+            # cloudprovider.uninitialized taint — chicken-and-egg).  Marking
+            # the volume as optional lets the mount succeed with an empty
+            # dir, CCM starts, removes the taint, CNO deploys, ca-bundle
+            # appears.  Without optional:true the pod stays ContainerCreating
+            # forever with "configmap references non-existent config key:
+            # ca-bundle.crt" and the cluster install deadlocks (witnessed
+            # 2026-05-30 14:00 CST).
+            optional: true
             items:
               - key: ca-bundle.crt
                 path: tls-ca-bundle.pem

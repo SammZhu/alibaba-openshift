@@ -9,12 +9,47 @@
       - folder: manifests
         name: 00-ovn-mtu.yaml
         src: "{{ repo_root }}/custom_manifests/00-ovn-mtu.yaml"
-      - folder: manifests
-        name: 01-alibaba-ccm.yaml
-        src: "{{ repo_root }}/custom_manifests/01-alibaba-ccm.yaml"
-      - folder: manifests
-        name: alibaba-ccm-config.yaml
-        src: "{{ dynamic_manifest_file }}"
+      # ── Alibaba CCM temporarily DISABLED (2026-05-30) ───────────────────
+      # The CCM manifest references registry.k8s.io/provider-alibaba-cloud/
+      # alibaba-cloud-controller-manager:v2.14.0 — upstream image source
+      # but that tag doesn't actually exist in the registry (the repo is
+      # registered but no manifests are published for v2.14.0; releases
+      # exist on GitHub only as source).
+      #
+      # Workaround attempted: Alibaba's own ACK CCM at
+      # registry.cn-hangzhou.aliyuncs.com/acs/cloud-controller-manager-amd64:v2.14.0
+      # IS available but is a DIFFERENT binary — wrong path (/cloud-controller-manager
+      # vs /bin/alibaba-cloud-controller-manager), missing flags (--secure-port,
+      # --cloud-provider), incompatible cloud config format (JSON vs INI).
+      #
+      # Path forward (TODO): either
+      #   (a) build upstream kubernetes/cloud-provider-alibaba-cloud from
+      #       source, host the image ourselves (push to mirror),
+      #   (b) rewrite the manifest to use Alibaba ACK CCM with their config
+      #       schema + RAM-role auth,
+      #   (c) skip CCM altogether and rely solely on
+      #       custom_manifests/03-machineconfig-providerid-{master,worker}.yaml
+      #       (still uploaded below) which sets node providerID via kubelet
+      #       drop-in.  Loss: no LB controller, no node-IP detection from
+      #       cloud, no route reconciliation (OVN overlay covers pod net so
+      #       this is mostly cosmetic for a basic cluster).
+      #
+      # With CCM disabled, kubelet still adds the
+      # node.cloudprovider.kubernetes.io/uninitialized:NoSchedule taint
+      # (driven by install-config platform=external).  After bootstrap-
+      # complete, the operator should manually untaint:
+      #   oc taint nodes --all \
+      #     node.cloudprovider.kubernetes.io/uninitialized:NoSchedule-
+      # so that cluster-network-operator / OVN DaemonSet etc. can schedule.
+      #
+      # When re-enabling, also remove the matching comment-out in
+      # tasks/path_defaults.yml or wherever dynamic_manifest_file is built.
+      # - folder: manifests
+      #   name: 01-alibaba-ccm.yaml
+      #   src: "{{ repo_root }}/custom_manifests/01-alibaba-ccm.yaml"
+      # - folder: manifests
+      #   name: alibaba-ccm-config.yaml
+      #   src: "{{ dynamic_manifest_file }}"
       - folder: openshift
         name: 03-machineconfig-providerid-master.yaml
         src: "{{ repo_root }}/custom_manifests/03-machineconfig-providerid-master.yaml"
@@ -584,6 +619,33 @@
         headers: { Authorization: "Bearer {{ ai_access_token }}" }
         status_code: [202, 409]   # 409 if already installing
       when: cluster_poll.json.status == 'ready'
+
+    # ── CCM-disabled workaround: untaint loop (run in another shell) ──────
+    # While 07 polls install below, run this in a SEPARATE shell to remove
+    # the cloudprovider.uninitialized taint that kubelet adds when CCM is
+    # expected.  Without it, ALL pods that don't tolerate that taint stay
+    # Pending and install will eventually time out (~60 min).
+    #
+    # The taint exists because the AI install-config has the cluster set
+    # up to use an external cloud provider but our custom Alibaba CCM is
+    # currently disabled (see manifests_to_upload block above for why).
+    #
+    #   while true ; do
+    #     ssh -i ~/.ssh/ali_ed25519 -J root@<jump_host_ip> core@<master-1-ip> \
+    #       "sudo kubectl --kubeconfig=/etc/kubernetes/kubeconfig taint nodes --all \
+    #          node.cloudprovider.kubernetes.io/uninitialized:NoSchedule- 2>&1 \
+    #          | grep -v 'not found' || true"
+    #     sleep 30
+    #   done
+    #
+    # Stop when you see "node/<name> untainted" twice (one per master).
+    # After that the cluster operators schedule + reconcile and AI
+    # transitions to status=installed.
+    #
+    # TODO: bake this into 07 as an async task once we either
+    #   (a) get a working CCM and remove the workaround entirely, or
+    #   (b) PATCH install-config to platform=none which stops kubelet from
+    #       adding the taint in the first place.
 
     # ── Poll until installed (token refreshes each iteration) ─────────────
     - name: Poll install status (~45-60 min)
