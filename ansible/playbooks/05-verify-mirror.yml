@@ -214,35 +214,11 @@
           register: _snap_sanity
           changed_when: false
 
-        # Postgres metadata 完整性深度检查：v2/_catalog 必须 ≥ 4 个 repo
-        # (3 rhai + ≥1 openshift/*)。能跑通说明 Postgres 数据完整 + admin token 有效。
-        - name: 快照前严格 sanity（Postgres metadata 完整：可枚举的 repo 数量）
-          ansible.builtin.command:
-            argv:
-              - ssh
-              - -i
-              - "{{ ssh_priv_key_file }}"
-              - -o
-              - StrictHostKeyChecking=no
-              - -o
-              - UserKnownHostsFile=/dev/null
-              - -o
-              - ConnectTimeout=10
-              - -o
-              - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
-              - "root@{{ mirror_private_ip }}"
-              - >-
-                set -e;
-                TOKEN=$(curl -ks -u '{{ mirror_init_user }}:{{ mirror_init_password }}'
-                'https://{{ mirror_private_ip }}:8443/v2/auth?service={{ mirror_private_ip }}:8443&scope=registry:catalog:*'
-                | jq -r .token);
-                COUNT=$(curl -ks -H "Authorization: Bearer $TOKEN"
-                'https://{{ mirror_private_ip }}:8443/v2/_catalog?n=1000'
-                | jq -r '.repositories | length');
-                echo "mirror catalog repo count = $COUNT";
-                if [ "$COUNT" -lt 4 ]; then echo "FATAL: expected >=4 repos (3 rhai + >=1 openshift), got $COUNT"; exit 1; fi
-          no_log: true   # mirror password in argv
-          changed_when: false
+        # 注：Postgres metadata 完整性已经被上面 line ~64 的 repo_probes 任务
+        # 验证过了（5 个关键 repo 经 bearer-token + /v2/<repo>/tags/list 全部
+        # 返回 200——这恰恰需要 Postgres metadata 把 repo 名映射到 blob 上）。
+        # 之前曾想加 v2/_catalog 计数，但 Quay 不支持 registry:catalog:* scope，
+        # 而且重复劳动，不如直接信任 repo_probes 的结果。
 
         - name: 快照前清理瞬态文件（释放 ~28 GB，缩小快照体积）
           ansible.builtin.shell: |
