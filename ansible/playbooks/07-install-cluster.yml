@@ -24,23 +24,24 @@
       #
       # Path forward (TODO): either
       #   (a) build upstream kubernetes/cloud-provider-alibaba-cloud from
-      #       source, host the image ourselves (push to mirror),
-      #   (b) rewrite the manifest to use Alibaba ACK CCM with their config
-      #       schema + RAM-role auth,
-      #   (c) skip CCM altogether and rely solely on
-      #       custom_manifests/03-machineconfig-providerid-{master,worker}.yaml
-      #       (still uploaded below) which sets node providerID via kubelet
-      #       drop-in.  Loss: no LB controller, no node-IP detection from
-      #       cloud, no route reconciliation (OVN overlay covers pod net so
-      #       this is mostly cosmetic for a basic cluster).
+      #       source, host the image ourselves (push to mirror) — preferred,
+      #       keeps us on upstream API,
+      #   (b) rewrite the manifest to use Alibaba ACK CCM with their JSON
+      #       config schema + RAM-role auth.
+      #
+      # NOTE: switching install-config platform=external → platform=none
+      # would silence the taint but is the WRONG fix — it tells OCP "no
+      # cloud" and disables LoadBalancer Service, Service.spec.externalIPs
+      # cloud integration, node IP detection from cloud, etc.  Keep
+      # platform=external; cluster requires CCM long-term.
       #
       # With CCM disabled, kubelet still adds the
       # node.cloudprovider.kubernetes.io/uninitialized:NoSchedule taint
-      # (driven by install-config platform=external).  After bootstrap-
-      # complete, the operator should manually untaint:
-      #   oc taint nodes --all \
-      #     node.cloudprovider.kubernetes.io/uninitialized:NoSchedule-
-      # so that cluster-network-operator / OVN DaemonSet etc. can schedule.
+      # (driven by install-config platform=external — correct semantic,
+      # we just don't have a working CCM YET to clear it).
+      # 07's "Untaint loop (workaround: CCM disabled)" async task below
+      # handles removal automatically while install polls — operator does
+      # not need to run anything in a separate shell.
       #
       # When re-enabling, also remove the matching comment-out in
       # tasks/path_defaults.yml or wherever dynamic_manifest_file is built.
@@ -620,32 +621,33 @@
         status_code: [202, 409]   # 409 if already installing
       when: cluster_poll.json.status == 'ready'
 
-    # ── CCM-disabled workaround: untaint loop (run in another shell) ──────
-    # While 07 polls install below, run this in a SEPARATE shell to remove
-    # the cloudprovider.uninitialized taint that kubelet adds when CCM is
-    # expected.  Without it, ALL pods that don't tolerate that taint stay
-    # Pending and install will eventually time out (~60 min).
+    # ── Workaround: untaint loop (because CCM is currently DISABLED) ──────
+    # Background task that ssh-loops to one of the masters and runs
+    # `kubectl taint nodes --all node.cloudprovider.kubernetes.io/
+    # uninitialized:NoSchedule-` every 30 s using the bootstrap kubeconfig
+    # on master node.  Each successful untaint emits "node/<name>
+    # untainted"; subsequent loops emit nothing (taint already absent —
+    # `|| true` swallows the "not found" error).
     #
-    # The taint exists because the AI install-config has the cluster set
-    # up to use an external cloud provider but our custom Alibaba CCM is
-    # currently disabled (see manifests_to_upload block above for why).
-    #
-    #   while true ; do
-    #     ssh -i ~/.ssh/ali_ed25519 -J root@<jump_host_ip> core@<master-1-ip> \
-    #       "sudo kubectl --kubeconfig=/etc/kubernetes/kubeconfig taint nodes --all \
-    #          node.cloudprovider.kubernetes.io/uninitialized:NoSchedule- 2>&1 \
-    #          | grep -v 'not found' || true"
-    #     sleep 30
-    #   done
-    #
-    # Stop when you see "node/<name> untainted" twice (one per master).
-    # After that the cluster operators schedule + reconcile and AI
-    # transitions to status=installed.
-    #
-    # TODO: bake this into 07 as an async task once we either
-    #   (a) get a working CCM and remove the workaround entirely, or
-    #   (b) PATCH install-config to platform=none which stops kubelet from
-    #       adding the taint in the first place.
+    # Runs async with poll: 0 (fire-and-forget) for up to 50 min so it
+    # outlives the typical install + bootstrap window.  When CCM gets
+    # re-enabled (image source fixed), DELETE this whole block.
+    - name: Workaround — untaint cloudprovider.uninitialized loop (CCM disabled)
+      ansible.builtin.shell: |
+        for i in $(seq 1 100); do
+          ssh -i {{ ssh_priv_key_file }} \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -o ConnectTimeout=10 \
+              -o "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}" \
+              core@{{ master_ip1 }} \
+              "sudo /usr/bin/kubectl --kubeconfig=/etc/kubernetes/kubeconfig taint nodes --all node.cloudprovider.kubernetes.io/uninitialized:NoSchedule- 2>&1 | grep -v 'not found' || true" 2>&1 \
+              | sed "s/^/[untaint-$i] /"
+          sleep 30
+        done
+      async: 3000   # 50 min upper bound
+      poll: 0       # fire-and-forget, don't block the playbook
+      register: _untaint_async
+      changed_when: false
 
     # ── Poll until installed (token refreshes each iteration) ─────────────
     - name: Poll install status (~45-60 min)
