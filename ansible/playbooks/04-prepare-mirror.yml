@@ -238,20 +238,52 @@
         - already_ready.rc != 0
         - "'PRESENT' not in (chunks_check.stdout | default(''))"
 
+    # 历史教训（2026-05）：之前这步 `2>/dev/null` 把 aliyun stat 的 404 吞掉，
+    # 然后 oss_size.stdout = "" → default('0') → 跟 tarball_size_check 0 比较
+    # 相等 → 下载步骤被 skip → 下一步 tar xf 找不到文件爆炸。常见触发：
+    # group_vars 里 openshift_version 改了（如 4.20 → 4.20.22），但 OSS 上
+    # tarball 还叫旧名字 → mirror_oss_object 解析的路径 404。
+    # 修复：保留 stderr 给 register 看到；任务后立刻 assert OSS object 存在。
     - name: Get expected tarball size from OSS
       ansible.builtin.shell: |
         AK=$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id' ~/.aliyun/config.json)
         SK=$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_secret' ~/.aliyun/config.json)
         aliyun oss stat "oss://{{ oss_bucket }}/{{ mirror_oss_object }}" \
           --endpoint="oss-{{ region }}.aliyuncs.com" \
-          --access-key-id="$AK" --access-key-secret="$SK" 2>/dev/null \
+          --access-key-id="$AK" --access-key-secret="$SK" \
           | awk -F': *' '/Content-Length/ {print $2}'
       register: oss_size
       changed_when: false
+      failed_when: false   # 让 assert 接管报错，给出 actionable 信息
       when:
         - already_ready.rc != 0
         - "'PRESENT' not in (chunks_check.stdout | default(''))"
       no_log: true
+
+    - name: Assert tarball OSS object 存在（防止之前的静默 skip → extract 爆炸）
+      ansible.builtin.assert:
+        that:
+          - oss_size.rc | default(0) == 0
+          - oss_size.stdout | default('') | trim | length > 0
+          - (oss_size.stdout | default('0') | trim | int) > 1000000   # > 1 MB 才像 tarball
+        fail_msg: |
+          OSS 上找不到 mirror tarball：
+            oss://{{ oss_bucket }}/{{ mirror_oss_object }}
+          常见原因：
+            - group_vars/all.yml 里改了 openshift_version（如 4.20 → 4.20.22）
+              但 OSS 上 tarball 还是旧名字。检查实际存在的对象：
+                aliyun oss ls oss://{{ oss_bucket }}/mirror-tarballs/ \
+                  --endpoint=oss-{{ region }}.aliyuncs.com
+            - 或者 OSS 对象被误删/换 bucket。
+          补救：把 tarball server-side 改名（intra-bucket 秒级）或重传：
+            aliyun oss cp oss://{{ oss_bucket }}/mirror-tarballs/<旧名>.tar \
+                          oss://{{ oss_bucket }}/{{ mirror_oss_object }} \
+                --endpoint=oss-{{ region }}.aliyuncs.com \
+                --part-size=104857600 --parallel=10
+          isc + tag-mapping sibling 也要同名地复制一遍。
+      when:
+        - already_ready.rc != 0
+        - "'PRESENT' not in (chunks_check.stdout | default(''))"
 
     - name: Download image tarball from OSS (with retries; aliyun multipart resumes from .temp)
       ansible.builtin.shell: |
