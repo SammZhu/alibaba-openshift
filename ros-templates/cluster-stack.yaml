@@ -189,6 +189,22 @@ Resources:
           PortRange: 2379/2380
           SourceCidrIp: !Ref VpcCidr
           Description: etcd
+        # OCP's default ingress operator on platform=external uses
+        # endpointPublishingStrategy=HostNetwork (no LoadBalancer Service
+        # is auto-created — that would need an additional cloud LB
+        # controller).  router-default pods bind master:80/443 via
+        # hostNetwork.  Without these rules, internal HTTP probes
+        # (oauth/console/canary) from other masters timeout and the
+        # authentication / console / ingress operators get stuck Degraded.
+        # Observed 2026-05-30.
+        - IpProtocol: tcp
+          PortRange: 80/80
+          SourceCidrIp: !Ref VpcCidr
+          Description: Ingress HTTP (router-default hostNetwork on masters)
+        - IpProtocol: tcp
+          PortRange: 443/443
+          SourceCidrIp: !Ref VpcCidr
+          Description: Ingress HTTPS (router-default hostNetwork on masters)
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
           Value: owned

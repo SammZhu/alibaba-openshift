@@ -631,6 +631,89 @@
         dest: "{{ output_dir }}/auth/kubeadmin-password"
         mode: "0600"
 
+    # ── Post-install: point *.apps wildcard DNS at real router pods ──────
+    # cluster-stack ROS template seeds *.apps as A → IngressVip param
+    # (default 10.0.16.6 = bogon placeholder).  IngressController on
+    # platform=external defaults to endpointPublishingStrategy=HostNetwork
+    # — no LoadBalancer Service auto-created — so router-default pods
+    # bind master:80/443 via hostNetwork.  Wildcard needs to point at the
+    # IPs of nodes actually running router-default.
+    #
+    # Idempotent: skip when CCM eventually deploys a LoadBalancer Service
+    # for ingress (future: install an external LB controller flow); for
+    # now always rewrite to current router-default pod hostIPs.
+    - name: Discover hostIPs of router-default pods (via downloaded kubeconfig)
+      ansible.builtin.command:
+        argv:
+          - oc
+          - --kubeconfig={{ output_dir }}/auth/kubeconfig
+          - -n
+          - openshift-ingress
+          - get
+          - pods
+          - -l
+          - ingresscontroller.operator.openshift.io/deployment-ingresscontroller=default
+          - -o
+          - jsonpath={range .items[*]}{.status.hostIP}{"\n"}{end}
+      register: _router_ips
+      changed_when: false
+
+    - name: Resolve current *.apps record ID + new IP target
+      ansible.builtin.set_fact:
+        # Pick first hostIP — pvtz A records support multiple values via
+        # multiple records but a single one suffices for HostNetwork (any
+        # one will route inside the cluster).  Future: write one A per
+        # router pod hostIP for round-robin.
+        _apps_target_ip: "{{ (_router_ips.stdout_lines | first) | trim }}"
+
+    - name: PATCH *.apps PrivateZone record to real router pod node IP
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - pvtz
+          - DescribeZoneRecords
+          - --ZoneId
+          - "{{ forward_zone_id }}"
+          - --Keyword
+          - apps
+          - --SearchMode
+          - LIKE
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _apps_rec_query
+      changed_when: false
+      when: _apps_target_ip | length > 0
+
+    - name: Extract *.apps record id
+      ansible.builtin.set_fact:
+        _apps_record_id: >-
+          {{ ((_apps_rec_query.stdout | from_json).Records.Record | default([])
+              | selectattr('Rr','equalto','*.apps') | list | first).RecordId }}
+      when: _apps_target_ip | length > 0
+
+    - name: UpdateZoneRecord *.apps → {{ _apps_target_ip }}
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - pvtz
+          - UpdateZoneRecord
+          - --RecordId
+          - "{{ _apps_record_id }}"
+          - --Rr
+          - "*.apps"
+          - --Type
+          - A
+          - --Value
+          - "{{ _apps_target_ip }}"
+          - --Ttl
+          - "60"
+          - --profile
+          - "{{ aliyun_profile }}"
+      when:
+        - _apps_target_ip | length > 0
+        - _apps_record_id is defined
+      changed_when: true
+
     # ── SCP kubeconfig to jump host (if available) ────────────────────────
     - name: Wait for jump host cloud-init to finish (userdata.done marker)
       ansible.builtin.command:
