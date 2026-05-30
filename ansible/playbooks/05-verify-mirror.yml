@@ -599,7 +599,11 @@
                   failed_when: false
                   changed_when: false
 
-                - name: DeleteDisk 临时盘
+                # 重试 DeleteDisk 直到磁盘真正消失。Aliyun race condition：
+                # DescribeDisks 返回 Status=Available 后立即 DeleteDisk 经常
+                # 失败（物理 detach 实际还在跑）。observed: 第一次 04:43:42 UTC
+                # 失败 silently，60 秒后手动重试就成功了。retries 等真正干净。
+                - name: DeleteDisk 临时盘（retry until 真正消失）
                   ansible.builtin.command:
                     argv:
                       - aliyun
@@ -609,8 +613,33 @@
                       - "{{ _verify_disk_id }}"
                       - --profile
                       - "{{ aliyun_profile }}"
-                  failed_when: false
+                  register: _verify_delete
+                  retries: 10
+                  delay: 6
+                  until: _verify_delete.rc == 0
                   changed_when: true
+
+                # 进一步确认：DescribeDisks 必须返回 0 个 disk。
+                # DeleteDisk rc=0 不绝对等于磁盘已消失（Aliyun async）。
+                - name: 确认临时盘真的消失了
+                  ansible.builtin.command:
+                    argv:
+                      - aliyun
+                      - ecs
+                      - DescribeDisks
+                      - --RegionId
+                      - "{{ region }}"
+                      - --DiskIds
+                      - '["{{ _verify_disk_id }}"]'
+                      - --profile
+                      - "{{ aliyun_profile }}"
+                  register: _verify_delete_confirm
+                  retries: 10
+                  delay: 3
+                  until: >-
+                    ((_verify_delete_confirm.stdout | from_json).Disks.Disk
+                     | default([]) | length) == 0
+                  changed_when: false
 
         - name: 删除同名旧快照（覆盖语义）
           ansible.builtin.command:
