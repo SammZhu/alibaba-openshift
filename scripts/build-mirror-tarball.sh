@@ -13,8 +13,16 @@
 #   - 5-10 GB free /tmp
 #
 # Outputs (in OSS):
-#   oss://<bucket>/mirror-tarballs/<cluster>-<version>.tar
-#   oss://<bucket>/mirror-tarballs/<cluster>-<version>.tar.sha256
+#   oss://<bucket>/mirror-tarballs/<cluster>-<patch-version>.tar
+#   oss://<bucket>/mirror-tarballs/<cluster>-<patch-version>.tar.sha256
+#   oss://<bucket>/mirror-tarballs/<cluster>-<patch-version>.tar.imageset-config.yaml
+#   oss://<bucket>/mirror-tarballs/<cluster>-<patch-version>.tar.tag-mapping.tsv
+#
+# <patch-version> is always X.Y.Z (e.g. 4.20.22), even when invoked with
+# OPENSHIFT_VERSION=4.20 (channel form) — the script resolves the channel
+# to its latest patch via Cincinnati and uses THAT in the OSS object name.
+# Matches ansible's mirror_oss_object template (group_vars/all.yml pins
+# openshift_version to X.Y.Z to prevent Cincinnati drift).
 #
 # Usage (recommended — auto-discovers all AI component images):
 #   OSS_BUCKET=openshift-iso-samzhu-test \
@@ -95,7 +103,6 @@ for v in AI_AGENT_IMAGE AI_INSTALLER_IMAGE AI_CONTROLLER_IMAGE; do
 done
 PULL_SECRET="${PULL_SECRET:-$HOME/.docker/config.json}"
 WORK_DIR="${WORK_DIR:-$(pwd)/mirror-build}"
-TARBALL_NAME="${CLUSTER_NAME}-${OPENSHIFT_VERSION}.tar"
 
 # Auto-discover the latest patch version in the stable channel if not pinned.
 # Setting min=max to a SPECIFIC version makes oc-mirror download just that one
@@ -113,6 +120,15 @@ if [[ -z "$OPENSHIFT_PATCH_VERSION" ]]; then
   }
   echo "    → will mirror $OPENSHIFT_PATCH_VERSION"
 fi
+
+# Tarball name MUST use X.Y.Z (patch version), NOT X.Y (channel form).
+# The ansible side resolves mirror_oss_object via group_vars/all.yml's
+# openshift_version which is asserted to be X.Y.Z form (channel form
+# would let Cincinnati silently drift to a newer patch than the mirror).
+# Historical bug (2026-05): build used X.Y, ansible expected X.Y.Z →
+# 04 silently skipped download (OSS stat returned 404 swallowed by
+# 2>/dev/null) → tar xf crashed with "Cannot open: No such file".
+TARBALL_NAME="${CLUSTER_NAME}-${OPENSHIFT_PATCH_VERSION}.tar"
 
 OSS_ENDPOINT="oss-${REGION}.aliyuncs.com"
 OSS_PREFIX="mirror-tarballs"
