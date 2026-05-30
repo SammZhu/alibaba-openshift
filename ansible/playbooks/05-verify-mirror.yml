@@ -179,40 +179,66 @@
         #   5) /root/.docker/config.json   — podman pull/tag/push 凭证
         #                                    （04 末尾 commit-tag aliases 步骤要用）
         # 失败直接 fail，block 后续清理/停 Quay/快照都不跑 → mirror 不受影响。
-        # 注意：两个 sanity 都用 <<'REMOTE'（quoted heredoc）+ 单行命令，
-        # 避免 Ansible split_args 在多行 \ 续行 + \$ 转义混合时 tokenizer
-        # 状态错乱（"failed at splitting arguments"）。Jinja 在 quoted heredoc
-        # 内仍会被 Ansible 模板层先展开后再交给 shell，所以 {{ var }} 没问题；
-        # 但 bash 的 $var 不会被本地 shell 误解（quoted 模式下不展开），
-        # 让远端 bash 自己解释。
+        # 注意用 command:+argv: 形式，不要 shell:。shell 模块的 freeform 走
+        # Ansible split_args tokenizer，对 errs=() + ${u} + $TOKEN 混合的
+        # bash 脚本会误判为 "unbalanced jinja2 block or quotes" 直接拒绝
+        # parse playbook。argv 是 list 直接交给 subprocess，零解析，万无一失。
+        # 跟同文件 line 64 的 repo_probes task 用同一套模板。
         - name: 快照前严格 sanity（vda 上 mirror-registry 文件树完整性）
-          ansible.builtin.shell: |
-            {{ _ssh_to_mirror }} bash <<'REMOTE'
-            set -e
-            errs=()
-            [ -x /opt/mirror-registry ] || errs+=("opt-mirror-registry-missing")
-            [ -x /usr/local/bin/oc-mirror ] || errs+=("oc-mirror-missing")
-            for u in quay-app quay-postgres quay-redis quay-pod ; do [ -f /etc/systemd/system/${u}.service ] || errs+=("systemd-unit-${u}-missing"); done
-            [ -d /var/lib/containers/storage/volumes/pg-storage ] || errs+=("pg-storage-volume-missing")
-            [ -s /root/.docker/config.json ] || errs+=("docker-auth-missing")
-            if [ ${#errs[@]} -gt 0 ]; then echo "FATAL: vda mirror-registry filesystem incomplete:"; for e in "${errs[@]}"; do echo "  - $e"; done; exit 1; fi
-            echo "OK: vda filesystem sanity passed (installer + oc-mirror + 4 systemd units + pg-storage volume + docker auth)"
-            REMOTE
+          ansible.builtin.command:
+            argv:
+              - ssh
+              - -i
+              - "{{ ssh_priv_key_file }}"
+              - -o
+              - StrictHostKeyChecking=no
+              - -o
+              - UserKnownHostsFile=/dev/null
+              - -o
+              - ConnectTimeout=10
+              - -o
+              - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
+              - "root@{{ mirror_private_ip }}"
+              - >-
+                set -e;
+                errs=();
+                [ -x /opt/mirror-registry ] || errs+=("opt-mirror-registry-missing");
+                [ -x /usr/local/bin/oc-mirror ] || errs+=("oc-mirror-missing");
+                for u in quay-app quay-postgres quay-redis quay-pod; do [ -f /etc/systemd/system/${u}.service ] || errs+=("systemd-${u}-missing"); done;
+                [ -d /var/lib/containers/storage/volumes/pg-storage ] || errs+=("pg-storage-volume-missing");
+                [ -s /root/.docker/config.json ] || errs+=("docker-auth-missing");
+                if [ ${#errs[@]} -gt 0 ]; then echo "FATAL: vda mirror-registry filesystem incomplete:"; for e in "${errs[@]}"; do echo "  - $e"; done; exit 1; fi;
+                echo "OK: vda filesystem sanity passed"
           register: _snap_sanity
           changed_when: false
 
         # Postgres metadata 完整性深度检查：v2/_catalog 必须 ≥ 4 个 repo
-        # (3 rhai + ≥1 openshift/*)。能跑通说明 Postgres 数据完整 +
-        # admin token 有效。Jinja 展开 user/pass 进 heredoc；no_log 防密码进 log。
+        # (3 rhai + ≥1 openshift/*)。能跑通说明 Postgres 数据完整 + admin token 有效。
         - name: 快照前严格 sanity（Postgres metadata 完整：可枚举的 repo 数量）
-          ansible.builtin.shell: |
-            {{ _ssh_to_mirror }} bash <<'REMOTE'
-            set -e
-            TOKEN=$(curl -ks -u '{{ mirror_init_user }}:{{ mirror_init_password }}' 'https://{{ mirror_private_ip }}:8443/v2/auth?service={{ mirror_private_ip }}:8443&scope=registry:catalog:*' | jq -r .token)
-            COUNT=$(curl -ks -H "Authorization: Bearer $TOKEN" 'https://{{ mirror_private_ip }}:8443/v2/_catalog?n=1000' | jq -r '.repositories | length')
-            echo "mirror catalog repo count = $COUNT"
-            if [ "$COUNT" -lt 4 ]; then echo "FATAL: expected >=4 repos (3 rhai + >=1 openshift), got $COUNT. Postgres metadata may be incomplete."; exit 1; fi
-            REMOTE
+          ansible.builtin.command:
+            argv:
+              - ssh
+              - -i
+              - "{{ ssh_priv_key_file }}"
+              - -o
+              - StrictHostKeyChecking=no
+              - -o
+              - UserKnownHostsFile=/dev/null
+              - -o
+              - ConnectTimeout=10
+              - -o
+              - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
+              - "root@{{ mirror_private_ip }}"
+              - >-
+                set -e;
+                TOKEN=$(curl -ks -u '{{ mirror_init_user }}:{{ mirror_init_password }}'
+                'https://{{ mirror_private_ip }}:8443/v2/auth?service={{ mirror_private_ip }}:8443&scope=registry:catalog:*'
+                | jq -r .token);
+                COUNT=$(curl -ks -H "Authorization: Bearer $TOKEN"
+                'https://{{ mirror_private_ip }}:8443/v2/_catalog?n=1000'
+                | jq -r '.repositories | length');
+                echo "mirror catalog repo count = $COUNT";
+                if [ "$COUNT" -lt 4 ]; then echo "FATAL: expected >=4 repos (3 rhai + >=1 openshift), got $COUNT"; exit 1; fi
           no_log: true   # mirror password in argv
           changed_when: false
 
