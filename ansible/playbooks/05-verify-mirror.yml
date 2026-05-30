@@ -159,6 +159,84 @@
       # 失败，Quay 卡在 stopped 状态需要人工救活。改用 systemctl 是 mirror-
       # registry 自己的管理方式（quay-{app,postgres,redis,pod}.service）。
       block:
+        # ── 严格文件树 sanity（防止把坏状态固化成 snapshot）─────────────────────
+        # 历史教训（2026-05）：曾出现 snapshot 名字叫 "system (Postgres + cert
+        # + Quay container layers)" 但实际 vda 只剩裸 OS（/opt/mirror-registry
+        # 不存在、pg-storage 卷不存在、systemd unit 不存在）。原因：前面的
+        # /health/instance + 仓库列表 HTTP 200 检查只能证明 Quay 容器活着
+        # + Postgres 有 metadata，**不能证明 mirror-registry 的 installer +
+        # systemd 管理层 + Postgres 卷的物理文件还在**。一旦这种残缺状态被
+        # 快照覆盖了之前的好快照，下次 03 fast-path 从坏 snapshot 派生 image
+        # 起 ECS，cloud-init 跑完后系统盘啥都没有，必须全量重做 04 (~70 min)。
+        #
+        # 检查项（任一缺失 → 拒绝拍快照）：
+        #   1) /opt/mirror-registry        — installer 树（重装/升级要用）
+        #   2) /usr/local/bin/oc-mirror    — 后续重新 import tarball 要用
+        #   3) /etc/systemd/system/quay-{app,postgres,redis,pod}.service
+        #                                  — systemd 管理层（boot 后自启 + restart）
+        #   4) /var/lib/containers/storage/volumes/pg-storage
+        #                                  — Postgres 数据卷（**真正的 metadata**）
+        #   5) /root/.docker/config.json   — podman pull/tag/push 凭证
+        #                                    （04 末尾 commit-tag aliases 步骤要用）
+        # 失败直接 fail，block 后续清理/停 Quay/快照都不跑 → mirror 不受影响。
+        - name: 快照前严格 sanity（vda 上 mirror-registry 文件树完整性）
+          ansible.builtin.shell: |
+            {{ _ssh_to_mirror }} bash <<'REMOTE'
+            set -e
+            errs=()
+            [ -x /opt/mirror-registry ] || errs+=("/opt/mirror-registry installer missing")
+            [ -x /usr/local/bin/oc-mirror ] || errs+=("/usr/local/bin/oc-mirror missing")
+            for u in quay-app quay-postgres quay-redis quay-pod ; do
+              [ -f /etc/systemd/system/${u}.service ] || errs+=("/etc/systemd/system/${u}.service missing")
+            done
+            # Postgres 数据卷：mirror-registry 用 podman named volume "pg-storage"
+            # 存 Postgres 数据，路径在 /var/lib/containers/storage/volumes/pg-storage
+            [ -d /var/lib/containers/storage/volumes/pg-storage ] \
+              || errs+=("pg-storage podman volume missing (Postgres metadata is gone)")
+            [ -s /root/.docker/config.json ] \
+              || errs+=("/root/.docker/config.json missing (podman push 凭证)")
+            if [ ${#errs[@]} -gt 0 ]; then
+              echo "FATAL: vda 上 mirror-registry 文件树不完整，拒绝拍快照："
+              for e in "${errs[@]}"; do echo "  ✗ $e"; done
+              echo ""
+              echo "可能原因："
+              echo "  - 04 中途失败、Quay 还残留在跑（curl health 误判为正常）"
+              echo "  - 之前手动 podman/systemctl 操作清掉了 systemd unit"
+              echo "  - 系统盘曾被换过（ReplaceSystemDisk）但 04 没重跑"
+              echo ""
+              echo "处理：重新跑 04（已就绪检查会跳过没必要的步骤），"
+              echo "      让 mirror-registry install 把文件树重建好，再跑 05。"
+              exit 1
+            fi
+            echo "✓ vda 文件树 sanity 通过：installer + oc-mirror + 4 个 systemd unit + pg-storage 卷 + docker auth 都在"
+            REMOTE
+          register: _snap_sanity
+          changed_when: false
+
+        # 已 mirror 的 repo 数量必须 ≥ 4（3 个 rhai + ≥1 个 openshift/*）。
+        # Postgres metadata 完整性的最深证据：能跑通 v2/_catalog 说明
+        # admin token 有效 + Postgres 能列出所有 repository 表项。
+        # Jinja 直接展开 user/pass 进 ssh argv；no_log 防止密码进 ansible.log。
+        - name: 快照前严格 sanity（Postgres metadata 完整：可枚举的 repo 数量）
+          ansible.builtin.shell: |
+            {{ _ssh_to_mirror }} bash <<REMOTE
+            set -e
+            TOKEN=\$(curl -ks -u '{{ mirror_init_user }}:{{ mirror_init_password }}' \
+              'https://{{ mirror_private_ip }}:8443/v2/auth?service={{ mirror_private_ip }}:8443&scope=registry:catalog:*' \
+              | jq -r .token)
+            COUNT=\$(curl -ks -H "Authorization: Bearer \$TOKEN" \
+              'https://{{ mirror_private_ip }}:8443/v2/_catalog?n=1000' \
+              | jq -r '.repositories | length')
+            echo "mirror 上可枚举 repo 数量 = \$COUNT"
+            if [ "\$COUNT" -lt 4 ]; then
+              echo "FATAL: 期望至少 4 个 repo (3 rhai + ≥1 openshift)，实测 \$COUNT。"
+              echo "       Postgres metadata 可能损坏 / 04 import 未完整。拒绝拍快照。"
+              exit 1
+            fi
+            REMOTE
+          no_log: true   # mirror password in argv
+          changed_when: false
+
         - name: 快照前清理瞬态文件（释放 ~28 GB，缩小快照体积）
           ansible.builtin.shell: |
             {{ _ssh_to_mirror }} bash <<'REMOTE'
