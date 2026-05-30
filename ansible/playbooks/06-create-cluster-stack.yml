@@ -65,11 +65,14 @@
             ParameterValue: "{{ mirror_zone_id2 | default(zone2) }}"
           - ParameterKey: NodeRamRoleName
             ParameterValue: "{{ mirror_node_ram_role }}"
-          # 'none' sentinel: Aliyun ROS Fn::Equals against "" is unreliable
-          # (HasJumpHost condition silently false), see cluster-stack.yaml
-          # JumpHostSecurityGroupId comment.
+          # JumpHostSecurityGroupId: the actual SG id (or "none" sentinel).
+          # EnableJumpHostSsh: separate boolean — see cluster-stack.yaml
+          # comment for why we don't compute the boolean from the SG id
+          # via !Not [!Equals [...]] (Aliyun ROS bug, observed 2026-05-30).
           - ParameterKey: JumpHostSecurityGroupId
             ParameterValue: "{{ jump_host_sg_id if (jump_host_sg_id | default('') | length > 0) else 'none' }}"
+          - ParameterKey: EnableJumpHostSsh
+            ParameterValue: "{{ 'true' if (jump_host_sg_id | default('') | length > 0) else 'false' }}"
           # ── cluster-specific ─────────────────────────────────────────
           - ParameterKey: ClusterName
             ParameterValue: "{{ cluster_name }}"

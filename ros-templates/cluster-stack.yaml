@@ -59,14 +59,27 @@ Parameters:
     Description: |
       Optional jump-host SG ID — from mirror-stack JumpHostSecurityGroupId
       output (only present when mirror-stack had EnableJumpHost=true).
-      When != "none", this stack adds SSH ingress rules to the master /
-      worker SGs allowing core@ from the jump host.
+      Used as SourceGroupId for the SSH ingress rules.  Pair with
+      EnableJumpHostSsh="true" to actually create the rules.
 
-      Why "none" sentinel instead of "": Aliyun ROS's !Equals against
-      an empty string evaluates to FALSE even when the parameter IS
-      empty — observed 2026-05-30 with HasJumpHost condition silently
-      false despite JumpHostSecurityGroupId being correctly passed.
-      Result: SSH rules never created → 07 scp-CA-cert times out.
+  EnableJumpHostSsh:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: |
+      When "true", create SSH-from-jump-host ingress rules on master +
+      worker SGs.  06 sets this to "true" when jump_host_sg_id is a
+      real SG id.
+
+      Why a separate boolean parameter instead of !Not [!Equals
+      [JumpHostSecurityGroupId, "none"]] on the SG ID itself:
+      observed 2026-05-30 that Aliyun ROS evaluates Fn::Not against
+      Fn::Equals as FALSE even when the inner Equals is plainly FALSE
+      (verified: param = real sg-..., compared to literal "none",
+      expected HasJumpHost=true → got false → SSH rules never created
+      → 07's scp-CA-cert step timed out connecting to master:22).
+      Plain Fn::Equals with positive logic ("true" → HasJumpHost) is
+      known to work — IsAssisted / HasWorkers in this template use it.
 
   # ── Cluster identity ────────────────────────────────────────────────────
   ClusterName:
@@ -154,7 +167,7 @@ Conditions:
   IsAgentBased: !Equals [!Ref InstallationMethod, Agent-based]
   IsAssisted:   !Equals [!Ref InstallationMethod, Assisted]
   HasWorkers:   !Not [!Equals [!Ref ComputeCount, 0]]
-  HasJumpHost:  !Not [!Equals [!Ref JumpHostSecurityGroupId, "none"]]
+  HasJumpHost:  !Equals [!Ref EnableJumpHostSsh, "true"]
 
 Resources:
   # ── Security Groups ──────────────────────────────────────────────────────
