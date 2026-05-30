@@ -215,6 +215,28 @@ for IMG in "$AI_AGENT_IMAGE" "$AI_INSTALLER_IMAGE" "$AI_CONTROLLER_IMAGE"; do
 done
 echo "    → tag mapping written to $TAG_MAPPING"
 
+# Alibaba Cloud Controller Manager — third-party image referenced by
+# custom_manifests/01-alibaba-ccm.yaml.  Upstream publishes ONLY to
+# registry-cn-hangzhou.ack.aliyuncs.com (NOT registry.k8s.io despite
+# the repo slot existing there).  Pin to digest like the rhai images
+# so oc-mirror v2 reliably picks it up.
+ALIBABA_CCM_IMAGE="${ALIBABA_CCM_IMAGE:-registry-cn-hangzhou.ack.aliyuncs.com/acs/cloud-controller-manager:v2.14.0}"
+echo "[2a/8] Pinning Alibaba CCM image: $ALIBABA_CCM_IMAGE"
+_CCM_REPO="${ALIBABA_CCM_IMAGE%:*}"
+_CCM_TAG="${ALIBABA_CCM_IMAGE##*:}"
+# No auth needed for ACR public images.
+_CCM_DIGEST=$(skopeo inspect --no-tags "docker://$ALIBABA_CCM_IMAGE" 2>/dev/null | jq -r .Digest)
+if [[ -z "$_CCM_DIGEST" || "$_CCM_DIGEST" == "null" ]]; then
+  echo "ERROR: skopeo inspect failed for $ALIBABA_CCM_IMAGE — can't resolve digest." >&2
+  exit 1
+fi
+echo "    - name: ${_CCM_REPO}@${_CCM_DIGEST}" >> imageset-config.yaml
+# Tag alias for mirror so v2.14.0 tag form resolves (CCM Deployment
+# uses tag, not digest, so 04's commit-tag-aliases task needs this entry).
+_CCM_REPO_PATH="${_CCM_REPO#registry-cn-hangzhou.ack.aliyuncs.com/}"
+printf '%s\t%s\t%s\n' "$_CCM_REPO_PATH" "$_CCM_TAG" "$_CCM_DIGEST" >> "$TAG_MAPPING"
+echo "    → pinned ${_CCM_TAG} → ${_CCM_DIGEST}"
+
 # Optional: mirror operator catalogs (post-install OperatorHub) so installing
 # any operator from those catalogs also works fully offline.
 # Set OPERATOR_CATALOGS=redhat-operators,certified-operators (comma-separated).

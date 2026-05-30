@@ -608,7 +608,16 @@ Outputs:
       rendezvousIP: ${RendezvousIp}
       hosts: []
   DynamicCustomManifest:
-    Description: alibaba-ccm-config.yaml
+    Description: |
+      alibaba-cloud-config ConfigMap — consumed by Alibaba CCM v2.x.
+      Schema (YAML/JSON, see pkg/config/cloud_config.go in upstream):
+        Global:
+          region, vpcid, vswitchid, zoneid, clusterID, ...
+      No AccessKeyID/AccessKeySecret — auth via ECS RAM role + IMDSv2
+      (--enable-imdsv2=true is CCM's default).
+      LoadBalancer address-type now controlled per-Service via annotation
+      `service.beta.kubernetes.io/alibaba-cloud-loadbalancer-address-type`
+      (was a global config knob in v1.x INI format).
     Value: !Sub |
       apiVersion: v1
       kind: ConfigMap
@@ -617,12 +626,12 @@ Outputs:
         namespace: alibaba-cloud-controller-manager
       data:
         cloud.conf: |
-          [Global]
-          cluster-id=${ClusterName}
-          region=${Region}
-          vpcid=${VpcId}
-          zoneid=${ZoneId}
-          vswitchid=${PrivateVSwitchId}
-
-          [LoadBalancer]
-          address-type=intranet
+          {
+            "Global": {
+              "clusterID": "${ClusterName}",
+              "region": "${Region}",
+              "vpcid": "${VpcId}",
+              "zoneid": "${ZoneId}",
+              "vswitchid": "${PrivateVSwitchId}"
+            }
+          }

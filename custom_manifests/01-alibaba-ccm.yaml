@@ -1,33 +1,20 @@
 ---
-# ╔══════════════════════════════════════════════════════════════════════════╗
-# ║ ⚠️  CURRENTLY DISABLED in ansible/playbooks/07-install-cluster.yml      ║
-# ║                                                                          ║
-# ║ Image `registry.k8s.io/provider-alibaba-cloud/                          ║
-# ║   alibaba-cloud-controller-manager:v2.14.0` does not exist (the repo    ║
-# ║ is registered but no manifest is published — verified 2026-05-30).     ║
-# ║                                                                          ║
-# ║ Alibaba's own ACK build `registry.cn-hangzhou.aliyuncs.com/             ║
-# ║   acs/cloud-controller-manager-amd64:v2.14.0` IS pullable but is a     ║
-# ║ different binary (path /cloud-controller-manager, JSON config format,  ║
-# ║ different flag set — no --secure-port, no --cloud-provider).            ║
-# ║                                                                          ║
-# ║ Until resolved (build upstream from source OR rewrite manifest for     ║
-# ║ Alibaba ACK CCM), this file is kept for reference but 07 does NOT      ║
-# ║ upload it.  Cluster install runs without CCM; node providerID is      ║
-# ║ instead set by 03-machineconfig-providerid-{master,worker}.yaml         ║
-# ║ (kubelet drop-in shell script).                                         ║
-# ║                                                                          ║
-# ║ Workaround needed during install: untaint                              ║
-# ║   node.cloudprovider.kubernetes.io/uninitialized:NoSchedule             ║
-# ║ from all nodes once they register (see 07 comment block).               ║
-# ║                                                                          ║
-# ║ Bugs fixed today that will matter when CCM is re-enabled:               ║
-# ║   - trusted-ca volume: configMap.optional=true (see volumes block)     ║
-# ║     to avoid chicken-and-egg with CNO injecting ca-bundle.crt.          ║
-# ╚══════════════════════════════════════════════════════════════════════════╝
-
 # Alibaba Cloud Controller Manager — External Platform deployment
 # Source: https://github.com/kubernetes/cloud-provider-alibaba-cloud
+#
+# Image source: registry-cn-hangzhou.ack.aliyuncs.com/acs/cloud-controller-manager:v2.14.0
+#   (per upstream release notes — NOT registry.k8s.io which is empty).
+#   IDMS rule in 04-prepare-mirror.yml rewrites to mirror at install time.
+#
+# 2026-05-30 lessons baked in:
+#   - binary path /cloud-controller-manager (not /bin/alibaba-cloud-...)
+#   - drop --secure-port, --cloud-provider (not supported by v2.x)
+#   - --configure-cloud-routes=false (OVN overlay handles pod net)
+#   - cloud config schema is JSON/YAML struct (see ROS template
+#     DynamicCustomManifest), not the legacy INI [Global]...
+#   - removed trusted-ca volume — was the chicken-and-egg source with
+#     CNO inject-trusted-cabundle; CCM uses RHCOS default Mozilla CAs.
+#   - removed AccessKey/Secret from Global — RAM role via IMDSv2 (default).
 #
 # Follows the OpenShift Infrastructure Provider Onboarding Guide
 # (Platform External path):
@@ -67,19 +54,10 @@ metadata:
     openshift.io/run-level: "0"
 
 ---
-# ── Trusted CA bundle ─────────────────────────────────────────────────────────
-# OpenShift's cluster-network-operator auto-populates this ConfigMap with the
-# combined system + user-managed CA bundle. Mount it so the CCM can validate
-# TLS to the Alibaba Cloud API endpoints over any cluster-wide proxy.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: ccm-trusted-ca
-  namespace: alibaba-cloud-controller-manager
-  annotations:
-    config.openshift.io/inject-trusted-cabundle: "true"
+# (ccm-trusted-ca ConfigMap removed; see Deployment volume comment for why —
+#  CNO inject-trusted-cabundle deadlock during install.  CCM uses RHCOS
+#  default Mozilla root CA bundle for outbound to *.aliyuncs.com APIs.)
 
----
 # ── RBAC ──────────────────────────────────────────────────────────────────────
 apiVersion: v1
 kind: ServiceAccount
@@ -209,33 +187,44 @@ spec:
                   infrastructure.openshift.io/cloud-controller-manager: AlibabaCloud
       containers:
         - name: cloud-controller-manager
-          # Pin to a known release. Refresh when the upstream CCM publishes
-          # a build compatible with the target OpenShift Kubernetes version.
-          # See: https://github.com/kubernetes/cloud-provider-alibaba-cloud/releases
-          image: registry.k8s.io/provider-alibaba-cloud/alibaba-cloud-controller-manager:v2.14.0
+          # Official upstream image (per release notes:
+          # https://github.com/kubernetes/cloud-provider-alibaba-cloud/releases/tag/v2.14.0).
+          # registry-cn-hangzhou.ack.aliyuncs.com is upstream's canonical
+          # publishing endpoint, NOT registry.k8s.io (the registry.k8s.io
+          # /provider-alibaba-cloud repo slot exists but has no manifests
+          # published — verified 2026-05-30).
+          #
+          # IDMS rule in 04-prepare-mirror.yml rewrites this path to the
+          # mirror at install time, so masters pull from
+          # mirror:8443/acs/cloud-controller-manager without crossing the
+          # border to Hangzhou.
+          image: registry-cn-hangzhou.ack.aliyuncs.com/acs/cloud-controller-manager:v2.14.0
           imagePullPolicy: IfNotPresent
+          # v2.x of the Alibaba CCM has its own minimal flag set — quite
+          # different from the generic kube-controller-manager / out-of-tree
+          # provider template most cloud CCMs derive from.  Notably:
+          #   - binary path is /cloud-controller-manager (NOT
+          #     /bin/alibaba-cloud-controller-manager as older docs say),
+          #   - no --secure-port / no --cloud-provider (alibabacloud is
+          #     the only target this binary knows),
+          #   - --configure-cloud-routes defaults to true and requires
+          #     --cluster-cidr; OVN overlay handles pod networking so
+          #     route reconciliation by the cloud provider is unnecessary
+          #     → set to false,
+          #   - --health-probe-bind-addr replaces --secure-port for the
+          #     liveness/readiness HTTP endpoint (default :10258).
+          # Auth: --enable-imdsv2=true (default) → reads RAM-role creds
+          # from ECS metadata service, no AccessKey/Secret needed.
           command:
-            - /bin/bash
-            - -c
-            - |
-              #!/bin/bash
-              set -o allexport
-              if [[ -f /etc/kubernetes/apiserver-url.env ]]; then
-                source /etc/kubernetes/apiserver-url.env
-              fi
-              exec /bin/alibaba-cloud-controller-manager \
-                --cloud-config=/etc/kubernetes/cloud-config/cloud.conf \
-                --cloud-provider=alibabacloud \
-                --use-service-account-credentials=true \
-                --leader-elect=true \
-                --leader-elect-lease-duration=137s \
-                --leader-elect-renew-deadline=107s \
-                --leader-elect-retry-period=26s \
-                --leader-elect-resource-namespace=alibaba-cloud-controller-manager \
-                --secure-port=10258 \
-                -v=2
+            - /cloud-controller-manager
+            - --cloud-config=/etc/kubernetes/cloud-config/cloud.conf
+            - --configure-cloud-routes=false
+            - --leader-elect=true
+            - --leader-elect-resource-namespace=alibaba-cloud-controller-manager
+            - --health-probe-bind-addr=:10258
+            - -v=2
           ports:
-            - name: https
+            - name: health
               containerPort: 10258
               protocol: TCP
           resources:
@@ -250,9 +239,13 @@ spec:
             - name: cloud-config
               mountPath: /etc/kubernetes/cloud-config
               readOnly: true
-            - name: trusted-ca
-              mountPath: /etc/pki/ca-trust/extracted/pem
-              readOnly: true
+            # trusted-ca volume removed: v2.x CCM talks to Alibaba public
+            # APIs (https://*.aliyuncs.com), which the RHCOS base Mozilla
+            # root CA bundle (/etc/pki/ca-trust/extracted/) covers natively
+            # — no need for CNO's inject-trusted-cabundle plumbing, which
+            # caused a chicken-and-egg deadlock during install (CNO can't
+            # schedule until CCM removes the taint; CCM can't start until
+            # CNO injects ca-bundle.crt).
       volumes:
         - name: host-etc-kube
           hostPath:
@@ -261,21 +254,3 @@ spec:
         - name: cloud-config
           configMap:
             name: alibaba-cloud-config
-        - name: trusted-ca
-          configMap:
-            name: ccm-trusted-ca
-            # optional: true — CNO injects ca-bundle.crt into this ConfigMap
-            # via the `config.openshift.io/inject-trusted-cabundle: "true"`
-            # annotation, but that injection happens AFTER CCM has already
-            # been scheduled (CNO can't deploy without CCM removing the
-            # cloudprovider.uninitialized taint — chicken-and-egg).  Marking
-            # the volume as optional lets the mount succeed with an empty
-            # dir, CCM starts, removes the taint, CNO deploys, ca-bundle
-            # appears.  Without optional:true the pod stays ContainerCreating
-            # forever with "configmap references non-existent config key:
-            # ca-bundle.crt" and the cluster install deadlocks (witnessed
-            # 2026-05-30 14:00 CST).
-            optional: true
-            items:
-              - key: ca-bundle.crt
-                path: tls-ca-bundle.pem

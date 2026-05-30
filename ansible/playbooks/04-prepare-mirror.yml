@@ -641,6 +641,40 @@
         REMOTE
       changed_when: true
 
+    # ── Alibaba CCM image: pre-pull onto mirror (one-time, idempotent) ─────
+    # The CCM Deployment in custom_manifests/01-alibaba-ccm.yaml references
+    # `registry-cn-hangzhou.ack.aliyuncs.com/acs/cloud-controller-manager:v2.14.0`.
+    # IDMS above rewrites that to mirror, but the mirror must actually have
+    # the image — and the build-mirror-tarball.sh additionalImages list
+    # doesn't currently include CCM (TODO).  This task fills the gap by
+    # pulling on the mirror ECS (which has NAT egress to Alibaba Cloud
+    # backbone, fast intra-region) and pushing into the mirror Quay.
+    #
+    # Idempotent: skopeo inspect on mirror first; only do the pull-tag-push
+    # cycle when the manifest is missing.  Cheap ~5 s when already present.
+    - name: Ensure Alibaba CCM image is on mirror (pre-pull + push if missing)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euo pipefail
+        export HOME=/root
+        REG=10.0.16.4:8443
+        REPO=acs/cloud-controller-manager
+        TAG=v2.14.0
+        # Check mirror first via curl + bearer flow (skopeo not installed).
+        TOKEN=$(curl -ks -u "$(jq -r .auths[].auth /root/.docker/config.json | base64 -d)" \
+          "https://$REG/v2/auth?service=$REG&scope=repository:$REPO:pull" | jq -r .token)
+        if curl -ksf -H "Authorization: Bearer $TOKEN" "https://$REG/v2/$REPO/manifests/$TAG" > /dev/null; then
+          echo "✓ $REG/$REPO:$TAG already on mirror, skipping pull"
+          exit 0
+        fi
+        echo "=== mirror missing $REPO:$TAG, pulling from registry-cn-hangzhou.ack.aliyuncs.com ==="
+        podman pull "registry-cn-hangzhou.ack.aliyuncs.com/$REPO:$TAG"
+        podman tag  "registry-cn-hangzhou.ack.aliyuncs.com/$REPO:$TAG" "$REG/$REPO:$TAG"
+        podman push --tls-verify=false "$REG/$REPO:$TAG"
+        echo "✓ $REG/$REPO:$TAG now on mirror"
+        REMOTE
+      changed_when: true
+
     # ── Step 9: expose CA + signal ready ────────────────────────────────────
     - name: Expose CA cert + write ready signal
       ansible.builtin.shell: |
@@ -760,7 +794,9 @@
               {'source': 'quay.io/openshift-release-dev/ocp-release',
                'mirrors': [mirror_private_ip + ':8443/openshift/release-images']},
               {'source': 'quay.io/openshift-release-dev/ocp-v4.0-art-dev',
-               'mirrors': [mirror_private_ip + ':8443/openshift/release']}
+               'mirrors': [mirror_private_ip + ':8443/openshift/release']},
+              {'source': 'registry-cn-hangzhou.ack.aliyuncs.com/acs/cloud-controller-manager',
+               'mirrors': [mirror_private_ip + ':8443/acs/cloud-controller-manager']}
             ],
             'additionalTrustBundle': mirror_ca_slurp.content | b64decode,
             'additionalTrustBundlePolicy': 'Always'
