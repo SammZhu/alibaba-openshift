@@ -404,6 +404,225 @@
             | list | length == 2
           changed_when: false
 
+        # ── 快照内容验证（trust-but-verify）─────────────────────────────────────
+        # 拍快照前已经验证过活 vda 文件树 + Postgres metadata 完整（block 开头
+        # 那两个 sanity）。这里再做一次"快照拍完后"的端到端验证，方法是：
+        # 把新快照转成临时数据盘 → 挂到活 mirror ECS 上 → ro mount → 检查文件树
+        # → 卸载/删盘。验证通过才执行后续的"删旧快照 + 存 state"。
+        #
+        # 为啥要再验证一次（已经有 pre-sanity 了为啥还要）：
+        #   - 防御 Aliyun snapshot 创建本身的 bug（极少见但发生过）
+        #   - 防御 DescribeDisks 解析出错快照了别的盘（_vda_disk_id 走样）
+        #   - 提供"这快照能挂能读"的实物证据，不只是"活盘看着好"的间接证据
+        #
+        # 失败时 rescue 会同时删掉新的 vda + vdb 快照（半好状态不留），
+        # 旧快照此时还没删（在下面"删除同名旧快照"任务里才删）→ 用户的
+        # mirror 仍可从旧快照恢复，无损。
+        - name: 快照内容验证（attach to live ECS + mount RO + 文件树检查）
+          when: snapshot_post_verify | default(true) | bool
+          vars:
+            _verify_disk_name: "{{ cluster_name }}-snap-verify-tmp"
+          block:
+            # 初始化 ID 变量，让下面的 always cleanup 永远可以引用
+            - name: 初始化 verify-disk ID（cleanup 用）
+              ansible.builtin.set_fact:
+                _verify_disk_id: ''
+
+            - name: CreateDisk from new system snapshot（临时验证盘）
+              ansible.builtin.command:
+                argv:
+                  - aliyun
+                  - ecs
+                  - CreateDisk
+                  - --RegionId
+                  - "{{ region }}"
+                  - --ZoneId
+                  - "{{ zone }}"
+                  - --SnapshotId
+                  - "{{ _new_vda_snap_id }}"
+                  - --DiskCategory
+                  - cloud_essd
+                  - --DiskName
+                  - "{{ _verify_disk_name }}"
+                  - --Description
+                  - "Phase 05 snapshot post-verify temp disk (auto-cleanup)"
+                  - --profile
+                  - "{{ aliyun_profile }}"
+              register: _verify_create
+              changed_when: true
+
+            - name: 记录 verify-disk ID
+              ansible.builtin.set_fact:
+                _verify_disk_id: "{{ (_verify_create.stdout | from_json).DiskId }}"
+
+            - name: AttachDisk 到活 mirror ECS（默认会出现为 /dev/vdc）
+              ansible.builtin.command:
+                argv:
+                  - aliyun
+                  - ecs
+                  - AttachDisk
+                  - --InstanceId
+                  - "{{ mirror_registry_id }}"
+                  - --DiskId
+                  - "{{ _verify_disk_id }}"
+                  - --profile
+                  - "{{ aliyun_profile }}"
+              changed_when: true
+
+            - name: 等待 attach 完成（DescribeDisks 直到 Status=In_use）
+              ansible.builtin.command:
+                argv:
+                  - aliyun
+                  - ecs
+                  - DescribeDisks
+                  - --RegionId
+                  - "{{ region }}"
+                  - --DiskIds
+                  - '["{{ _verify_disk_id }}"]'
+                  - --profile
+                  - "{{ aliyun_profile }}"
+              register: _verify_attach_poll
+              retries: 15
+              delay: 4
+              until: >-
+                ((_verify_attach_poll.stdout | from_json).Disks.Disk
+                 | selectattr('Status','equalto','In_use') | list | length) == 1
+              changed_when: false
+
+            # mirror ECS 上：原 vda + vdb 都已 mounted，新盘出现为 vdc（无挂载）。
+            # 系统盘有 GPT 分区，根分区在 part 3（从 lsblk 看 vda3 = /）。
+            - name: 挂载新 vdc3 并检查文件树
+              ansible.builtin.shell: |
+                {{ _ssh_to_mirror }} bash <<'REMOTE'
+                set -e
+                # 等内核认到新盘（attach 完成不等于设备文件就绪）
+                for i in $(seq 1 30); do
+                  [ -b /dev/vdc ] && break
+                  sleep 2
+                done
+                [ -b /dev/vdc ] || { echo "FATAL: /dev/vdc 未出现"; lsblk; exit 1; }
+                # 等分区表加载
+                for i in $(seq 1 10); do
+                  [ -b /dev/vdc3 ] && break
+                  partprobe /dev/vdc 2>/dev/null || true
+                  sleep 2
+                done
+                [ -b /dev/vdc3 ] || { echo "FATAL: /dev/vdc3 不存在（分区表残缺？）"; lsblk /dev/vdc; exit 1; }
+                mkdir -p /mnt/snap-verify
+                mount -o ro /dev/vdc3 /mnt/snap-verify
+                trap 'umount /mnt/snap-verify 2>/dev/null || true' EXIT
+                M=/mnt/snap-verify
+                errs=()
+                [ -x $M/opt/mirror-registry ]                          || errs+=("/opt/mirror-registry missing")
+                [ -x $M/usr/local/bin/oc-mirror ]                      || errs+=("/usr/local/bin/oc-mirror missing")
+                for u in quay-app quay-postgres quay-redis quay-pod; do
+                  [ -f $M/etc/systemd/system/${u}.service ]            || errs+=("${u}.service missing")
+                done
+                [ -d $M/var/lib/containers/storage/volumes/pg-storage ] || errs+=("pg-storage volume missing")
+                [ -s $M/root/.docker/config.json ]                     || errs+=("/root/.docker/config.json missing")
+                # 额外：pg-storage 卷里 Postgres 数据目录必须非空
+                PG_FILES=$(find $M/var/lib/containers/storage/volumes/pg-storage -type f 2>/dev/null | wc -l)
+                if [ "$PG_FILES" -lt 50 ]; then
+                  errs+=("pg-storage 文件数 = $PG_FILES，疑似空 Postgres（健康 ≥ 100）")
+                fi
+                if [ ${#errs[@]} -gt 0 ]; then
+                  echo "FATAL: 新拍的 system snapshot 内容残缺（端到端验证不通过）："
+                  for e in "${errs[@]}"; do echo "  ✗ $e"; done
+                  exit 1
+                fi
+                echo "✓ 新 system snapshot 端到端验证通过（/dev/vdc3 挂载读取，关键文件齐全，Postgres 文件数=$PG_FILES）"
+                REMOTE
+              changed_when: false
+
+          rescue:
+            - name: 验证失败 — 删除新拍的 system + data snapshot（不留半成品）
+              ansible.builtin.command:
+                argv:
+                  - aliyun
+                  - ecs
+                  - DeleteSnapshot
+                  - --RegionId
+                  - "{{ region }}"
+                  - --SnapshotId
+                  - "{{ item }}"
+                  - --profile
+                  - "{{ aliyun_profile }}"
+              loop:
+                - "{{ _new_vda_snap_id }}"
+                - "{{ _new_vdb_snap_id }}"
+              failed_when: false
+
+            - name: 失败终止 — 旧快照保留，下次重跑 05 即可重新拍
+              ansible.builtin.fail:
+                msg: |
+                  快照端到端验证失败，已删除刚拍的两个新快照。
+                  - 旧快照（上次 05 拍的）保留未动，可继续走 fast-path 恢复 mirror。
+                  - state.yml 没更新，下次 03 用的还是旧 ID。
+                  排查方向：mirror ECS 上 /opt/mirror-registry 是否真的存在？
+                  Quay 容器是否真的有 Postgres 数据？参考上面的 errs 列表。
+
+          always:
+            # 临时盘 cleanup —— 失败/成功都跑，防止 ECS 上挂着孤儿盘 + Aliyun
+            # 账单按时计费。verify_disk_id 可能为空（CreateDisk 之前就炸了），
+            # 也可能 attach 失败导致 Detach 不需要 → 全部 failed_when:false。
+            - name: cleanup — umount + DetachDisk + DeleteDisk
+              when: _verify_disk_id is defined and _verify_disk_id | length > 0
+              block:
+                - name: 卸载 mirror ECS 上的临时 mount
+                  ansible.builtin.shell: |
+                    {{ _ssh_to_mirror }} 'umount /mnt/snap-verify 2>/dev/null; rmdir /mnt/snap-verify 2>/dev/null || true'
+                  changed_when: false
+                  failed_when: false
+
+                - name: DetachDisk 临时盘
+                  ansible.builtin.command:
+                    argv:
+                      - aliyun
+                      - ecs
+                      - DetachDisk
+                      - --InstanceId
+                      - "{{ mirror_registry_id }}"
+                      - --DiskId
+                      - "{{ _verify_disk_id }}"
+                      - --profile
+                      - "{{ aliyun_profile }}"
+                  failed_when: false
+                  changed_when: true
+
+                - name: 等待 detach 完成（Status=Available）
+                  ansible.builtin.command:
+                    argv:
+                      - aliyun
+                      - ecs
+                      - DescribeDisks
+                      - --RegionId
+                      - "{{ region }}"
+                      - --DiskIds
+                      - '["{{ _verify_disk_id }}"]'
+                      - --profile
+                      - "{{ aliyun_profile }}"
+                  register: _verify_detach_poll
+                  retries: 15
+                  delay: 4
+                  until: >-
+                    ((_verify_detach_poll.stdout | from_json).Disks.Disk
+                     | selectattr('Status','equalto','Available') | list | length) == 1
+                  failed_when: false
+                  changed_when: false
+
+                - name: DeleteDisk 临时盘
+                  ansible.builtin.command:
+                    argv:
+                      - aliyun
+                      - ecs
+                      - DeleteDisk
+                      - --DiskId
+                      - "{{ _verify_disk_id }}"
+                      - --profile
+                      - "{{ aliyun_profile }}"
+                  failed_when: false
+                  changed_when: true
+
         - name: 删除同名旧快照（覆盖语义）
           ansible.builtin.command:
             argv:
