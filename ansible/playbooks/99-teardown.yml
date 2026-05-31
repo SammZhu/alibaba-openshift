@@ -346,9 +346,15 @@
               mirror_registry_id: ''
               jump_host_ip: ''
               jump_host_sg_id: ''
-              mirror_init_password: ''
-              # 快照 ID 仅在 delete_mirror_snapshots=true 时清空。
-              # 默认保留 → 下次 03 自动走 fast-path。
+              # 密码与 snapshot 必须**同进同退**：snapshot 保留时密码也必须保留。
+              # 否则下次 03 fast-path 会用 03 行 31-34 重新生成的新密码写入
+              # cloud-init / state.yml，但 Quay DB 是从 snapshot 恢复的，里面
+              # mirror-admin 用户仍是 snapshot 烘焙时的旧密码 → 04 的 belt-and-
+              # suspenders 任务 podman push CCM 时拿新密码认证 → 401 unauthorized
+              # → mirror-stack 整段失败。
+              # 删 snapshot 时密码同步清空，下次走 fresh path 重新生成 + Quay
+              # install 用同一个密码 --initPassword，保持一致。
+              mirror_init_password:      "{{ '' if (delete_mirror_snapshots | default(false) | bool) else (mirror_init_password      | default('')) }}"
               mirror_snapshot_system_id: "{{ '' if (delete_mirror_snapshots | default(false) | bool) else (mirror_snapshot_system_id | default('')) }}"
               mirror_snapshot_data_id:   "{{ '' if (delete_mirror_snapshots | default(false) | bool) else (mirror_snapshot_data_id   | default('')) }}"
               # AI / image / iso state：teardown_preserves_ai=true 时保留
