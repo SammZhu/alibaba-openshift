@@ -237,6 +237,27 @@ _CCM_REPO_PATH="${_CCM_REPO#registry-cn-hangzhou.ack.aliyuncs.com/}"
 printf '%s\t%s\t%s\n' "$_CCM_REPO_PATH" "$_CCM_TAG" "$_CCM_DIGEST" >> "$TAG_MAPPING"
 echo "    → pinned ${_CCM_TAG} → ${_CCM_DIGEST}"
 
+# Alibaba CAPA controller — third-party image referenced by
+# custom_manifests/02-capa-controller.yaml.  Built from
+# SammZhu/cluster-api-provider-alibaba @ feature/capi-v1beta1-rewrite,
+# published as quay.io/samzhu/openshift-capi-alicloud:v0.1.0 (public).
+# Same digest-pin + tag-alias treatment as the CCM above so the manifest's
+# tag-form reference (:v0.1.0) resolves on the mirror.
+OPENSHIFT_CAPI_IMAGE="${OPENSHIFT_CAPI_IMAGE:-quay.io/samzhu/openshift-capi-alicloud:v0.1.0}"
+echo "[2c/8] Pinning Alibaba CAPA image: $OPENSHIFT_CAPI_IMAGE"
+_CAPI_REPO="${OPENSHIFT_CAPI_IMAGE%:*}"
+_CAPI_TAG="${OPENSHIFT_CAPI_IMAGE##*:}"
+# Quay public repo — no auth needed.
+_CAPI_DIGEST=$(skopeo inspect --no-tags "docker://$OPENSHIFT_CAPI_IMAGE" 2>/dev/null | jq -r .Digest)
+if [[ -z "$_CAPI_DIGEST" || "$_CAPI_DIGEST" == "null" ]]; then
+  echo "ERROR: skopeo inspect failed for $OPENSHIFT_CAPI_IMAGE — can't resolve digest." >&2
+  exit 1
+fi
+echo "    - name: ${_CAPI_REPO}@${_CAPI_DIGEST}" >> imageset-config.yaml
+_CAPI_REPO_PATH="${_CAPI_REPO#quay.io/}"
+printf '%s\t%s\t%s\n' "$_CAPI_REPO_PATH" "$_CAPI_TAG" "$_CAPI_DIGEST" >> "$TAG_MAPPING"
+echo "    → pinned ${_CAPI_TAG} → ${_CAPI_DIGEST}"
+
 # Optional: mirror operator catalogs (post-install OperatorHub) so installing
 # any operator from those catalogs also works fully offline.
 # Set OPERATOR_CATALOGS=redhat-operators,certified-operators (comma-separated).

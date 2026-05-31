@@ -641,17 +641,20 @@
         REMOTE
       changed_when: true
 
-    # ── Alibaba CCM image: pre-pull onto mirror (one-time, idempotent) ─────
+    # ── Alibaba CCM image: belt-and-suspenders pre-pull (idempotent) ───────
     # The CCM Deployment in custom_manifests/01-alibaba-ccm.yaml references
     # `registry-cn-hangzhou.ack.aliyuncs.com/acs/cloud-controller-manager:v2.14.0`.
-    # IDMS above rewrites that to mirror, but the mirror must actually have
-    # the image — and the build-mirror-tarball.sh additionalImages list
-    # doesn't currently include CCM (TODO).  This task fills the gap by
-    # pulling on the mirror ECS (which has NAT egress to Alibaba Cloud
-    # backbone, fast intra-region) and pushing into the mirror Quay.
-    #
-    # Idempotent: skopeo inspect on mirror first; only do the pull-tag-push
-    # cycle when the manifest is missing.  Cheap ~5 s when already present.
+    # build-mirror-tarball.sh DOES now include CCM as a digest-pinned
+    # additionalImage + TAG_MAPPING entry (since 2026-05).  This pre-pull
+    # task stays as a safety net for two scenarios:
+    #   (a) mirror tarball built before that addition (older mirrors)
+    #   (b) imageset import skipped/failed for the CCM entry specifically
+    # Idempotent: skopeo inspect on mirror first; only pull-tag-push when
+    # the manifest is missing.  Cheap ~5 s when already present.
+    # NOTE: CAPA image (samzhu/openshift-capi-alicloud) is covered solely
+    # by build-mirror-tarball.sh; no parallel pre-pull task — quay.io is
+    # not routable from the mirror ECS without VPN, so a fallback pull
+    # wouldn't work anyway.
     - name: Ensure Alibaba CCM image is on mirror (pre-pull + push if missing)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
@@ -796,7 +799,14 @@
               {'source': 'quay.io/openshift-release-dev/ocp-v4.0-art-dev',
                'mirrors': [mirror_private_ip + ':8443/openshift/release']},
               {'source': 'registry-cn-hangzhou.ack.aliyuncs.com/acs/cloud-controller-manager',
-               'mirrors': [mirror_private_ip + ':8443/acs/cloud-controller-manager']}
+               'mirrors': [mirror_private_ip + ':8443/acs/cloud-controller-manager']},
+              # CAPA controller image — quay.io/samzhu/openshift-capi-alicloud
+              # is referenced by custom_manifests/02-capa-controller.yaml at
+              # tag :v0.1.0.  build-mirror-tarball.sh pins it to digest in
+              # imageset-config (additionalImages) and writes a tag alias
+              # into TAG_MAPPING so the :v0.1.0 form resolves on the mirror.
+              {'source': 'quay.io/samzhu/openshift-capi-alicloud',
+               'mirrors': [mirror_private_ip + ':8443/samzhu/openshift-capi-alicloud']}
             ],
             'additionalTrustBundle': mirror_ca_slurp.content | b64decode,
             'additionalTrustBundlePolicy': 'Always'
