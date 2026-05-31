@@ -6,7 +6,8 @@ Supports two installation methods via the same ROS template — choose `Installa
 
 > **👉 想直接动手？**
 > - **全自动（推荐）**：[`ansible/README.md`](ansible/README.md) —— 一条命令端到端，~90 分钟
-> - **手动 / 调试**：[`QUICKSTART.md`](QUICKSTART.md) —— 五个 Phase 分步指导
+> - **简要 split-flow 入口**：[`QUICKSTART.md`](QUICKSTART.md) —— 一页内跑通 + 故障排查链接
+> - **LEGACY 单栈 / 手动控制台流程**：[`QUICKSTART-LEGACY.md`](QUICKSTART-LEGACY.md) —— 不跑 Ansible 时用
 > - **第一次跑 / 想理解每步原理**：[`docs/test-walkthrough.md`](docs/test-walkthrough.md) —— 含预期输出 + 故障排查
 > - **China region / 跨境拉 quay.io 不稳**：[`docs/MIRROR.md`](docs/MIRROR.md) —— 私有 mirror 完整方案（架构 / 成本 / 工作流 / 故障排查）
 > - **Alibaba CCM（platform=external 契约 / image / config / 升级）**：[`docs/CCM.md`](docs/CCM.md) —— CCM 设计 + 踩坑表
