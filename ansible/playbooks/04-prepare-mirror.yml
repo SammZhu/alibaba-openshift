@@ -296,12 +296,15 @@
         - already_ready.rc != 0
         - "'PRESENT' not in (chunks_check.stdout | default(''))"
 
-    # 历史教训（2026-05）：之前这步 `2>/dev/null` 把 aliyun stat 的 404 吞掉，
-    # 然后 oss_size.stdout = "" → default('0') → 跟 tarball_size_check 0 比较
-    # 相等 → 下载步骤被 skip → 下一步 tar xf 找不到文件爆炸。常见触发：
-    # group_vars 里 openshift_version 改了（如 4.20 → 4.20.22），但 OSS 上
-    # tarball 还叫旧名字 → mirror_oss_object 解析的路径 404。
-    # 修复：保留 stderr 给 register 看到；任务后立刻 assert OSS object 存在。
+    # Lesson learned (2026-05): an earlier version of this task suppressed
+    # stderr with `2>/dev/null`, swallowing aliyun stat's 404.  oss_size.stdout
+    # then defaulted to "" → default('0') → matched tarball_size_check=0 → the
+    # download step was skipped → the next tar xf blew up with "no such file".
+    # Common trigger: group_vars's openshift_version changes (e.g. 4.20 →
+    # 4.20.22) while the OSS object still has the old name, so mirror_oss_object
+    # resolves to a 404 path.
+    # Fix: keep stderr visible to register; assert OSS object existence right
+    # after this task so failure is actionable.
     - name: Get expected tarball size from OSS
       ansible.builtin.shell: |
         AK=$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id' ~/.aliyun/config.json)
@@ -312,33 +315,33 @@
           | awk -F': *' '/Content-Length/ {print $2}'
       register: oss_size
       changed_when: false
-      failed_when: false   # 让 assert 接管报错，给出 actionable 信息
+      failed_when: false   # let the assert below produce the actionable error
       when:
         - already_ready.rc != 0
         - "'PRESENT' not in (chunks_check.stdout | default(''))"
       no_log: true
 
-    - name: Assert tarball OSS object 存在（防止之前的静默 skip → extract 爆炸）
+    - name: Assert tarball OSS object exists (prevents silent skip → extract crash)
       ansible.builtin.assert:
         that:
           - oss_size.rc | default(0) == 0
           - oss_size.stdout | default('') | trim | length > 0
-          - (oss_size.stdout | default('0') | trim | int) > 1000000   # > 1 MB 才像 tarball
+          - (oss_size.stdout | default('0') | trim | int) > 1000000   # > 1 MB to look like a real tarball
         fail_msg: |
-          OSS 上找不到 mirror tarball：
+          mirror tarball not found in OSS:
             oss://{{ oss_bucket }}/{{ mirror_oss_object }}
-          常见原因：
-            - group_vars/all.yml 里改了 openshift_version（如 4.20 → 4.20.22）
-              但 OSS 上 tarball 还是旧名字。检查实际存在的对象：
+          Common causes:
+            - group_vars/all.yml's openshift_version was changed (e.g. 4.20 → 4.20.22)
+              but the OSS tarball still has the old name.  Check what's there:
                 aliyun oss ls oss://{{ oss_bucket }}/mirror-tarballs/ \
                   --endpoint=oss-{{ region }}.aliyuncs.com
-            - 或者 OSS 对象被误删/换 bucket。
-          补救：把 tarball server-side 改名（intra-bucket 秒级）或重传：
-            aliyun oss cp oss://{{ oss_bucket }}/mirror-tarballs/<旧名>.tar \
+            - or the OSS object was deleted / moved to a different bucket.
+          Fix: either rename the tarball server-side (intra-bucket — seconds) or re-upload:
+            aliyun oss cp oss://{{ oss_bucket }}/mirror-tarballs/<old-name>.tar \
                           oss://{{ oss_bucket }}/{{ mirror_oss_object }} \
                 --endpoint=oss-{{ region }}.aliyuncs.com \
                 --part-size=104857600 --parallel=10
-          isc + tag-mapping sibling 也要同名地复制一遍。
+          The isc + tag-mapping sibling objects must be renamed/copied alongside (same base name).
       when:
         - already_ready.rc != 0
         - "'PRESENT' not in (chunks_check.stdout | default(''))"
@@ -562,30 +565,34 @@
     # uploaded to `${OSS_OBJECT}.imageset-config.yaml`).  Here we download
     # it onto the mirror ECS via the same ECS-RAM-role path used for the
     # tarball itself.  Decoupling from the tarball means:
-    #   - 任何能访问 OSS 的 ansible 控制机都能跑 04，不必跟当初打 tarball 的那台机器同一台
-    #   - 编辑 isc（如加 operator catalog）→ 只需重传 isc + 重跑 04，
-    #     不必重打 / 重传 22 GB tarball
-    #   - 失败模式 "ISC 缺失 → mirror: {} stub → no images to copy"
-    #     被下面的 fail-fast assert 拦截，不再静默 3 分钟空跑
+    #   - any ansible controller with OSS access can run 04 — no need
+    #     to share a host with whoever built the tarball
+    #   - editing the isc (e.g. adding operator catalogs) only requires
+    #     re-uploading the isc and re-running 04 — no repack / re-upload
+    #     of the 22 GB tarball
+    #   - the failure mode "ISC missing → mirror: {} stub → no images to copy"
+    #     is caught by the fail-fast assert below, no more 3-minute silent
+    #     no-op imports
     - name: Download imageset-config.yaml from OSS to mirror ECS
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
-        echo "=== $(date -Iseconds) 从 OSS 下载 imageset-config.yaml ==="
+        echo "=== $(date -Iseconds) downloading imageset-config.yaml from OSS ==="
         aliyun oss cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}.imageset-config.yaml" \
           /var/lib/quay-storage/extracted/imageset-config.yaml \
           --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
           --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
           --region "{{ region }}" --force
-        # 防御：80 bytes 是旧的空 stub `mirror: {}` 的大小，真 isc 至少 300+ bytes
+        # Sanity: 80 bytes is the size of the old empty `mirror: {}` stub;
+        # a real isc is at least 300+ bytes.
         SIZE=$(stat -c%s /var/lib/quay-storage/extracted/imageset-config.yaml)
         if [ "$SIZE" -lt 100 ]; then
-          echo "致命错误：下载下来的 imageset-config.yaml 只有 ${SIZE} bytes，疑似空 stub。"
-          echo "检查 OSS 对象：oss://{{ oss_bucket }}/{{ mirror_oss_object }}.imageset-config.yaml"
-          echo "可能是 build-mirror-tarball.sh 上传步骤没跑完，请重跑 build 脚本。"
+          echo "FATAL: downloaded imageset-config.yaml is only ${SIZE} bytes — looks like an empty stub."
+          echo "Inspect OSS object: oss://{{ oss_bucket }}/{{ mirror_oss_object }}.imageset-config.yaml"
+          echo "Most likely the build-mirror-tarball.sh upload step did not finish — re-run the build script."
           exit 2
         fi
-        echo "    ✓ imageset-config.yaml 已就位 (${SIZE} bytes)"
+        echo "    OK: imageset-config.yaml in place (${SIZE} bytes)"
         REMOTE
       when: already_ready.rc != 0
       changed_when: true
@@ -604,7 +611,7 @@
         # missing at this point, oc-mirror v2 will fail loud rather than
         # silently producing "No images to mirror" from an empty stub.
         ISC=imageset-config.yaml
-        test -s "$ISC" || { echo "致命错误：$ISC 在 mirror ECS 上不存在或为空 —— 上一步 scp 没跑成功？"; exit 2; }
+        test -s "$ISC" || { echo "FATAL: $ISC missing or empty on mirror ECS — did the previous scp step fail?"; exit 2; }
         # parallel-images=1 + parallel-layers=1 forces serial copy.
         # Defaults are 4 images x 5 layers = 20 concurrent goroutines
         # which OOM-kills oc-mirror on small mirror ECS during the

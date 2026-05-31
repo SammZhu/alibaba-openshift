@@ -275,15 +275,21 @@
           - (image_poll.stdout | from_json).Images.Image | length > 0
           - (image_poll.stdout | from_json).Images.Image[0].Status == 'Available'
         fail_msg: |
-          ImportImage 提交后等了 30 分钟还是没看到 image (ImageId={{ ecs_image_id }}).
-          可能原因：
-            - OSS 里 ISO 已被前一次 02 的 cleanup 删掉，但 state.yml 残留 ecs_image_id
-              让本次 02 跳过了 ImportImage，进 poll 查的是不存在的 ID
-            - ImportImage 提交失败但被 fire-and-forget 吞了
-          排查：
+          ImportImage was submitted but the image (ImageId={{ ecs_image_id }})
+          is still not visible after 30 minutes.
+
+          Likely causes:
+            - The ISO in OSS was deleted by a previous 02 cleanup, but
+              state.yml still carries the stale ecs_image_id.  This run
+              of 02 then skipped the ImportImage step and the poll
+              ended up querying a non-existent ImageId.
+            - The ImportImage submission itself failed but the error
+              was swallowed by the fire-and-forget invocation.
+
+          Diagnostics:
             aliyun ecs DescribeTasks --TaskAction ImportImage --RegionId {{ region }}
             aliyun oss ls oss://{{ oss_bucket }}/{{ oss_object }}
-            sed -i '/^ecs_image_id:/d' ansible/state.yml  # 清残留后重跑 02
+            sed -i '/^ecs_image_id:/d' ansible/state.yml  # drop the stale entry, then re-run 02
 
     # ── Persist state ─────────────────────────────────────────────────────
     - name: Save state

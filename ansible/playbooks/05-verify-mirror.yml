@@ -127,24 +127,31 @@
           Safe to proceed with Phase 07:
             ansible-playbook ansible/playbooks/07-install-cluster.yml
 
-    # ─── 快照 mirror ECS 双盘（默认开启，覆盖式）─────────────────────────────
-    # 在 04 验证通过的状态下捕获 vda + vdb 快照，未来 cluster 重建时可以从
-    # 快照恢复一个新 mirror ECS，省掉 Phase 04 的 1 小时 import。
+    # ─── Snapshot the mirror ECS's two disks (default on, overwrite-in-place) ──
+    # In a known-good state right after 04 verification, capture vda + vdb
+    # snapshots; future cluster rebuilds can restore a fresh mirror ECS
+    # from these and skip Phase 04's ~1-hour import.
     #
-    # 为什么必须双盘：
-    #   vdb = image blob（50 GB 全部 195 images）
-    #   vda = Postgres 元数据 + IP-SAN 自签证书 + Quay 容器层 + /opt 安装器
-    #         (只快照 vdb 的话 Postgres 元数据丢失 → Quay 看到空 registry)
+    # Why both disks are required:
+    #   vdb = image blob storage (~50 GB, all 195 images)
+    #   vda = Postgres metadata + IP-SAN self-signed certificate +
+    #         Quay container layers + /opt installer tree
+    #         (snapshot vdb only → Postgres metadata lost → Quay sees an
+    #          empty registry on restore)
     #
-    # 覆盖策略：
-    #   每次以固定名 "{cluster}-mirror-system" 和 "{cluster}-mirror-data"
-    #   创建新快照；新快照 Progress=100% 后删除同名的旧快照。
-    #   失败死在 CreateSnapshot 之前 → 旧快照保留；
-    #   失败死在轮询期间 → 同名多份共存（下次跑会一并清理）。
+    # Overwrite strategy:
+    #   Each run creates a new snapshot with the fixed names
+    #     "{cluster}-mirror-system" and "{cluster}-mirror-data".
+    #   After the new snapshot reaches Progress=100%, the same-named old
+    #   snapshot is deleted.
+    #     Failure before CreateSnapshot → old snapshot survives.
+    #     Failure during polling       → multiple same-named snapshots
+    #                                    coexist; next run cleans them up.
     #
-    # 跳过：  -e mirror_snapshot_enabled=false
-    # 重建时：参考 docs/SNAPSHOT.md — 生命周期、fast-path、互斥规则、恢复场景
-    - name: 快照 mirror ECS 双盘（vda + vdb）
+    # Skip:    -e mirror_snapshot_enabled=false
+    # Rebuild: see docs/SNAPSHOT.md (lifecycle, fast-path, mutex rules,
+    #          recovery scenarios)
+    - name: Snapshot the mirror ECS's two disks (vda + vdb)
       when: mirror_snapshot_enabled | default(true) | bool
       vars:
         _snap_system_name: "{{ cluster_name }}-mirror-system"
@@ -154,37 +161,46 @@
           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
           -o "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
           root@{{ mirror_private_ip }}
-      # block + always 保证：无论快照流程哪一步炸了，Quay 都会被拉起来。
-      # 之前 podman stop 之后碰到 systemd auto-restart 的 race 导致后续 task
-      # 失败，Quay 卡在 stopped 状态需要人工救活。改用 systemctl 是 mirror-
-      # registry 自己的管理方式（quay-{app,postgres,redis,pod}.service）。
+      # block + always guarantees Quay is brought back up no matter where
+      # the snapshot flow blows up.  Previously, `podman stop` hit a race
+      # with systemd's auto-restart, downstream tasks failed, and Quay was
+      # stuck in 'stopped' until manually rescued.  Use systemctl (the way
+      # mirror-registry manages itself, via the quay-{app,postgres,redis,pod}
+      # .service units) instead.
       block:
-        # ── 严格文件树 sanity（防止把坏状态固化成 snapshot）─────────────────────
-        # 历史教训（2026-05）：曾出现 snapshot 名字叫 "system (Postgres + cert
-        # + Quay container layers)" 但实际 vda 只剩裸 OS（/opt/mirror-registry
-        # 不存在、pg-storage 卷不存在、systemd unit 不存在）。原因：前面的
-        # /health/instance + 仓库列表 HTTP 200 检查只能证明 Quay 容器活着
-        # + Postgres 有 metadata，**不能证明 mirror-registry 的 installer +
-        # systemd 管理层 + Postgres 卷的物理文件还在**。一旦这种残缺状态被
-        # 快照覆盖了之前的好快照，下次 03 fast-path 从坏 snapshot 派生 image
-        # 起 ECS，cloud-init 跑完后系统盘啥都没有，必须全量重做 04 (~70 min)。
+        # ── Strict filesystem sanity (don't freeze a broken state into a snapshot) ──
+        # Lesson learned (2026-05): we once produced a snapshot named
+        # "system (Postgres + cert + Quay container layers)" but the actual
+        # vda was a bare OS — /opt/mirror-registry was missing, the
+        # pg-storage volume was missing, the systemd units were missing.
+        # Reason: the earlier /health/instance + repo-listing HTTP 200
+        # checks only prove the Quay container is alive and that Postgres
+        # has metadata — they DO NOT prove that the mirror-registry
+        # installer tree, the systemd management layer, and the Postgres
+        # data volume files are physically present.  Once that broken
+        # state overwrote the previous good snapshot, the next 03
+        # fast-path derived an image from the bad snapshot, ECS booted
+        # to a blank system disk, and we had to redo 04 in full (~70 min).
         #
-        # 检查项（任一缺失 → 拒绝拍快照）：
-        #   1) /opt/mirror-registry        — installer 树（重装/升级要用）
-        #   2) /usr/local/bin/oc-mirror    — 后续重新 import tarball 要用
+        # Checks (any miss → refuse to take the snapshot):
+        #   1) /opt/mirror-registry        — installer tree (needed for reinstall/upgrade)
+        #   2) /usr/local/bin/oc-mirror    — needed by any future re-import
         #   3) /etc/systemd/system/quay-{app,postgres,redis,pod}.service
-        #                                  — systemd 管理层（boot 后自启 + restart）
+        #                                  — systemd layer (auto-start + restart on boot)
         #   4) /var/lib/containers/storage/volumes/pg-storage
-        #                                  — Postgres 数据卷（**真正的 metadata**）
-        #   5) /root/.docker/config.json   — podman pull/tag/push 凭证
-        #                                    （04 末尾 commit-tag aliases 步骤要用）
-        # 失败直接 fail，block 后续清理/停 Quay/快照都不跑 → mirror 不受影响。
-        # 注意用 command:+argv: 形式，不要 shell:。shell 模块的 freeform 走
-        # Ansible split_args tokenizer，对 errs=() + ${u} + $TOKEN 混合的
-        # bash 脚本会误判为 "unbalanced jinja2 block or quotes" 直接拒绝
-        # parse playbook。argv 是 list 直接交给 subprocess，零解析，万无一失。
-        # 跟同文件 line 64 的 repo_probes task 用同一套模板。
-        - name: 快照前严格 sanity（vda 上 mirror-registry 文件树完整性）
+        #                                  — Postgres data volume (the REAL metadata)
+        #   5) /root/.docker/config.json   — podman pull/tag/push credentials
+        #                                    (needed by 04's tail commit-tag aliases step)
+        # On failure: fail outright; the rest of the block (cleanup / stop Quay /
+        # snapshot) does not run, so the live mirror is unaffected.
+        # Use command:+argv: (NOT shell:).  shell module's freeform goes
+        # through Ansible's split_args tokenizer, which misinterprets bash
+        # snippets that mix errs=() + ${u} + $TOKEN as
+        # "unbalanced jinja2 block or quotes" and refuses to parse the
+        # playbook.  argv is a list passed directly to subprocess — zero
+        # tokenization, bulletproof.
+        # Same template pattern as the repo_probes task at line 64 of this file.
+        - name: Pre-snapshot strict sanity — vda mirror-registry filesystem integrity
           ansible.builtin.command:
             argv:
               - ssh
@@ -199,8 +215,9 @@
               - -o
               - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
               - "root@{{ mirror_private_ip }}"
-              # 避免 bash array ${#arr[@]}—— Jinja2 把 `{#` 当注释起始符
-              # ("Missing end of comment tag")。用计数器 + 直接 echo 替代。
+              # Avoid bash array ${#arr[@]} — Jinja2 treats `{#` as the
+              # start of a comment ("Missing end of comment tag").
+              # Use a counter + plain echo instead.
               - >-
                 set -e;
                 ERRCT=0;
@@ -214,13 +231,15 @@
           register: _snap_sanity
           changed_when: false
 
-        # 注：Postgres metadata 完整性已经被上面 line ~64 的 repo_probes 任务
-        # 验证过了（5 个关键 repo 经 bearer-token + /v2/<repo>/tags/list 全部
-        # 返回 200——这恰恰需要 Postgres metadata 把 repo 名映射到 blob 上）。
-        # 之前曾想加 v2/_catalog 计数，但 Quay 不支持 registry:catalog:* scope，
-        # 而且重复劳动，不如直接信任 repo_probes 的结果。
+        # Note: Postgres metadata integrity has already been verified by the
+        # repo_probes task at line ~64 above — 5 critical repos all returned
+        # HTTP 200 via bearer-token + /v2/<repo>/tags/list, which is only
+        # possible when Postgres metadata correctly maps repo names to blobs.
+        # We considered also counting v2/_catalog entries, but Quay does not
+        # support the registry:catalog:* scope, and it would duplicate work
+        # better left to repo_probes.
 
-        - name: 快照前清理瞬态文件（释放 ~28 GB，缩小快照体积）
+        - name: Pre-snapshot — purge transient files (frees ~28 GB, shrinks snapshot)
           ansible.builtin.shell: |
             {{ _ssh_to_mirror }} bash <<'REMOTE'
             set -euxo pipefail
@@ -230,22 +249,24 @@
             REMOTE
           changed_when: true
 
-        - name: 静默 Quay（systemctl stop，确保 Postgres 一致点）
+        - name: Quiesce Quay (systemctl stop, for a Postgres-consistent point)
           ansible.builtin.shell: |
             {{ _ssh_to_mirror }} bash <<'REMOTE'
             set -euxo pipefail
-            # mirror-registry 把每个容器注册成 systemd service，systemd 会
-            # auto-restart 任何 podman 进程死掉的容器。必须停 service 而不是
-            # 容器，否则会被 systemd 立刻拉起 + race 出 "no such container"。
+            # mirror-registry registers each container as a systemd service;
+            # systemd auto-restarts any container whose podman process dies.
+            # We must stop the SERVICE (not the container), or systemd will
+            # immediately race-restart it and we hit "no such container".
             systemctl stop quay-app.service quay-redis.service quay-postgres.service || true
-            # quay-pod.service 不停：infra container 死掉会摧毁 pod，data
-            # 卷绑挂掉，反而更复杂。只要 app/redis/postgres 停，Postgres 会
-            # checkpoint，足够拿一致点。
+            # We do NOT stop quay-pod.service: killing the infra container
+            # tears down the pod and the data volume bind-mounts, which is
+            # more disruptive.  As long as app/redis/postgres are stopped
+            # Postgres checkpoints — that's a sufficient consistency point.
             sync; sync; sync
             REMOTE
           changed_when: true
 
-        - name: 查询 mirror ECS 的 system + data 磁盘 ID
+        - name: Look up the mirror ECS's system + data disk IDs
           ansible.builtin.command:
             argv:
               - aliyun
@@ -260,12 +281,12 @@
           register: _disk_lookup
           changed_when: false
 
-        - name: 解析 vda / vdb 的 DiskId
+        - name: Extract DiskId of vda / vdb
           ansible.builtin.set_fact:
             _vda_disk_id: "{{ ((_disk_lookup.stdout | from_json).Disks.Disk | selectattr('Type','equalto','system') | first).DiskId }}"
             _vdb_disk_id: "{{ ((_disk_lookup.stdout | from_json).Disks.Disk | selectattr('Type','equalto','data')   | first).DiskId }}"
 
-        - name: 查询同名旧快照（待新快照成功后删除）
+        - name: Look up same-named old snapshots (deleted after new ones succeed)
           ansible.builtin.command:
             argv:
               - aliyun
@@ -283,7 +304,7 @@
             - "{{ _snap_system_name }}"
             - "{{ _snap_data_name }}"
 
-        - name: 收集旧快照 ID 列表
+        - name: Collect old snapshot ID list
           ansible.builtin.set_fact:
             _old_snap_ids: >-
               {{ _old_snaps_query.results
@@ -294,7 +315,7 @@
                  | map(attribute='SnapshotId')
                  | list }}
 
-        - name: 创建 system 盘（vda）快照
+        - name: Create snapshot of system disk (vda)
           ansible.builtin.command:
             argv:
               - aliyun
@@ -312,7 +333,7 @@
               - "{{ aliyun_profile }}"
           register: _create_vda_snap
 
-        - name: 创建 data 盘（vdb）快照
+        - name: Create snapshot of data disk (vdb)
           ansible.builtin.command:
             argv:
               - aliyun
@@ -330,16 +351,17 @@
               - "{{ aliyun_profile }}"
           register: _create_vdb_snap
 
-        - name: 提取新快照 ID
+        - name: Extract new snapshot IDs
           ansible.builtin.set_fact:
             _new_vda_snap_id: "{{ (_create_vda_snap.stdout | from_json).SnapshotId }}"
             _new_vdb_snap_id: "{{ (_create_vdb_snap.stdout | from_json).SnapshotId }}"
 
-      # always 块：无论上面 block 内哪步炸，都把 Quay 拉起来。
-      # 之前一次失败正是因为 restart Quay 是普通 task，前面任一 task fail
-      # 就跳过它，Quay 卡在 stopped。
+      # always block: no matter where the above block fails, bring Quay
+      # back up.  A previous failure happened because the restart-Quay step
+      # was a regular task — any earlier failure skipped it and Quay was
+      # left stopped.
       always:
-        - name: 恢复 Quay（systemctl start + 健康轮询，无论快照是否成功）
+        - name: Restore Quay (systemctl start + health-poll, regardless of snapshot result)
           ansible.builtin.shell: |
             {{ _ssh_to_mirror }} bash <<'REMOTE'
             set -euxo pipefail
@@ -348,16 +370,17 @@
               curl -ksf https://{{ mirror_private_ip }}:8443/health/instance && { echo "Quay healthy"; exit 0; }
               sleep 5
             done
-            echo "Quay 健康检查超时（5 min）"; exit 1
+            echo "Quay health check timed out (5 min)"; exit 1
             REMOTE
           changed_when: true
 
-    # ── 第二个 block：快照完成后的处理（等 100% / 删旧 / 存 state）
-    # 单独分一个 block 是因为如果上面的 block always 把 Quay 拉起来时失败
-    # 了（极少见，但万一），我们不想后面这些 cleanup 也跑——但如果 Quay
-    # 拉起来成功，且快照创建成功，这里就该继续。
-    # 用 when 检查 _new_vda_snap_id / _new_vdb_snap_id 是否定义即可。
-    - name: 快照后处理（等待 + 覆盖 + 存 state）
+    # ── Second block: post-snapshot handling (wait for 100% / delete old / save state) ──
+    # Split into its own block: if the above block's always-restart failed
+    # (rare, but possible), we don't want this cleanup to run either —
+    # but if Quay came back up AND snapshot creation succeeded, this
+    # should continue.  Gating on whether _new_vda_snap_id /
+    # _new_vdb_snap_id are defined is sufficient.
+    - name: Post-snapshot handling (wait + overwrite + save state)
       when:
         - mirror_snapshot_enabled | default(true) | bool
         - _new_vda_snap_id is defined
@@ -365,16 +388,16 @@
       vars:
         _snap_system_name: "{{ cluster_name }}-mirror-system"
         _snap_data_name:   "{{ cluster_name }}-mirror-data"
-        # 第一个 block 的 vars 不会继承到这里——重新声明，否则下面的
-        # post-snapshot verify cleanup 任务用 {{ _ssh_to_mirror }} 会
-        # "undefined variable"。
+        # vars from the first block are NOT inherited here — redeclare,
+        # otherwise the post-snapshot verify cleanup tasks below using
+        # {{ _ssh_to_mirror }} would fail with "undefined variable".
         _ssh_to_mirror: >-
           ssh -i {{ ssh_priv_key_file }}
           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
           -o "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
           root@{{ mirror_private_ip }}
       block:
-        - name: 等待两个快照传到 OSS 完成（Progress=100%；最长 30 min）
+        - name: Wait until both snapshots reach Progress=100% in OSS (up to 30 min)
           ansible.builtin.command:
             argv:
               - aliyun
@@ -395,31 +418,40 @@
             | list | length == 2
           changed_when: false
 
-        # ── 快照内容验证（trust-but-verify）─────────────────────────────────────
-        # 拍快照前已经验证过活 vda 文件树 + Postgres metadata 完整（block 开头
-        # 那两个 sanity）。这里再做一次"快照拍完后"的端到端验证，方法是：
-        # 把新快照转成临时数据盘 → 挂到活 mirror ECS 上 → ro mount → 检查文件树
-        # → 卸载/删盘。验证通过才执行后续的"删旧快照 + 存 state"。
+        # ── Snapshot content verification (trust-but-verify) ──────────────────
+        # Before snapshotting we already verified the live vda's filesystem
+        # tree + Postgres metadata (the two sanity checks at the start of
+        # the block).  Here we add an end-to-end "after the snapshot is
+        # taken" verification: convert the new snapshot into a temp data
+        # disk → attach it to the live mirror ECS → mount read-only → check
+        # the filesystem tree → unmount/delete.  Only after this passes do
+        # we proceed to "delete old snapshots + save state".
         #
-        # 为啥要再验证一次（已经有 pre-sanity 了为啥还要）：
-        #   - 防御 Aliyun snapshot 创建本身的 bug（极少见但发生过）
-        #   - 防御 DescribeDisks 解析出错快照了别的盘（_vda_disk_id 走样）
-        #   - 提供"这快照能挂能读"的实物证据，不只是"活盘看着好"的间接证据
+        # Why verify again (we already have a pre-sanity check):
+        #   - Defend against bugs in Aliyun's snapshot creation itself
+        #     (rare but it has happened)
+        #   - Defend against a DescribeDisks parse error pointing
+        #     _vda_disk_id at the wrong disk
+        #   - Provide physical evidence "this snapshot can be mounted and
+        #     read", not just the indirect evidence "the live disk looks fine"
         #
-        # 失败时 rescue 会同时删掉新的 vda + vdb 快照（半好状态不留），
-        # 旧快照此时还没删（在下面"删除同名旧快照"任务里才删）→ 用户的
-        # mirror 仍可从旧快照恢复，无损。
-        - name: 快照内容验证（attach to live ECS + mount RO + 文件树检查）
+        # On failure, rescue deletes both new snapshots (no half-good state
+        # left behind); the OLD snapshots have not been deleted yet (that
+        # happens in the "delete same-named old snapshots" task below), so
+        # the user's mirror can still be restored from the old snapshots —
+        # no data loss.
+        - name: Verify snapshot contents (attach to live ECS + mount RO + check filesystem tree)
           when: snapshot_post_verify | default(true) | bool
           vars:
             _verify_disk_name: "{{ cluster_name }}-snap-verify-tmp"
           block:
-            # 初始化 ID 变量，让下面的 always cleanup 永远可以引用
-            - name: 初始化 verify-disk ID（cleanup 用）
+            # Initialise the ID variable so the always cleanup below
+            # can always reference it
+            - name: Initialise verify-disk ID (for cleanup)
               ansible.builtin.set_fact:
                 _verify_disk_id: ''
 
-            - name: CreateDisk from new system snapshot（临时验证盘）
+            - name: CreateDisk from new system snapshot (temp verification disk)
               ansible.builtin.command:
                 argv:
                   - aliyun
@@ -442,11 +474,11 @@
               register: _verify_create
               changed_when: true
 
-            - name: 记录 verify-disk ID
+            - name: Record verify-disk ID
               ansible.builtin.set_fact:
                 _verify_disk_id: "{{ (_verify_create.stdout | from_json).DiskId }}"
 
-            - name: AttachDisk 到活 mirror ECS（默认会出现为 /dev/vdc）
+            - name: AttachDisk to live mirror ECS (will appear as /dev/vdc by default)
               ansible.builtin.command:
                 argv:
                   - aliyun
@@ -460,7 +492,7 @@
                   - "{{ aliyun_profile }}"
               changed_when: true
 
-            - name: 等待 attach 完成（DescribeDisks 直到 Status=In_use）
+            - name: Wait for attach to complete (DescribeDisks until Status=In_use)
               ansible.builtin.command:
                 argv:
                   - aliyun
@@ -485,7 +517,7 @@
             # part 3 (lsblk on live ECS shows vda3 mounted as root).
             # Use command:argv: (NOT shell:) to bypass split_args tokenizer
             # which trips on the bash array + ${} + = combinations.
-            - name: 挂载新 vdc3 并检查文件树
+            - name: Mount new vdc3 and check filesystem tree
               ansible.builtin.command:
                 argv:
                   - ssh
@@ -500,7 +532,7 @@
                   - -o
                   - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
                   - "root@{{ mirror_private_ip }}"
-                  # 同样避开 ${#arr[@]}（{# 触发 Jinja 注释 parser）。
+                  # Avoid ${#arr[@]} for the same reason ({# triggers Jinja's comment parser).
                   - >-
                     set -e;
                     for i in $(seq 1 30); do [ -b /dev/vdc ] && break; sleep 2; done;
@@ -524,7 +556,7 @@
               changed_when: false
 
           rescue:
-            - name: 验证失败 — 删除新拍的 system + data snapshot（不留半成品）
+            - name: Verification failed — delete the just-taken system + data snapshots (leave no half-done state)
               ansible.builtin.command:
                 argv:
                   - aliyun
@@ -541,29 +573,35 @@
                 - "{{ _new_vdb_snap_id }}"
               failed_when: false
 
-            - name: 失败终止 — 旧快照保留，下次重跑 05 即可重新拍
+            - name: Abort — old snapshots are preserved; re-run 05 to retake
               ansible.builtin.fail:
                 msg: |
-                  快照端到端验证失败，已删除刚拍的两个新快照。
-                  - 旧快照（上次 05 拍的）保留未动，可继续走 fast-path 恢复 mirror。
-                  - state.yml 没更新，下次 03 用的还是旧 ID。
-                  排查方向：mirror ECS 上 /opt/mirror-registry 是否真的存在？
-                  Quay 容器是否真的有 Postgres 数据？参考上面的 errs 列表。
+                  End-to-end snapshot verification failed.  The two new
+                  snapshots just taken have been deleted.
+                  - The OLD snapshots (from the previous 05) are untouched
+                    and can still be used to fast-path restore the mirror.
+                  - state.yml was NOT updated, so the next 03 will still
+                    use the old IDs.
+                  Where to look: does /opt/mirror-registry actually exist
+                  on the mirror ECS?  Does the Quay container really have
+                  Postgres data?  See the MISSING errors above.
 
           always:
-            # 临时盘 cleanup —— 失败/成功都跑，防止 ECS 上挂着孤儿盘 + Aliyun
-            # 账单按时计费。verify_disk_id 可能为空（CreateDisk 之前就炸了），
-            # 也可能 attach 失败导致 Detach 不需要 → 全部 failed_when:false。
+            # Temp-disk cleanup — runs on both failure and success to avoid
+            # an orphaned disk on the ECS + the resulting Aliyun hourly
+            # billing.  verify_disk_id may be empty (CreateDisk failed
+            # earlier), or attach may have failed so Detach is unnecessary
+            # → all tasks use failed_when:false.
             - name: cleanup — umount + DetachDisk + DeleteDisk
               when: _verify_disk_id is defined and _verify_disk_id | length > 0
               block:
-                - name: 卸载 mirror ECS 上的临时 mount
+                - name: Unmount the temp mount on mirror ECS
                   ansible.builtin.shell: |
                     {{ _ssh_to_mirror }} 'umount /mnt/snap-verify 2>/dev/null; rmdir /mnt/snap-verify 2>/dev/null || true'
                   changed_when: false
                   failed_when: false
 
-                - name: DetachDisk 临时盘
+                - name: DetachDisk temp disk
                   ansible.builtin.command:
                     argv:
                       - aliyun
@@ -578,7 +616,7 @@
                   failed_when: false
                   changed_when: true
 
-                - name: 等待 detach 完成（Status=Available）
+                - name: Wait for detach to complete (Status=Available)
                   ansible.builtin.command:
                     argv:
                       - aliyun
@@ -599,11 +637,13 @@
                   failed_when: false
                   changed_when: false
 
-                # 重试 DeleteDisk 直到磁盘真正消失。Aliyun race condition：
-                # DescribeDisks 返回 Status=Available 后立即 DeleteDisk 经常
-                # 失败（物理 detach 实际还在跑）。observed: 第一次 04:43:42 UTC
-                # 失败 silently，60 秒后手动重试就成功了。retries 等真正干净。
-                - name: DeleteDisk 临时盘（retry until 真正消失）
+                # Retry DeleteDisk until the disk genuinely disappears.  Aliyun
+                # race condition: DescribeDisks returns Status=Available before
+                # the physical detach actually finishes, so an immediate
+                # DeleteDisk often fails.  Observed: first attempt at
+                # 04:43:42 UTC failed silently; a manual retry 60 s later
+                # succeeded.  retries waits for the real cleanup.
+                - name: DeleteDisk temp disk (retry until truly gone)
                   ansible.builtin.command:
                     argv:
                       - aliyun
@@ -619,9 +659,9 @@
                   until: _verify_delete.rc == 0
                   changed_when: true
 
-                # 进一步确认：DescribeDisks 必须返回 0 个 disk。
-                # DeleteDisk rc=0 不绝对等于磁盘已消失（Aliyun async）。
-                - name: 确认临时盘真的消失了
+                # Extra confirmation: DescribeDisks must return 0 disks.
+                # DeleteDisk rc=0 does not guarantee the disk is gone (Aliyun async).
+                - name: Confirm the temp disk really is gone
                   ansible.builtin.command:
                     argv:
                       - aliyun
@@ -641,7 +681,7 @@
                      | default([]) | length) == 0
                   changed_when: false
 
-        - name: 删除同名旧快照（覆盖语义）
+        - name: Delete same-named old snapshots (overwrite semantics)
           ansible.builtin.command:
             argv:
               - aliyun
@@ -659,20 +699,20 @@
           failed_when: false
           changed_when: _delete_old.rc == 0
 
-        - name: 保存快照 ID 到 state.yml
+        - name: Save snapshot IDs to state.yml
           ansible.builtin.include_tasks: ../tasks/save_state.yml
           vars:
             new_state:
               mirror_snapshot_system_id: "{{ _new_vda_snap_id }}"
               mirror_snapshot_data_id:   "{{ _new_vdb_snap_id }}"
 
-        - name: 快照完成提示
+        - name: Snapshot complete summary
           ansible.builtin.debug:
             msg: |
-              ✓ Mirror ECS 双盘快照已就绪（覆盖式，旧的已清理）
+              OK: mirror ECS two-disk snapshots ready (overwrite-in-place, old ones cleaned)
                 system (vda) : {{ _new_vda_snap_id }}  — "{{ _snap_system_name }}"
                 data   (vdb) : {{ _new_vdb_snap_id }}  — "{{ _snap_data_name }}"
-              已记入 state.yml (mirror_snapshot_system_id / mirror_snapshot_data_id)
+              Recorded in state.yml (mirror_snapshot_system_id / mirror_snapshot_data_id)
 
-              重建 mirror ECS 时：从这两个快照恢复，跳过 Phase 04 的 1 小时 import。
-              详见 docs/SNAPSHOT.md。
+              To rebuild mirror ECS: restore from these two snapshots and
+              skip Phase 04's 1-hour import.  See docs/SNAPSHOT.md.

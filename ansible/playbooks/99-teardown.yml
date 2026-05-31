@@ -34,11 +34,12 @@
   vars:
     teardown_target: cluster        # cluster | mirror | both
     teardown_confirmed: false
-    teardown_preserves_ai: false    # mirror teardown 时是否保留 AI cluster + infra-env + ECS image
-    delete_mirror_snapshots: false  # 是否连同 mirror snapshot 一起删
-    cluster_includes_ai: false      # cluster teardown 时是否也拆 AI cluster + infra-env + ECS image
-                                    # 用于 OCP 版本更换：mirror 保留，但 AI cluster 必须重建
-                                    # （AI v2 API 不允许 PATCH openshift_version，版本不可变）
+    teardown_preserves_ai: false    # mirror teardown — preserve AI cluster + infra-env + ECS image?
+    delete_mirror_snapshots: false  # also delete mirror snapshots?
+    cluster_includes_ai: false      # cluster teardown — also tear down AI cluster + infra-env + ECS image?
+                                    # Use for OCP version changes: mirror preserved, AI cluster must
+                                    # be rebuilt (AI v2 API does not allow PATCHing openshift_version
+                                    # — the version is immutable on an existing cluster).
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
     - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
@@ -48,21 +49,25 @@
         that: teardown_target in ['cluster', 'mirror', 'both']
         fail_msg: "teardown_target must be one of: cluster, mirror, both"
 
-    # teardown_preserves_ai=true 只在打算"快照恢复 mirror"时用：
-    # AI cluster install-config 里 PATCH 过的 trustBundle + IDMS 都引用
-    # 旧 mirror 的 CA 和 IP；快照恢复出来的 mirror ECS CA / IP 都没变，
-    # 所以 AI 这边可以完整复用。但如果同时让 snapshot 也被删，就没意义了
-    # （快照都没了哪能恢复），所以两个标志互斥时拒绝。
-    - name: Reject preserves_ai + delete_snapshots 同时为 true
+    # teardown_preserves_ai=true is only meaningful for the "snapshot-restore
+    # mirror" workflow: the AI cluster install-config carries a PATCHed
+    # trustBundle + IDMS that reference the old mirror's CA and IP.  A
+    # snapshot-restored mirror ECS keeps the same CA / IP, so the AI side
+    # can be fully reused.  But if snapshots are deleted at the same time,
+    # there is nothing to restore from — the flag combination is incoherent
+    # and rejected below.
+    - name: Reject preserves_ai + delete_snapshots both set to true
       ansible.builtin.assert:
         that: not (teardown_preserves_ai | bool and delete_mirror_snapshots | bool)
         fail_msg: |
-          teardown_preserves_ai=true 跟 delete_mirror_snapshots=true 互斥。
-          preserves_ai 假设你下次用 snapshot 恢复 mirror（AI install-config 引用
-          的 CA/IP 在快照里都还有效）；snapshot 都删了 AI 留着也没用，
-          AI 的 ignition 跟新 mirror 对不上。
-          要么走 snapshot 恢复（preserves_ai=true, snapshot 不删），
-          要么走 fresh 重建（preserves_ai=false, snapshot 可删可不删）。
+          teardown_preserves_ai=true is mutually exclusive with delete_mirror_snapshots=true.
+          preserves_ai assumes a snapshot-restore next run (the CA/IP that AI
+          install-config refers to are still valid in the snapshot); deleting
+          the snapshots makes preserving AI pointless — AI's ignition would
+          no longer match a freshly rebuilt mirror.
+          Pick one path:
+            - snapshot-restore (preserves_ai=true, snapshots kept), or
+            - fresh rebuild (preserves_ai=false, snapshots optional).
 
     - name: Show scope + confirm
       ansible.builtin.pause:
@@ -254,16 +259,19 @@
           failed_when: false
           changed_when: false
 
-        # ── 自定义 image 永远删（不管 delete_mirror_snapshots） ────────────────
-        # 这个 image 是 03 fast-path 临时产物（从 vda snapshot 派生），ROS
-        # 把它当 ECS ImageId 用了一次后就再无引用。下次 03 fast-path 会从
-        # snapshot 重新 CreateImage（多花 ~10 min 但 image 列表干净）。
+        # ── Always delete the derived custom image (regardless of delete_mirror_snapshots) ──
+        # This image is a transient artefact created by 03's fast-path
+        # (derived from the vda snapshot); ROS uses it once as the ECS
+        # ImageId then never references it again.  The next 03 fast-path
+        # will CreateImage from the snapshot fresh (~10 min extra but
+        # keeps the image list tidy).
         #
-        # 注意：DeleteImage 必须用 --ImageId（不接受 --ImageName）；先
-        # DescribeImages 按 name 查 ID，再 Delete。
-        # 仅删 image 本身（CLI 默认不删 snapshot；要级联得在 console 手勾
-        # "同时删除快照"）。
-        - name: 查找从快照派生的自定义 image (by name)
+        # Note: DeleteImage requires --ImageId (it does not accept --ImageName);
+        # so DescribeImages first to look up the ID by name, then Delete.
+        # Only the image itself is removed (the CLI does not cascade to the
+        # underlying snapshot by default; cascade requires the console
+        # checkbox "delete associated snapshots").
+        - name: Look up the snapshot-derived custom image by name
           ansible.builtin.command:
             argv:
               - aliyun
@@ -281,7 +289,7 @@
           changed_when: false
           failed_when: false
 
-        - name: 删除从快照派生的自定义 image（默认行为，永远删）
+        - name: Delete the snapshot-derived custom image (default behaviour — always)
           ansible.builtin.command:
             argv:
               - aliyun
@@ -301,13 +309,15 @@
           failed_when: false
           changed_when: true
 
-        # ── 可选：连同 mirror snapshot 一起删（默认保留，便于下次 fast-path 重建）
-        # 用法：-e delete_mirror_snapshots=true
-        # 不删时：下次跑 03 会用同名 snapshot 重新 CreateImage（一次性 ~10
-        #         min 等 image Available）+ fast-path 起 ECS。
-        # 删后：下次跑 03 检测不到 snapshot id（被清出 state）→ 走 fresh
-        #       bring-up 路径，Phase 04 会完整执行 ~1 小时 import。
-        - name: 删除 mirror snapshot（仅当 delete_mirror_snapshots=true）
+        # ── Optional: also delete mirror snapshots (default keep, for fast-path rebuild) ──
+        # Usage: -e delete_mirror_snapshots=true
+        # Default (keep): the next 03 run will CreateImage from the same-named
+        #                 snapshot (~10 min waiting for image Available) and
+        #                 take the fast-path to bring up ECS.
+        # Deleted:        the next 03 detects no snapshot id (cleared from
+        #                 state) → falls through to the fresh bring-up path;
+        #                 Phase 04 then runs the full ~1-hour import.
+        - name: Delete mirror snapshots (only when delete_mirror_snapshots=true)
           when:
             - delete_mirror_snapshots | default(false) | bool
             - item is defined
@@ -346,19 +356,23 @@
               mirror_registry_id: ''
               jump_host_ip: ''
               jump_host_sg_id: ''
-              # 密码与 snapshot 必须**同进同退**：snapshot 保留时密码也必须保留。
-              # 否则下次 03 fast-path 会用 03 行 31-34 重新生成的新密码写入
-              # cloud-init / state.yml，但 Quay DB 是从 snapshot 恢复的，里面
-              # mirror-admin 用户仍是 snapshot 烘焙时的旧密码 → 04 的 belt-and-
-              # suspenders 任务 podman push CCM 时拿新密码认证 → 401 unauthorized
-              # → mirror-stack 整段失败。
-              # 删 snapshot 时密码同步清空，下次走 fresh path 重新生成 + Quay
-              # install 用同一个密码 --initPassword，保持一致。
+              # The password and snapshots must rise and fall together:
+              # if snapshots are preserved, the password must be preserved too.
+              # Otherwise, the next 03 fast-path generates a new password
+              # (03 lines 31-34) and writes it into cloud-init / state.yml,
+              # but the Quay DB restored from the snapshot still has the
+              # baked-in old password.  04's belt-and-suspenders task then
+              # authenticates with the new password when pushing CCM →
+              # HTTP 401 → mirror-stack flow fails entirely.
+              # When snapshots are deleted, also clear the password — the
+              # next fresh-path run regenerates it and Quay install applies
+              # it via --initPassword, keeping the two sides in sync.
               mirror_init_password:      "{{ '' if (delete_mirror_snapshots | default(false) | bool) else (mirror_init_password      | default('')) }}"
               mirror_snapshot_system_id: "{{ '' if (delete_mirror_snapshots | default(false) | bool) else (mirror_snapshot_system_id | default('')) }}"
               mirror_snapshot_data_id:   "{{ '' if (delete_mirror_snapshots | default(false) | bool) else (mirror_snapshot_data_id   | default('')) }}"
-              # AI / image / iso state：teardown_preserves_ai=true 时保留
-              # （让下次 snapshot 恢复后直接走 06+07，跳过 01/02），否则清空。
+              # AI / image / iso state: preserve when teardown_preserves_ai=true
+              # (so the next snapshot-restore can jump straight to 06+07,
+              # skipping 01/02), otherwise clear.
               cluster_id:   "{{ cluster_id   | default('') if (teardown_preserves_ai | default(false) | bool) else '' }}"
               infra_env_id: "{{ infra_env_id | default('') if (teardown_preserves_ai | default(false) | bool) else '' }}"
               ecs_image_id: "{{ ecs_image_id | default('') if (teardown_preserves_ai | default(false) | bool) else '' }}"
@@ -383,12 +397,12 @@
             ansible-playbook ansible/playbooks/07-install-cluster.yml
           {% elif teardown_target == 'mirror' and (teardown_preserves_ai | bool) %}
           mirror gone, AI cluster + infra-env + ECS image PRESERVED for snapshot-restore flow.
-          下次跑（mirror snapshot 没动 → 03 fast-path → 04 already_ready 跳过 → 06 → 07）：
+          Next run (mirror snapshots untouched → 03 fast-path → 04 already_ready skip → 06 → 07):
             ansible-playbook ansible/playbooks/03-create-mirror-stack.yml
             ansible-playbook ansible/playbooks/04-prepare-mirror.yml
             ansible-playbook ansible/playbooks/06-create-cluster-stack.yml
             ansible-playbook ansible/playbooks/07-install-cluster.yml
-          ⚠️ 前提：snapshot 还在云上（DescribeSnapshots 查一下）；任何缺失，03 会自动降级到 fresh-path。
+          Prerequisite: snapshots are still in the cloud (DescribeSnapshots to verify); if any are missing, 03 will auto-downgrade to fresh-path.
           {% elif teardown_target == 'mirror' %}
           mirror gone (along with AI cluster + ECS image).  Full rebuild:
             ansible-playbook ansible/playbooks/01-prepare-iso.yml

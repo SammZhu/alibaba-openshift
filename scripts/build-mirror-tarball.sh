@@ -381,10 +381,12 @@ echo "    ✓ oc-mirror output looks complete (${CHUNK_COUNT} chunk(s), ${CHUNK_
 # uploaded as a separate OSS sibling object below (see step 6b).
 # Phase 04 downloads it onto the mirror ECS at import time via the same
 # ECS-RAM-role path used for the tarball.  Decoupling means:
-#   - 任何能访问 OSS 的 ansible 控制机都能跑 04，不必跟构建机同台
-#   - 编辑 isc (加 operator catalog 等) → 仅需重传 isc + 重跑 04，
-#     不必重打/重传 22 GB tarball
-echo "[4/6] Packaging mirror data into single tarball (isc 单独走 OSS sibling，不进 tar)..."
+#   - any ansible controller that can reach OSS can run 04 — no need
+#     to share a host with the build machine
+#   - editing the isc (e.g. adding operator catalogs) only requires
+#     re-uploading the isc and re-running 04 — no need to repack /
+#     re-upload the 22 GB tarball
+echo "[4/6] Packaging mirror data into single tarball (isc goes to OSS as a sibling object, not into the tar)..."
 TARBALL_PATH="$WORK_DIR/$TARBALL_NAME"
 tar -cf "$TARBALL_PATH" -C ./openshift-mirror .
 

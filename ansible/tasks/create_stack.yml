@@ -42,10 +42,12 @@
   changed_when: false
 
 - name: "create_stack [{{ _cs_stack_name }}] — pick first existing match"
-  # ⚠️ 必须手动按 StackName 过滤：Aliyun ROS CLI 的 `ListStacks --StackName`
-  # 过滤参数在多个版本里被静默忽略，会直接返回区域里所有 stack。
-  # 不做精确名字过滤的话，split 架构（mirror + cluster 同时存在）下，
-  # 给 "aliocp1-cluster" 查 existing 会拿到 "aliocp1-mirror" 当成 adopt 目标。
+  # IMPORTANT: must filter by StackName client-side.  Aliyun ROS CLI's
+  # `ListStacks --StackName` filter is silently ignored across several
+  # CLI versions — it returns every stack in the region.  Without a
+  # strict client-side name check, the split architecture (mirror +
+  # cluster stacks coexist) breaks: a lookup for "aliocp1-cluster"
+  # would pick up "aliocp1-mirror" as an adopt target.
   ansible.builtin.set_fact:
     _cs_existing_stack: >-
       {{ ((_cs_existing.stdout | from_json).Stacks | default([]))

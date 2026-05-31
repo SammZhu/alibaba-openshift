@@ -34,29 +34,35 @@
              else (lookup('password', '/dev/null length=20 chars=ascii_letters,digits')) }}
       no_log: true
 
-    # ─── 快照快速恢复路径 ────────────────────────────────────────────────────────
-    # 如果 state.yml 里有 mirror_snapshot_system_id + mirror_snapshot_data_id
-    # （由 05-verify-mirror.yml 的快照步骤写入），则用它们恢复 mirror ECS：
-    #   - system 盘：先 CreateImage 把 vda 快照转成 ECS 自定义 image
-    #     （ROS 的 ALIYUN::ECS::Instance 不直接吃 SystemDiskSnapshotId），
-    #     然后把 ImageId 通过 MirrorOverrideImageId 参数传给 stack。
-    #   - data 盘：直接通过 MirrorDataDiskSnapshotId 让 ROS 在 DiskMappings
-    #     里指定 SnapshotId（ROS 原生支持）。
-    # 没有快照 → 走传统空盘 + cloud-init bootstrap + Phase 04 完整导入。
-    # 强制走慢路径：-e mirror_restore_from_snapshot=false
-    - name: 判定是否走快照恢复路径（先看 state 是否有 ID）
+    # ─── Snapshot fast-path restore ────────────────────────────────────────────
+    # If state.yml carries mirror_snapshot_system_id + mirror_snapshot_data_id
+    # (written by 05-verify-mirror.yml's snapshot step), use them to restore
+    # the mirror ECS:
+    #   - system disk: first CreateImage to convert the vda snapshot into a
+    #     custom ECS image (ROS's ALIYUN::ECS::Instance does not accept
+    #     SystemDiskSnapshotId directly), then pass the resulting ImageId
+    #     through the MirrorOverrideImageId stack parameter.
+    #   - data disk: pass the snapshot ID via MirrorDataDiskSnapshotId; ROS
+    #     wires it into DiskMappings.SnapshotId natively.
+    # No snapshot → fall through to the legacy empty-disk + cloud-init
+    # bootstrap + full Phase 04 import path.
+    # Force the slow path: -e mirror_restore_from_snapshot=false
+    - name: Decide whether to take the snapshot-restore fast-path (state has IDs?)
       ansible.builtin.set_fact:
         _mirror_restore_from_snapshot: >-
           {{ (mirror_restore_from_snapshot | default(true) | bool)
              and (mirror_snapshot_system_id | default('') | length > 0)
              and (mirror_snapshot_data_id   | default('') | length > 0) }}
 
-    # 防御：state 里有 snapshot ID 不代表云上 snapshot 还在。
-    # 例如：99-teardown -e delete_mirror_snapshots=true 删了 image，由此
-    # 级联删了 system snapshot；又或者用户在控制台手动清过。这种情况
-    # CreateImage --SnapshotId 会拿到 InvalidSnapshotId.NotFound → 03 fail。
-    # 主动 DescribeSnapshots 验证两个 snapshot 都活着，否则降级 fresh-path。
-    - name: （快照路径）验证 system + data snapshot 在云上仍存在
+    # Defensive: a snapshot ID in state.yml does not guarantee the snapshot
+    # is still in the cloud.  Examples:
+    #   - 99-teardown -e delete_mirror_snapshots=true deleted the image,
+    #     cascading to the system snapshot.
+    #   - operator manually cleaned them up in the console.
+    # In either case CreateImage --SnapshotId hits InvalidSnapshotId.NotFound
+    # → 03 fails.  Run a defensive DescribeSnapshots to confirm both
+    # snapshots are alive; otherwise downgrade to the fresh-path.
+    - name: (fast-path) verify system + data snapshots still exist in cloud
       ansible.builtin.command:
         argv:
           - aliyun
@@ -73,13 +79,14 @@
       failed_when: false
       when: _mirror_restore_from_snapshot
 
-    - name: （快照路径）如果云上 snapshot 缺失则降级到 fresh-path
+    - name: (fast-path) downgrade to fresh-path when cloud snapshots are missing
       ansible.builtin.set_fact:
         _mirror_restore_from_snapshot: false
         _snapshot_missing_reason: >-
-          state 里记的 snapshot ID 在云上找不到（实际 {{ _snap_found_count }}/2）。
-          可能原因：99 -e delete_mirror_snapshots=true 级联删了，或者控制台手动清了。
-          走 fresh bring-up 路径重建 mirror；下次 05 会重新打快照。
+          Snapshot IDs in state.yml are missing from the cloud ({{ _snap_found_count }}/2 found).
+          Likely causes: cascade from 99 -e delete_mirror_snapshots=true, or
+          manual cleanup in the console.  Falling back to fresh bring-up;
+          the next 05 will recreate the snapshots.
       vars:
         _snap_found_count: "{{ (_snap_verify.stdout | default('{}') | from_json).Snapshots.Snapshot | default([]) | length }}"
       when:
@@ -87,23 +94,24 @@
         - _snap_verify.rc == 0
         - ((_snap_verify.stdout | from_json).Snapshots.Snapshot | default([]) | length) < 2
 
-    - name: 快照路径生效提示
+    - name: Snapshot-path decision summary
       ansible.builtin.debug:
         msg: |
           {% if _mirror_restore_from_snapshot %}
-          ✓ 检测到快照，将走 fast-path 恢复 mirror ECS：
+          OK: snapshots present — taking fast-path to restore mirror ECS:
               system snapshot : {{ mirror_snapshot_system_id }}
               data   snapshot : {{ mirror_snapshot_data_id }}
-            （会先把 system snapshot 转成自定义 image，再用它启 ECS。
-             ECS 起来后 Quay 已就绪，Phase 04 会被现有 "already prepared"
-             检查直接跳过整个 download/install/import 流程。）
+            (Will first convert the system snapshot into a custom image,
+             then boot ECS from it.  Once ECS is up, Quay is already ready;
+             Phase 04's "already prepared" check skips the whole
+             download/install/import flow.)
           {% else %}
-          → 走 fresh bring-up 路径{% if _snapshot_missing_reason is defined %}（自动降级）：
-            {{ _snapshot_missing_reason }}{% else %}（无快照或被显式禁用）{% endif %}。
-            Phase 04 会完整执行 download tarball + install Quay + oc-mirror import。
+          → Taking fresh bring-up path{% if _snapshot_missing_reason is defined %} (auto-downgraded):
+            {{ _snapshot_missing_reason }}{% else %} (no snapshot, or explicitly disabled){% endif %}.
+            Phase 04 will execute the full download tarball + install Quay + oc-mirror import.
           {% endif %}
 
-    - name: （快照路径）查询是否已有同名自定义 image（幂等：跳过重复 CreateImage）
+    - name: (fast-path) check whether a same-named custom image already exists — idempotency, skip repeat CreateImage
       ansible.builtin.command:
         argv:
           - aliyun
@@ -121,7 +129,7 @@
       when: _mirror_restore_from_snapshot
       changed_when: false
 
-    - name: （快照路径）记录已有 image id（如果有）
+    - name: (fast-path) record existing image id (if any)
       ansible.builtin.set_fact:
         _existing_image_id: >-
           {{ ((_existing_image_query.stdout | default('{}') | from_json).Images.Image
@@ -130,7 +138,7 @@
               | list | map(attribute='ImageId') | first) | default('') }}
       when: _mirror_restore_from_snapshot
 
-    - name: （快照路径）从 system snapshot 创建自定义 image（仅当不存在时）
+    - name: (fast-path) create custom image from system snapshot (only if not already present)
       ansible.builtin.command:
         argv:
           - aliyun
@@ -151,7 +159,7 @@
         - _mirror_restore_from_snapshot
         - _existing_image_id | length == 0
 
-    - name: （快照路径）解析新 image id
+    - name: (fast-path) extract new image id
       ansible.builtin.set_fact:
         _mirror_override_image_id: >-
           {{ _existing_image_id
@@ -159,7 +167,7 @@
              else (_create_image_result.stdout | from_json).ImageId }}
       when: _mirror_restore_from_snapshot
 
-    - name: （快照路径）等待自定义 image 进入 Available（最长 15 min）
+    - name: (fast-path) wait for custom image to reach Available (up to 15 min)
       ansible.builtin.command:
         argv:
           - aliyun
@@ -225,7 +233,7 @@
             ParameterValue: "{{ mirror_instance_type }}"
           - ParameterKey: MirrorDataDiskSize
             ParameterValue: "{{ mirror_data_disk_size | string }}"
-          # 快照路径才有值；空字符串 = ROS 走默认空盘 + auto-discovered image。
+          # Populated only on the fast-path; empty string = ROS uses default blank disk + auto-discovered image.
           - ParameterKey: MirrorOverrideImageId
             ParameterValue: "{{ _mirror_override_image_id | default('') }}"
           - ParameterKey: MirrorDataDiskSnapshotId
@@ -290,11 +298,11 @@
           Jump host    : {{ mirror_jump_host_ip }}
           {% endif %}
           {% if _mirror_restore_from_snapshot %}
-          路径         : 从快照恢复 (fast-path)
-                        04 将由 "already prepared" 检查直接跳过 import。
+          Path         : restored from snapshot (fast-path)
+                         04 will skip the import via the "already prepared" check.
           {% else %}
-          路径         : 全新部署 (slow-path)
-                        04 会完整执行 ~1 小时 oc-mirror import。
+          Path         : fresh deployment (slow-path)
+                         04 will run the full ~1-hour oc-mirror import.
           {% endif %}
 
           Next:

@@ -372,7 +372,7 @@
         - (_reboot_plan | default([]) | selectattr('method', 'equalto', 'ReplaceSystemDisk') | list | length) > 0
 
     - name: Force-reboot for hosts still on discovery ISO (vda intact)
-      # --ForceStop=true = power-off + power-on (硬重启).  Required when
+      # --ForceStop=true = power-off + power-on (hard reset).  Required when
       # nodes are hung in a pre-install state (agent.service waiting for AI
       # commands that won't come because cluster is in error).  Default
       # graceful reboot sends ACPI which a hung user-space ignores → API
