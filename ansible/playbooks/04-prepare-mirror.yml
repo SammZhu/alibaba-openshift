@@ -1,5 +1,5 @@
 ---
-# mirror-prepare.yml — set up the mirror-registry on the bare ECS that
+# Phase 04 — set up the mirror-registry on the bare ECS that
 # Phase 03's mirror-stack created.  Runs AFTER Phase 03 (mirror-stack), BEFORE Phase 06 (cluster-stack).
 #
 # Why a separate playbook (not cloud-init):

@@ -1,5 +1,6 @@
 ---
-# Phase 04 — wait for hosts, assign roles, upload manifests, install, kubeconfig.
+# Phase 07 — wait for hosts, assign roles, upload manifests, install, kubeconfig.
+#            (Runs against the cluster-stack created by Phase 06.)
 - name: Install OpenShift via Assisted Installer
   hosts: local
   gather_facts: false

@@ -1,8 +1,8 @@
 ---
-# Phase 05 — deploy CAPI + CSI Operator + CSI driver CR onto the cluster.
+# Phase 08 — deploy CAPI + CSI Operator + CSI driver CR onto the cluster.
 # Runs on the jump host (or anywhere with KUBECONFIG and network access to
-# the API SLB). Driven by the existing scripts/05-deploy-post-install.sh
-# wrapped for retry semantics.
+# the API NLB).  See docs/POST-INSTALL.md for the full picture (incl. OADP,
+# which is manual-apply rather than driven from here).
 - name: Deploy post-install components
   hosts: local
   gather_facts: false
