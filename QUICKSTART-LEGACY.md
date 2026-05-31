@@ -28,7 +28,7 @@
 > cd ansible && ansible-playbook playbooks/site.yml
 > ```
 >
-> **想手动跑或调试？** 用 [`docs/test-walkthrough.md`](docs/test-walkthrough.md) ——
+> **想手动跑或调试？** 用 [`docs/legacy/test-walkthrough.md`](docs/legacy/test-walkthrough.md) ——
 > 完整的"按步骤照做"操作手册（含 Assisted/Agent-based 两条路径、
 > 每个命令的预期输出、故障排查表、成本核对清单）。
 
@@ -98,7 +98,7 @@ Phase 5  Day-2 操作示例                             按需
 
 | 工具 | 用途 | RHEL 8 / AL3 安装 |
 |---|---|---|
-| `aliyun` CLI | 操作阿里云 | GitHub release 二进制（详见 `docs/test-walkthrough.md` §0.3）|
+| `aliyun` CLI | 操作阿里云 | GitHub release 二进制（详见 `docs/legacy/test-walkthrough.md` §0.3）|
 | `oc` / `kubectl` 4.20 | 集群访问 | mirror.openshift.com `openshift-client-linux-amd64-rhel8.tar.gz`（**必须 -rhel8 版**，否则 GLIBC 报错）|
 | `openshift-install` 4.20 | Agent-based 必需 | mirror.openshift.com `openshift-install-linux.tar.gz`（静态 Go，generic 版可用）|
 | `ansible-core` ≥ 2.16 | 自动化主路径 | `sudo dnf install ansible-core` |
@@ -593,7 +593,7 @@ sleep 180
 # 3. ROS 删除栈
 aliyun ros DeleteStack --StackId <stack-id>
 
-# 4. 用 cluster tag 扫描孤儿（详见 docs/test-walkthrough.md G.3）
+# 4. 用 cluster tag 扫描孤儿（详见 docs/legacy/test-walkthrough.md G.3）
 TAG_KEY="kubernetes.io/cluster/cluster1"
 for cmd in 'ecs DescribeInstances' 'ecs DescribeDisks' 'ecs DescribeSecurityGroups' \
            'vpc DescribeEipAddresses' 'vpc DescribeNatGateways' 'vpc DescribeVSwitches' \

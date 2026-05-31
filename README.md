@@ -8,7 +8,7 @@ Supports two installation methods via the same ROS template — choose `Installa
 > - **全自动（推荐）**：[`ansible/README.md`](ansible/README.md) —— 一条命令端到端，~90 分钟
 > - **简要 split-flow 入口**：[`QUICKSTART.md`](QUICKSTART.md) —— 一页内跑通 + 故障排查链接
 > - **LEGACY 单栈 / 手动控制台流程**：[`QUICKSTART-LEGACY.md`](QUICKSTART-LEGACY.md) —— 不跑 Ansible 时用
-> - **第一次跑 / 想理解每步原理**：[`docs/test-walkthrough.md`](docs/test-walkthrough.md) —— 含预期输出 + 故障排查
+> - **手动控制台流程深度解析（LEGACY 单栈）**：[`docs/legacy/test-walkthrough.md`](docs/legacy/test-walkthrough.md) —— 每步含预期输出 + 控制台操作，仅当排查 Ansible 自动化失败时参考
 > - **China region / 跨境拉 quay.io 不稳**：[`docs/MIRROR.md`](docs/MIRROR.md) —— 私有 mirror 完整方案（架构 / 成本 / 工作流 / 故障排查）
 > - **Alibaba CCM（platform=external 契约 / image / config / 升级）**：[`docs/CCM.md`](docs/CCM.md) —— CCM 设计 + 踩坑表
 > - **Teardown 模式**（cluster / mirror / both / 各种 flag）：[`docs/TEARDOWN.md`](docs/TEARDOWN.md)
@@ -480,10 +480,9 @@ alibaba-openshift/
 │   ├── CCM.md                       # Alibaba CCM design + lessons learned
 │   ├── csi-driver-design.md         # CSI driver layout (matches 04-csi-*.yaml)
 │   ├── boot-image-import.md         # ISO → custom ECS image walkthrough
-│   ├── test-walkthrough.md          # end-to-end test run with expected output
-│   └── legacy/                      # frozen reference docs (design summary,
-│                                    # 2026-05 validation checklist) — see
-│                                    # docs/legacy/README.md for index
+│   └── legacy/                      # frozen reference docs (LEGACY-flow
+│                                    # walkthrough, design summary, validation
+│                                    # checklist) — see docs/legacy/README.md
 └── scripts/                         # legacy bash deployment scripts (RHEL8-only;
                                      # kept for reference — Ansible is the active path)
 ```

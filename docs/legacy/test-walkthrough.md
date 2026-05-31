@@ -1,24 +1,24 @@
-# 完整测试操作手册（Compact 3-node）
+# 完整测试操作手册（Compact 3-node）— LEGACY 单栈手动版
+
+> ⚠️ **本文档是 LEGACY 单 stack 手动手册**（`03-create-stack-LEGACY.yml`、
+> 老的 `阶段 0–N` 编号）。**新人 / 全自动跑请走推荐路径**：
+>
+> - 一页内入门：[`QUICKSTART.md`](../../QUICKSTART.md)
+> - Ansible split 流程完整命令 + 故障排查：[`ansible/README.md`](../../ansible/README.md)
+> - 节点装挂住怎么恢复：[`docs/bootstrap-reboot.md`](../bootstrap-reboot.md)
+> - 销毁矩阵：[`docs/TEARDOWN.md`](../TEARDOWN.md)
+>
+> 保留此文档的价值：每个手动步骤都讲了**为什么**这么做、控制台该怎么点、
+> 预期输出长什么样 —— 在排查 Ansible 自动化失败 / 想理解底层机制时仍有参考价值。
+> 但其中 Phase 编号、playbook 名（`03-create-stack-LEGACY.yml` 等）属于
+> 单栈流程，与当前 split 流程的 `03-create-mirror-stack.yml` +
+> `06-create-cluster-stack.yml` 不对应 —— **不要照命令直接抄**。
 
 从零到运行 OpenShift 集群的**手动操作步骤**，针对 Compact 3-node 测试场景
 （成本最优，约 ¥80-100/天）。两条安装路径都覆盖：
 
 - **路径 A — Assisted Installer**：通过 Red Hat 网页 UI 安装（推荐第一次）
 - **路径 B — Agent-based Installer**：本地命令行安装（自动化友好）
-
-> **🤖 想直接全自动跑？** 用 [`ansible/`](../ansible/README.md)（推荐）：
-> ```sh
-> cp ansible/group_vars/all.yml.example ansible/group_vars/all.yml && vi $_
-> cd ansible && ansible-playbook playbooks/site.yml   # 跑完 00-04，约 90 分钟
-> ```
-> Ansible 版用原生 retry/idempotent + 结构化 HTTP/JSON，比 shell 稳健。
-> 本文档详细解释每一步**为什么**和**手动该怎么点**，仅在出错排查或想理解机制时阅读。
-> 6 个 playbook 各自对应这里的一个 Phase：
-> `01-prepare-iso.yml` (A) / `02-import-image.yml` (A.2-4) /
-> `03-create-stack-LEGACY.yml` (B) / `07-install-cluster.yml` (C) /
-> `08-deploy-post-install.yml` (D，跳板上跑) / `99-teardown.yml` (G)。
->
-> `scripts/` 下的 bash 等价版已弃用，留作快速参考。
 
 ---
 

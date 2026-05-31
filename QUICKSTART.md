@@ -101,4 +101,4 @@ ansible-playbook playbooks/99-teardown.yml -e teardown_target=both -e teardown_c
 | CCM Service LB / providerID / RAM | [`docs/CCM.md`](docs/CCM.md) |
 | 销毁出问题（孤儿资源 / state.yml 字段） | [`docs/TEARDOWN.md`](docs/TEARDOWN.md) |
 | ISO → 自定义镜像导入失败 | [`docs/boot-image-import.md`](docs/boot-image-import.md) |
-| 想看完整手动操作（含每个命令的预期输出） | [`docs/test-walkthrough.md`](docs/test-walkthrough.md) |
+| 想看完整手动操作（含每个命令的预期输出，LEGACY 单栈） | [`docs/legacy/test-walkthrough.md`](docs/legacy/test-walkthrough.md) |
