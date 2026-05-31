@@ -13,6 +13,7 @@ Supports two installation methods via the same ROS template — choose `Installa
 > - **Alibaba CCM（platform=external 契约 / image / config / 升级）**：[`docs/CCM.md`](docs/CCM.md) —— CCM 设计 + 踩坑表
 > - **Teardown 模式**（cluster / mirror / both / 各种 flag）：[`docs/TEARDOWN.md`](docs/TEARDOWN.md)
 > - **Mirror snapshot 生命周期**（05 创建 / 03 fast-path / 99 删除 / 互斥规则）：[`docs/SNAPSHOT.md`](docs/SNAPSHOT.md)
+> - **Post-install 组件**（CAPA / CSI / OADP 部署步骤 + 当前路径与 OLM design 的差异）：[`docs/POST-INSTALL.md`](docs/POST-INSTALL.md)
 > - **Bootstrap reboot / 节点挂住怎么恢复**（clone-vdb-to-vda hook、ReplaceSystemDisk vs RebootForce）：[`docs/bootstrap-reboot.md`](docs/bootstrap-reboot.md)
 >
 > 本 README 是设计参考。
@@ -462,9 +463,10 @@ alibaba-openshift/
 │   ├── 02-capa-controller.yaml                 # CAPA controller                 [post-install]
 │   ├── 03-machineconfig-providerid-master.yaml # kubelet ProviderID (master)     [install-time]
 │   ├── 03-machineconfig-providerid-worker.yaml # kubelet ProviderID (worker)     [install-time]
-│   ├── 04-csi-*.yaml                           # Alibaba Cloud CSI driver        [post-install]
-│   ├── 05-oadp-*.yaml                          # OADP / backup (optional)        [post-install]
-│   └── butane/                                 # Butane sources for the MCs above
+│   ├── 04-csi-driver-cr.yaml                   # CSI driver CR (applied by Phase 08)
+│   ├── 04-csi-{catalog,og,sub}.yaml            # OLM-based CSI design (aspirational, NOT wired)
+│   ├── 05-oadp-*.yaml                          # OADP / backup — manual apply (docs/POST-INSTALL.md §3)
+│   └── butane/                                 # placeholder; MCs are hand-written today
 ├── ansible/
 │   ├── playbooks/
 │   │   ├── 00-preflight.yml … 08-deploy-post-install.yml   # split-flow phases
