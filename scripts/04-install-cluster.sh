@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 #
+# ⚠️  STALE — superseded by ansible/playbooks/07-install-cluster.yml.
+#     The MANIFESTS array below still references pre-split file names
+#     (03-machineconfig-providerid.yaml — now split into -master/-worker)
+#     and the pre-template name (01-alibaba-ccm.yaml — now .j2 rendered
+#     per-cluster).  Fixing this bash flow is out of scope; use Ansible:
+#         ansible-playbook ansible/playbooks/07-install-cluster.yml
+#
 # 04-install-cluster.sh — Phase C
 #   Wait for hosts to register, set host roles, upload custom manifests,
 #   trigger install, wait for install-complete, download kubeconfig.

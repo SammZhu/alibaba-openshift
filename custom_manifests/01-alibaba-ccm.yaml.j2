@@ -2,6 +2,12 @@
 # Alibaba Cloud Controller Manager — External Platform deployment
 # Source: https://github.com/kubernetes/cloud-provider-alibaba-cloud
 #
+# JINJA TEMPLATE — NOT a directly-apply'able manifest.
+# Rendered per-cluster by ansible/playbooks/07-install-cluster.yml using
+# cluster_name + base_domain from group_vars/all.yml.
+# Render output lands under <output_dir>/rendered/01-alibaba-ccm.yaml.
+# See the env: block for KUBERNETES_SERVICE_HOST for the substitution.
+#
 # Image source: registry-cn-hangzhou.ack.aliyuncs.com/acs/cloud-controller-manager:v2.14.0
 #   (per upstream release notes — NOT registry.k8s.io which is empty).
 #   IDMS rule in 04-prepare-mirror.yml rewrites to mirror at install time.
@@ -248,14 +254,14 @@ spec:
           # the PrivateZone record, NLB hairpins to bootstrap kube-apiserver.
           # Bypasses ClusterIP entirely.
           #
-          # TODO: ${BASE_DOMAIN} should be templated per-cluster.  For now
-          # this assumes cluster=aliocp1 base=example.local; in 07 we slurp
-          # this manifest as-is — no Jinja render — so it's hardcoded.
-          # Better: make 07 template-render this file, OR have CCM read
-          # this URL from a downward-API field.
+          # Templated per-cluster by ansible/playbooks/07-install-cluster.yml
+          # (renders this .j2 to <output_dir>/rendered/01-alibaba-ccm.yaml
+          # before slurp+upload).  Do NOT `oc apply -f` the .j2 directly —
+          # render with `ansible.builtin.template` or
+          # `jinja2 -D cluster_name=... base_domain=...` first.
           env:
             - name: KUBERNETES_SERVICE_HOST
-              value: api-int.aliocp1.example.local
+              value: api-int.{{ cluster_name }}.{{ base_domain }}
             - name: KUBERNETES_SERVICE_PORT
               value: "6443"
           ports:

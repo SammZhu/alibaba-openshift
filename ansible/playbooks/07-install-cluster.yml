@@ -6,13 +6,19 @@
   gather_facts: false
   vars:
     expected_hosts: "{{ (control_plane_count | int) + (compute_count | int) }}"
+    # Rendered Jinja templates land here.  Path is deterministic from
+    # output_dir so the manifests_to_upload list can reference it without
+    # needing to be re-evaluated after the template task runs.
+    rendered_manifest_dir: "{{ output_dir }}/rendered"
     manifests_to_upload:
       - folder: manifests
         name: 00-ovn-mtu.yaml
         src: "{{ repo_root }}/custom_manifests/00-ovn-mtu.yaml"
       - folder: manifests
         name: 01-alibaba-ccm.yaml
-        src: "{{ repo_root }}/custom_manifests/01-alibaba-ccm.yaml"
+        # Templated source — see "Render Jinja manifests" task below.
+        # Jinja vars: cluster_name, base_domain (from group_vars/all.yml).
+        src: "{{ rendered_manifest_dir }}/01-alibaba-ccm.yaml"
       - folder: manifests
         name: alibaba-ccm-config.yaml
         src: "{{ dynamic_manifest_file }}"
@@ -34,6 +40,61 @@
           - infra_env_id is defined
           - dynamic_manifest_file is defined
         fail_msg: "Run Phases 01-03 first"
+
+    # ── Render Jinja manifests (per-cluster substitution) ────────────────
+    # The CCM Deployment hardcodes KUBERNETES_SERVICE_HOST to bypass the
+    # OVN/ClusterIP chicken-and-egg during install (see manifest comment).
+    # That URL must point to THIS cluster's api-int FQDN — so the manifest
+    # is shipped as a .j2 template and rendered here using cluster_name +
+    # base_domain from group_vars/all.yml.  Doing it early (before any AI
+    # API calls) so a bad template fails fast.
+    - name: Ensure rendered manifest dir exists
+      ansible.builtin.file:
+        path: "{{ rendered_manifest_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Render Jinja manifests (01-alibaba-ccm.yaml)
+      ansible.builtin.template:
+        src: "{{ repo_root }}/custom_manifests/01-alibaba-ccm.yaml.j2"
+        dest: "{{ rendered_manifest_dir }}/01-alibaba-ccm.yaml"
+        mode: '0644'
+      # The template uses {{ cluster_name }} and {{ base_domain }} from
+      # group_vars/all.yml — those are play-scope, no explicit `vars:`
+      # binding needed here (`cluster_name: "{{ cluster_name }}"` would
+      # be a self-reference → Ansible raises
+      # "recursive loop detected in template string").
+      # If group_vars renames either field, the Assert task immediately
+      # below catches it (grep for {{ braces / FQDN shape / empty value).
+
+    - name: Assert rendered CCM has no template residue and FQDN matches cluster
+      ansible.builtin.shell: |
+        set -euo pipefail
+        F={{ rendered_manifest_dir }}/01-alibaba-ccm.yaml
+        EXPECTED='api-int.{{ cluster_name }}.{{ base_domain }}'
+
+        # Catch literal Jinja that failed to render (undefined vars in some
+        # strict modes leave braces behind).
+        if grep -qE '\{\{|\}\}' "$F"; then
+          echo "FAIL: unrendered Jinja braces remain in $F"
+          grep -nE '\{\{|\}\}' "$F"
+          exit 1
+        fi
+
+        # Positive assertion: KUBERNETES_SERVICE_HOST must equal exactly
+        # api-int.<cluster_name>.<base_domain>.  Covers (a) empty vars
+        # rendering to "api-int.." (b) stale hardcode regression
+        # (c) any other oddity where the template silently produces a
+        # value that does not match the live cluster.
+        if ! grep -qF "value: $EXPECTED" "$F"; then
+          echo "FAIL: rendered KUBERNETES_SERVICE_HOST does not match $EXPECTED"
+          echo "--- live lines from $F ---"
+          grep -nE 'KUBERNETES_SERVICE_HOST|api-int' "$F" || true
+          exit 1
+        fi
+
+        echo "OK: rendered CCM manifest passes sanity checks (FQDN = $EXPECTED)"
+      changed_when: false
 
     # ── Auto-reset: cancel → reset → reboot nodes ────────────────────────
     # Re-running Phase 04 against the same ROS stack is fully supported.

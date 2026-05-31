@@ -300,8 +300,18 @@ exact command above if it's missing.
    | File | Source |
    |------|--------|
    | `alibaba-ccm-config.yaml` | ROS `DynamicCustomManifest` output |
-   | `01-alibaba-ccm.yaml` | `custom_manifests/01-alibaba-ccm.yaml` in this repo |
-   | `03-machineconfig-providerid.yaml` | `custom_manifests/03-machineconfig-providerid.yaml` in this repo |
+   | `01-alibaba-ccm.yaml` | `custom_manifests/01-alibaba-ccm.yaml.j2` in this repo — **render first** (see below) |
+   | `03-machineconfig-providerid-master.yaml` | `custom_manifests/03-machineconfig-providerid-master.yaml` |
+   | `03-machineconfig-providerid-worker.yaml` | `custom_manifests/03-machineconfig-providerid-worker.yaml` |
+
+   To render the CCM template manually (Ansible flow does this automatically in Phase 07):
+   ```bash
+   jinja2 custom_manifests/01-alibaba-ccm.yaml.j2 \
+     -D cluster_name=<your-cluster> \
+     -D base_domain=<your-domain> \
+     > /tmp/01-alibaba-ccm.yaml
+   # then upload /tmp/01-alibaba-ccm.yaml as the manifest
+   ```
 
 4. Click **Start installation** — takes ~45 minutes
 
@@ -379,9 +389,14 @@ rendezvousIP: 10.0.16.5
 hosts: []
 EOF
 
-# Copy static manifests (baked into the ISO)
-cp custom_manifests/01-alibaba-ccm.yaml install-dir/openshift/
-cp custom_manifests/03-machineconfig-providerid.yaml install-dir/openshift/
+# Render the CCM template (per-cluster api-int FQDN), then copy in
+# alongside the static manifests
+jinja2 custom_manifests/01-alibaba-ccm.yaml.j2 \
+  -D cluster_name=<your-cluster> \
+  -D base_domain=<your-domain> \
+  > install-dir/openshift/01-alibaba-ccm.yaml
+cp custom_manifests/03-machineconfig-providerid-master.yaml install-dir/openshift/
+cp custom_manifests/03-machineconfig-providerid-worker.yaml install-dir/openshift/
 # Note: alibaba-ccm-config.yaml is added AFTER the ROS stack outputs are available
 
 # Generate the agent ISO
@@ -458,7 +473,7 @@ alibaba-openshift/
 │                                               #     → save as alibaba-ccm-config.yaml
 ├── custom_manifests/
 │   ├── 00-ovn-mtu.yaml                         # OVN geneve MTU pin              [install-time]
-│   ├── 01-alibaba-ccm.yaml                     # CCM: SA, RBAC, Deployment       [install-time]
+│   ├── 01-alibaba-ccm.yaml.j2                  # CCM: SA, RBAC, Deployment       [install-time, Jinja]
 │   ├── 02-capa-crds.yaml                       # CAPI CRD definitions            [post-install]
 │   ├── 02-capa-controller.yaml                 # CAPA controller                 [post-install]
 │   ├── 03-machineconfig-providerid-master.yaml # kubelet ProviderID (master)     [install-time]
