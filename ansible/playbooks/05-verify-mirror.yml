@@ -143,7 +143,7 @@
     #   失败死在轮询期间 → 同名多份共存（下次跑会一并清理）。
     #
     # 跳过：  -e mirror_snapshot_enabled=false
-    # 重建时：参考 docs/MIRROR.md "从快照恢复 mirror ECS" 章节
+    # 重建时：参考 docs/SNAPSHOT.md — 生命周期、fast-path、互斥规则、恢复场景
     - name: 快照 mirror ECS 双盘（vda + vdb）
       when: mirror_snapshot_enabled | default(true) | bool
       vars:
@@ -675,4 +675,4 @@
               已记入 state.yml (mirror_snapshot_system_id / mirror_snapshot_data_id)
 
               重建 mirror ECS 时：从这两个快照恢复，跳过 Phase 04 的 1 小时 import。
-              详见 docs/MIRROR.md "从快照恢复 mirror ECS"。
+              详见 docs/SNAPSHOT.md。

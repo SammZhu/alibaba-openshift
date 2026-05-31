@@ -12,6 +12,7 @@ Supports two installation methods via the same ROS template — choose `Installa
 > - **China region / 跨境拉 quay.io 不稳**：[`docs/MIRROR.md`](docs/MIRROR.md) —— 私有 mirror 完整方案（架构 / 成本 / 工作流 / 故障排查）
 > - **Alibaba CCM（platform=external 契约 / image / config / 升级）**：[`docs/CCM.md`](docs/CCM.md) —— CCM 设计 + 踩坑表
 > - **Teardown 模式**（cluster / mirror / both / 各种 flag）：[`docs/TEARDOWN.md`](docs/TEARDOWN.md)
+> - **Mirror snapshot 生命周期**（05 创建 / 03 fast-path / 99 删除 / 互斥规则）：[`docs/SNAPSHOT.md`](docs/SNAPSHOT.md)
 > - **Bootstrap reboot / 节点挂住怎么恢复**（clone-vdb-to-vda hook、ReplaceSystemDisk vs RebootForce）：[`docs/bootstrap-reboot.md`](docs/bootstrap-reboot.md)
 >
 > 本 README 是设计参考。
