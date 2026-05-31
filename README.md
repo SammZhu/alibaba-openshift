@@ -18,84 +18,65 @@ Supports two installation methods via the same ROS template — choose `Installa
 
 ## Architecture
 
-### Assisted Installer
+The current recommended deployment uses **two decoupled ROS stacks** driven by
+the Ansible Phase 00–08 playbooks.  A legacy single-stack flow is preserved
+for reference (see "Legacy monolithic flow" below).
 
 ```
-Step 0 — Prepare boot image (one-time prerequisite)
-  ├── Download Discovery ISO from cloud.redhat.com
-  ├── Upload ISO to Alibaba Cloud OSS
-  └── Import ISO as custom ECS image → note the Image ID (m-bp1xxx...)
-  📖 Detailed walkthrough: docs/boot-image-import.md
+┌────────────────────────────────────────────────────────────────────────┐
+│ Persistent — ros-templates/mirror-stack.yaml                            │
+│ (created once by Phase 03; survives cluster rebuilds)                   │
+│                                                                         │
+│   VPC + VSwitches (×2) + NAT + EIP                                      │
+│   NodeRamRole (Instance Principal — no AK/SK on nodes)                  │
+│   Optional jump host (SSH bastion) + JumpHost SG                        │
+│   Mirror ECS (Quay + Postgres + Redis) + 200 GB cloud_essd data disk    │
+│                                                                         │
+│   Outputs consumed by cluster-stack:                                    │
+│     VpcId, PrivateVSwitchId{,2}, NodeRamRoleName,                       │
+│     JumpHostSecurityGroupId, MirrorIp                                   │
+└────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ Short-lived — ros-templates/cluster-stack.yaml                          │
+│ (created by Phase 06; torn down freely with teardown_target=cluster)    │
+│                                                                         │
+│   Control-plane + worker SecurityGroups (+ cross-SG ingress)            │
+│   API NLB + ServerGroups + Listeners (6443 / 22623)                     │
+│   PrivateZone (api / api-int / *.apps / etcd-N) + reverse zones         │
+│   3 × master ECS  + optional worker InstanceGroup                       │
+│                                                                         │
+│   Outputs: ApiLBEndpoint, master IPs, DynamicCustomManifest             │
+└────────────────────────────────────────────────────────────────────────┘
 
-Step 1 — Red Hat Hybrid Cloud Console
-  └── Create cluster, set name + base domain, paste InstallConfig (from Step 2 output)
+Phase pipeline (driven by `ansible/playbooks/`, run via `site.yml` or one by one):
 
-Step 2 — Alibaba Cloud ROS  (InstallationMethod=Assisted, ImageId=<from Step 0>)
-  └── ros-templates/create-cluster-LEGACY.yaml
-      ├── VPC / VSwitch (×3) / NAT / EIP / SNAT
-      ├── Security Groups (master + worker, incl. 80/443 for Ingress)
-      ├── RAM Role + Policy (Instance Principal — no AK/SK)
-      ├── API Server SLB (intranet) + listeners (6443, 22623)
-      ├── PrivateZone DNS  api.* / api-int.* → SLB
-      ├── ECS: bootstrap + master-1/2/3 + workers
-      ├── SLB backend attachment: master-1/2/3 → ApiSLB
-      └── Outputs: InstallConfig / DynamicCustomManifest
+  00-preflight             sanity-check tooling, RAM, NLB service-linked role
+  01-prepare-iso           download Discovery ISO + upload to OSS
+  02-import-image          ImportImage → custom ECS image
+  03-create-mirror-stack   create the persistent mirror-stack (fast-path:
+                           restore from prior snapshot + custom image)
+  04-prepare-mirror        oc-mirror d2m → push to Quay (idempotent, re-runnable)
+  05-verify-mirror         smoke-test pulls + snapshot mirror vda + vdb
+  06-create-cluster-stack  create the short-lived cluster-stack
+  07-install-cluster       drive AI: register infra-env, boot nodes, inject mirror
+                           CA + custom manifests (CCM, OVN MTU, ProviderID MCs),
+                           wait for install-complete
+  08-deploy-post-install   apply CAPA + verify Ingress SLB DNS
 
-Step 3 — Red Hat Hybrid Cloud Console
-  ├── Discovery agents appear as nodes boot
-  ├── Assign node roles (3 masters + N workers)
-  ├── Upload Custom Manifests (3 files):
-  │     ├── alibaba-ccm-config.yaml        ← ROS DynamicCustomManifest output
-  │     ├── custom_manifests/01-alibaba-ccm.yaml
-  │     └── custom_manifests/03-machineconfig-providerid.yaml
-  └── Start installation
-
-Post-install:
-  oc apply -f custom_manifests/02-capa-crds.yaml
-  oc apply -f custom_manifests/02-capa-controller.yaml
-  # Add *.apps DNS record → Ingress SLB IP (CCM creates it automatically)
+  99-teardown              tears down by `teardown_target=cluster|mirror|both`
+                           (full matrix in docs/TEARDOWN.md)
 ```
 
-### Agent-based Installer
+The default `mirror_enabled: true` path uses the private mirror (China region
+/ unreliable cross-border egress).  Set `mirror_enabled: false` to make
+Phase 03/04/05 no-op and have nodes pull from `quay.io` / `registry.redhat.io`
+directly — useful for outside-China test installs.
 
-```
-Step 0 — Decide parameters first (no chicken-and-egg)
-  ├── Choose: ClusterName, BaseDomain, Region, ZoneId, RendezvousIp (default 10.0.16.5)
-  └── These values are needed for both the ISO and the ROS stack
-
-Step 1 — Generate Agent ISO locally
-  ├── mkdir -p install-dir/openshift
-  ├── Write install-config.yaml  (use chosen ClusterName / BaseDomain)
-  ├── Write agent-config.yaml    (rendezvousIP: <RendezvousIp from Step 0>)
-  ├── Copy manifests into openshift/:
-  │     ├── 01-alibaba-ccm.yaml
-  │     └── 03-machineconfig-providerid.yaml
-  │   (alibaba-ccm-config.yaml not yet available — add after Step 2)
-  └── openshift-install agent create image --dir install-dir/
-      → install-dir/agent.x86_64.iso
-
-Step 2 — Prepare boot image
-  ├── Upload agent.x86_64.iso to Alibaba Cloud OSS
-  └── Import ISO as custom ECS image → note the Image ID (m-bp1xxx...)
-  📖 Detailed walkthrough: docs/boot-image-import.md
-
-Step 3 — Alibaba Cloud ROS  (InstallationMethod=Agent-based, ImageId=<from Step 2>)
-  └── ros-templates/create-cluster-LEGACY.yaml
-      ├── Same infrastructure as Assisted
-      ├── master-1 (RendezvousInstance) gets fixed private IP = RendezvousIp
-      └── Outputs: InstallConfig / AgentConfig / DynamicCustomManifest
-
-Step 4 — Finalize install directory & monitor
-  ├── Save ROS DynamicCustomManifest → install-dir/openshift/alibaba-ccm-config.yaml
-  ├── Verify agent-config.yaml rendezvousIP matches ROS RendezvousIp parameter
-  ├── openshift-install agent wait-for bootstrap-complete --dir install-dir/
-  └── openshift-install agent wait-for install-complete --dir install-dir/
-
-Post-install:
-  oc apply -f custom_manifests/02-capa-crds.yaml
-  oc apply -f custom_manifests/02-capa-controller.yaml
-  # Add *.apps DNS record → Ingress SLB IP (CCM creates it automatically)
-```
+For the **manual / console-driven Assisted or Agent-based flow** (no Ansible,
+single legacy `create-cluster-LEGACY.yaml` stack), see "Legacy monolithic flow"
+and the step-by-step sections lower in this file.
 
 ---
 
@@ -164,11 +145,41 @@ for the full failure-mode table and recovery cookbook.
 
 ---
 
-## Two flows: monolithic vs split (mirror/cluster decoupled)
+## Two flows: split (recommended) vs monolithic (legacy)
 
 This repo ships two flows for provisioning the infrastructure.
 
-### Flow A — Monolithic (legacy, single ROS stack)
+### Flow A — Split (mirror-stack + cluster-stack)  ← recommended
+
+Two ROS stacks: `mirror-stack.yaml` (VPC, RAM, jump host, mirror
+ECS — persistent) and `cluster-stack.yaml` (SGs, NLB, PrivateZone,
+masters, workers — short-lived).  Cluster-stack reads mirror-stack
+outputs (VpcId, VSwitches, NodeRamRoleName, JumpHostSGId, MirrorIp)
+as parameters.
+
+**Tearing down the cluster does not touch the mirror**, so the next
+install skips the ~30 min mirror prep entirely.
+
+```bash
+# One-time:
+ansible-playbook ansible/playbooks/00-preflight.yml
+ansible-playbook ansible/playbooks/01-prepare-iso.yml
+ansible-playbook ansible/playbooks/02-import-image.yml
+ansible-playbook ansible/playbooks/03-create-mirror-stack.yml    # ← persistent
+ansible-playbook ansible/playbooks/04-prepare-mirror.yml         # ← one-time
+ansible-playbook ansible/playbooks/05-verify-mirror.yml          # ← + snapshots
+ansible-playbook ansible/playbooks/06-create-cluster-stack.yml   # ← short-lived
+ansible-playbook ansible/playbooks/07-install-cluster.yml
+ansible-playbook ansible/playbooks/08-deploy-post-install.yml
+
+# Cluster rebuild only (mirror survives, ~30 min faster):
+ansible-playbook ansible/playbooks/99-teardown.yml \
+  -e teardown_target=cluster -e teardown_confirmed=true
+ansible-playbook ansible/playbooks/06-create-cluster-stack.yml
+ansible-playbook ansible/playbooks/07-install-cluster.yml
+```
+
+### Flow B — Monolithic (legacy, single ROS stack)
 
 One `create-cluster-LEGACY.yaml` stack contains everything (VPC + RAM +
 optional jump host + mirror ECS + masters + NLB + PrivateZone).
@@ -184,37 +195,9 @@ ansible-playbook ansible/playbooks/03-create-stack-LEGACY.yml          # ← mon
 ansible-playbook ansible/playbooks/04-prepare-mirror.yml
 ansible-playbook ansible/playbooks/07-install-cluster.yml
 
-# teardown:
-ansible-playbook ansible/playbooks/99-teardown.yml \
+# teardown (uses the LEGACY-specific teardown playbook + teardown_from index):
+ansible-playbook ansible/playbooks/99-teardown-LEGACY.yml \
   -e teardown_from=3 -e teardown_confirmed=true
-```
-
-### Flow B — Split (mirror-stack + cluster-stack)
-
-Two ROS stacks: `mirror-stack.yaml` (VPC, RAM, jump host, mirror
-ECS — persistent) and `cluster-stack.yaml` (SGs, NLB, PrivateZone,
-masters, workers — short-lived).  Cluster-stack reads mirror-stack
-outputs (VpcId, VSwitches, NodeRamRoleName, JumpHostSGId, MirrorIp)
-as parameters.
-
-**Tearing down the cluster does not touch the mirror**, so the next
-install skips the 30-min mirror prep entirely.
-
-```bash
-# One-time:
-ansible-playbook ansible/playbooks/00-preflight.yml
-ansible-playbook ansible/playbooks/01-prepare-iso.yml
-ansible-playbook ansible/playbooks/02-import-image.yml
-ansible-playbook ansible/playbooks/03-create-mirror-stack.yml    # ← persistent
-ansible-playbook ansible/playbooks/04-prepare-mirror.yml         # ← one-time
-ansible-playbook ansible/playbooks/06-create-cluster-stack.yml    # ← short-lived
-ansible-playbook ansible/playbooks/07-install-cluster.yml
-
-# Cluster rebuild only (mirror survives, ~30 min faster):
-ansible-playbook ansible/playbooks/99-teardown.yml \
-  -e teardown_target=cluster -e teardown_confirmed=true
-ansible-playbook ansible/playbooks/06-create-cluster-stack.yml
-ansible-playbook ansible/playbooks/07-install-cluster.yml
 ```
 
 > **完整 teardown 参考**：模式矩阵 / 互斥规则 / state 字段处置 / 典型场景 / 故障排查
@@ -226,15 +209,15 @@ ansible-playbook ansible/playbooks/07-install-cluster.yml
 
 | Use case | Flow |
 |---|---|
-| Single proof-of-concept install | A (monolithic) |
-| Iterating on cluster install (frequent teardown + rebuild) | **B (split)** |
-| Sharing one mirror across multiple clusters | B (split, with distinct ClusterName per cluster-stack) |
-| Limited Aliyun RAM permissions | A — split needs both RAM full access scopes |
+| Iterating on cluster install (frequent teardown + rebuild) | **A (split, recommended)** |
+| Sharing one mirror across multiple clusters | A (split, with distinct ClusterName per cluster-stack) |
+| One-shot proof-of-concept install | B (monolithic) |
+| Limited Aliyun RAM permissions | B — split needs both RAM full access scopes |
 
 The two flows write distinct fields in `state.yml`
-(`ros_stack_id` for A vs `mirror_stack_id` + `cluster_stack_id` for
-B) so they do not collide; teardown playbooks match accordingly
-(`99-teardown.yml` for A, `99-teardown.yml` for B).
+(`mirror_stack_id` + `cluster_stack_id` for A vs `ros_stack_id` for B)
+so they do not collide; teardown playbooks match accordingly
+(`99-teardown.yml` for A, `99-teardown-LEGACY.yml` for B).
 
 ### One-time NLB service-linked role
 
@@ -253,7 +236,18 @@ exact command above if it's missing.
 
 ---
 
-## Step-by-Step: Assisted Installer
+## Legacy monolithic flow — manual / console-driven
+
+> The two sections below document the **legacy single-stack flow** driven by
+> hand from the Red Hat Hybrid Cloud Console + Alibaba ROS Console, using
+> `ros-templates/create-cluster-LEGACY.yaml`.  They are kept for reference
+> and for users who cannot run Ansible.
+>
+> For the **recommended path** (Ansible Phase 00–08 against the split
+> mirror-stack + cluster-stack), see [`ansible/README.md`](ansible/README.md)
+> and the Architecture section above.
+
+## Step-by-Step (legacy): Assisted Installer
 
 ### Step 0 — Import Discovery ISO as Custom ECS Image
 
@@ -323,7 +317,7 @@ oc get svc -n openshift-ingress router-default -o jsonpath='{.status.loadBalance
 
 ---
 
-## Step-by-Step: Agent-based Installer
+## Step-by-Step (legacy): Agent-based Installer
 
 ### Step 0 — Decide Parameters
 
@@ -453,17 +447,42 @@ oc scale machinedeployment <cluster>-workers --replicas=5 -n openshift-cluster-a
 ```
 alibaba-openshift/
 ├── ros-templates/
-│   └── create-cluster-LEGACY.yaml       # Legacy monolithic stack
-│                                        # Key output: DynamicCustomManifest
-│                                        #   → save as alibaba-ccm-config.yaml
+│   ├── mirror-stack.yaml                       # Split: persistent (VPC + RAM + jump + mirror ECS)
+│   ├── cluster-stack.yaml                      # Split: short-lived (SGs + NLB + DNS + masters/workers)
+│   └── create-cluster-LEGACY.yaml              # Legacy monolithic stack (single-stack flow)
+│                                               #   Key output: DynamicCustomManifest
+│                                               #     → save as alibaba-ccm-config.yaml
 ├── custom_manifests/
-│   ├── 01-alibaba-ccm.yaml              # CCM: SA, RBAC, Deployment  [install-time]
-│   ├── 02-capa-crds.yaml                # CAPI CRD definitions       [post-install]
-│   ├── 02-capa-controller.yaml          # CAPA controller            [post-install]
-│   └── 03-machineconfig-providerid.yaml # kubelet ProviderID         [install-time]
-└── docs/
-    ├── design-and-development-summary.md
-    └── validation-checklist.md
+│   ├── 00-ovn-mtu.yaml                         # OVN geneve MTU pin              [install-time]
+│   ├── 01-alibaba-ccm.yaml                     # CCM: SA, RBAC, Deployment       [install-time]
+│   ├── 02-capa-crds.yaml                       # CAPI CRD definitions            [post-install]
+│   ├── 02-capa-controller.yaml                 # CAPA controller                 [post-install]
+│   ├── 03-machineconfig-providerid-master.yaml # kubelet ProviderID (master)     [install-time]
+│   ├── 03-machineconfig-providerid-worker.yaml # kubelet ProviderID (worker)     [install-time]
+│   ├── 04-csi-*.yaml                           # Alibaba Cloud CSI driver        [post-install]
+│   ├── 05-oadp-*.yaml                          # OADP / backup (optional)        [post-install]
+│   └── butane/                                 # Butane sources for the MCs above
+├── ansible/
+│   ├── playbooks/
+│   │   ├── 00-preflight.yml … 08-deploy-post-install.yml   # split-flow phases
+│   │   ├── 03-create-stack-LEGACY.yml                      # legacy monolithic create
+│   │   ├── 99-teardown.yml          # split-flow teardown (teardown_target=…)
+│   │   ├── 99-teardown-LEGACY.yml   # legacy teardown (teardown_from=…)
+│   │   ├── mirror-rebuild.yml       # refresh mirror contents without touching cluster
+│   │   └── site.yml                 # runs Phase 00→07 sequentially
+│   └── tasks/                       # shared task includes (load_state, create_stack,
+│                                    # mirror_defaults, refresh_tag_mapping, …)
+├── docs/
+│   ├── MIRROR.md                    # private mirror architecture + oc-mirror v2 cookbook
+│   ├── TEARDOWN.md                  # teardown_target × _preserves_ai × snapshot matrix
+│   ├── CCM.md                       # Alibaba CCM design + lessons learned
+│   ├── csi-driver-design.md         # CSI driver layout (matches 04-csi-*.yaml)
+│   ├── boot-image-import.md         # ISO → custom ECS image walkthrough
+│   ├── test-walkthrough.md          # end-to-end test run with expected output
+│   ├── design-and-development-summary.md
+│   └── validation-checklist.md
+└── scripts/                         # legacy bash deployment scripts (RHEL8-only;
+                                     # kept for reference — Ansible is the active path)
 ```
 
 ---
