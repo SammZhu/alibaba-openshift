@@ -325,7 +325,8 @@ oc exec test-disk-pod -- cat /data/x  # 输出 hello
 oc delete pod/test-disk-pod pvc/test-disk
 ```
 
-详细检查清单见 [`docs/validation-checklist.md`](docs/validation-checklist.md)。
+详细检查清单（按老的"阶段 0–N"编号，已冻结，仅供参考）见
+[`docs/legacy/validation-checklist.md`](docs/legacy/validation-checklist.md)。
 
 ---
 

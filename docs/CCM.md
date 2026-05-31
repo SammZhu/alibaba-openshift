@@ -3,7 +3,9 @@
 Reference doc for the CCM deployment used by this project: design
 contract, image source, config schema, landmines we hit.
 
-For the high-level architecture see [design-and-development-summary.md](design-and-development-summary.md).
+For the high-level architecture see the top-level [README.md](../README.md)
+("Architecture" section).  Original design rationale (frozen 2026-05) lives in
+[legacy/design-and-development-summary.md](legacy/design-and-development-summary.md).
 For day-to-day install flow see [QUICKSTART](../QUICKSTART.md).
 
 ---

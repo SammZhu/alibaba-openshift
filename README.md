@@ -480,8 +480,9 @@ alibaba-openshift/
 │   ├── csi-driver-design.md         # CSI driver layout (matches 04-csi-*.yaml)
 │   ├── boot-image-import.md         # ISO → custom ECS image walkthrough
 │   ├── test-walkthrough.md          # end-to-end test run with expected output
-│   ├── design-and-development-summary.md
-│   └── validation-checklist.md
+│   └── legacy/                      # frozen reference docs (design summary,
+│                                    # 2026-05 validation checklist) — see
+│                                    # docs/legacy/README.md for index
 └── scripts/                         # legacy bash deployment scripts (RHEL8-only;
                                      # kept for reference — Ansible is the active path)
 ```
