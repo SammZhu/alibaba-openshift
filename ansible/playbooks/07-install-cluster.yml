@@ -401,263 +401,301 @@
       when: nodes_need_reboot | bool
 
     # ── Wait for hosts to register ─────────────────────────────────────────
-    - name: Poll for {{ expected_hosts }} hosts to discover
-      ansible.builtin.uri:
-        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts"
-        headers: { Authorization: "Bearer {{ ai_access_token }}" }
-        return_content: true
-      register: hosts_resp
-      retries: 90
-      delay: 20
-      until: >-
-        (hosts_resp.json | selectattr('status', 'in', ['known', 'known-unbound', 'insufficient']) | list | length)
-        >= (expected_hosts | int)
+    # ── Pre-install flow — install-from-scratch only ────────────────────────
+    # Skip the entire block (poll-for-known + host PATCHes + manifest upload
+    # + ready poll + mirror-CA inject + trigger-install) when cluster is
+    # already `installed`.  Without this gate, re-running 07 against an
+    # installed cluster hangs in "Poll for hosts to discover" for 30 min
+    # (hosts moved past `known`), then fails — and even if it didn't, the
+    # hostname/disk/role PATCHes would 400 against installed hosts and
+    # "Poll until ready-to-install" would wait forever for a state that
+    # never returns.  The block's `when:` makes the play idempotent:
+    # subsequent re-runs jump straight to Phase A (immediate exit) →
+    # kubeconfig download → DNS rewrite via jumphost.
+    # Observed 2026-05-31 P0-3 stage 3 rerun.
+    - name: Pre-install flow — install-from-scratch only
+      when: cluster_pre.json.status | default('') != 'installed'
+      block:
+        - name: Poll for {{ expected_hosts }} hosts to discover
+          ansible.builtin.uri:
+            url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts"
+            headers: { Authorization: "Bearer {{ ai_access_token }}" }
+            return_content: true
+          register: hosts_resp
+          retries: 90
+          delay: 20
+          until: >-
+            (hosts_resp.json | selectattr('status', 'in', ['known', 'known-unbound', 'insufficient']) | list | length)
+            >= (expected_hosts | int)
 
-    # ── Refresh token (poll may have taken >15min) ────────────────────────
-    - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+        # ── Refresh token (poll may have taken >15min) ────────────────────────
+        - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
 
-    # ── Build per-host facts table (IP-driven, filters stale hosts) ──────
-    # Past bug: looping over all hosts_resp.json and assigning master to
-    # "first N by API response order" was fragile — stale historical hosts
-    # in the infra-env got picked up first, leaving the actual master ECS
-    # hosts as workers (or unbound), and hostname PATCHes landed on the
-    # wrong hosts.  Fix: filter to hosts currently bound to THIS cluster
-    # with non-empty inventory, then key everything off the host's actual
-    # IP — masters are exactly those matching state.yml's master_ipN.
-    - name: Build per-host facts (id, ip, role, hostname, install disk)
-      ansible.builtin.set_fact:
-        cluster_hosts: |
-          {%- set out = [] -%}
-          {%- set master_ips = [master_ip1|default(''), master_ip2|default(''), master_ip3|default('')] -%}
-          {%- for h in hosts_resp.json -%}
-            {%- if h.cluster_id|default('') == cluster_id and h.inventory|default('')|length > 0 -%}
-              {%- set inv = h.inventory | from_json -%}
-              {%- set ip_cidr = inv.interfaces | map(attribute='ipv4_addresses') | flatten | first | default('') -%}
-              {%- set ip = ip_cidr.split('/')[0] -%}
-              {#- /dev/vdb in the host's disk inventory.  AI's
-                  disks_selected_config wants the disk *id* (typically a
-                  /dev/disk/by-path/... path), not the device name. -#}
-              {%- set vdb = (inv.disks | default([]) | selectattr('name','equalto','vdb') | list | first) | default({}) -%}
-              {%- set master_idx = master_ips.index(ip) + 1 if ip in master_ips else 0 -%}
-              {%- set _ = out.append({
-                  'id': h.id,
-                  'ip': ip,
-                  'is_master': (master_idx > 0),
-                  'role': ('master' if master_idx > 0 else 'worker'),
-                  'hostname': (cluster_name + '-master-' + (master_idx|string) + '.' + cluster_name + '.' + base_domain) if master_idx > 0 else '',
-                  'install_disk_id': vdb.id | default('')
-              }) -%}
-            {%- endif -%}
-          {%- endfor -%}
-          {{ out }}
+        # ── Build per-host facts table (IP-driven, filters stale hosts) ──────
+        # Past bug: looping over all hosts_resp.json and assigning master to
+        # "first N by API response order" was fragile — stale historical hosts
+        # in the infra-env got picked up first, leaving the actual master ECS
+        # hosts as workers (or unbound), and hostname PATCHes landed on the
+        # wrong hosts.  Fix: filter to hosts currently bound to THIS cluster
+        # with non-empty inventory, then key everything off the host's actual
+        # IP — masters are exactly those matching state.yml's master_ipN.
+        - name: Build per-host facts (id, ip, role, hostname, install disk)
+          ansible.builtin.set_fact:
+            cluster_hosts: |
+              {%- set out = [] -%}
+              {%- set master_ips = [master_ip1|default(''), master_ip2|default(''), master_ip3|default('')] -%}
+              {%- for h in hosts_resp.json -%}
+                {%- if h.cluster_id|default('') == cluster_id and h.inventory|default('')|length > 0 -%}
+                  {%- set inv = h.inventory | from_json -%}
+                  {%- set ip_cidr = inv.interfaces | map(attribute='ipv4_addresses') | flatten | first | default('') -%}
+                  {%- set ip = ip_cidr.split('/')[0] -%}
+                  {#- /dev/vdb in the host's disk inventory.  AI's
+                      disks_selected_config wants the disk *id* (typically a
+                      /dev/disk/by-path/... path), not the device name. -#}
+                  {%- set vdb = (inv.disks | default([]) | selectattr('name','equalto','vdb') | list | first) | default({}) -%}
+                  {%- set master_idx = master_ips.index(ip) + 1 if ip in master_ips else 0 -%}
+                  {%- set _ = out.append({
+                      'id': h.id,
+                      'ip': ip,
+                      'is_master': (master_idx > 0),
+                      'role': ('master' if master_idx > 0 else 'worker'),
+                      'hostname': (cluster_name + '-master-' + (master_idx|string) + '.' + cluster_name + '.' + base_domain) if master_idx > 0 else '',
+                      'install_disk_id': vdb.id | default('')
+                  }) -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {{ out }}
 
-    - name: Show host plan
-      ansible.builtin.debug:
-        msg: |
-          Host plan for cluster {{ cluster_id }}:
-          {% for h in cluster_hosts %}
-            {{ h.ip }}  →  role={{ h.role }}  hostname={{ h.hostname or '(default)' }}  install_disk={{ h.install_disk_id or '(default vda)' }}
-          {% endfor %}
+        - name: Show host plan
+          ansible.builtin.debug:
+            msg: |
+              Host plan for cluster {{ cluster_id }}:
+              {% for h in cluster_hosts %}
+                {{ h.ip }}  →  role={{ h.role }}  hostname={{ h.hostname or '(default)' }}  install_disk={{ h.install_disk_id or '(default vda)' }}
+              {% endfor %}
 
-    - name: Sanity — exactly {{ control_plane_count }} masters identified by IP
-      ansible.builtin.assert:
-        that:
-          - cluster_hosts | selectattr('is_master', 'equalto', true) | list | length == (control_plane_count | int)
-        fail_msg: |
-          Expected {{ control_plane_count }} master IP matches but found
-          {{ cluster_hosts | selectattr('is_master', 'equalto', true) | list | length }}.
-          state.yml master_ip{1,2,3} = {{ [master_ip1|default(''), master_ip2|default(''), master_ip3|default('')] }}
-          Current host IPs            = {{ cluster_hosts | map(attribute='ip') | list }}
-          Likely a ROS / state drift — check state.yml or re-run Phase 03.
+        - name: Sanity — exactly {{ control_plane_count }} masters identified by IP
+          ansible.builtin.assert:
+            that:
+              - cluster_hosts | selectattr('is_master', 'equalto', true) | list | length == (control_plane_count | int)
+            fail_msg: |
+              Expected {{ control_plane_count }} master IP matches but found
+              {{ cluster_hosts | selectattr('is_master', 'equalto', true) | list | length }}.
+              state.yml master_ip{1,2,3} = {{ [master_ip1|default(''), master_ip2|default(''), master_ip3|default('')] }}
+              Current host IPs            = {{ cluster_hosts | map(attribute='ip') | list }}
+              Likely a ROS / state drift — check state.yml or re-run Phase 03.
 
-    # ── Set hostname for each master via AI API ──────────────────────────
-    # Workers stay with AI's default hostname (MAC-derived) — they get
-    # renamed by the kubelet bootstrap based on the providerID anyway.
-    - name: PATCH hostname for masters
-      ansible.builtin.uri:
-        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts/{{ item.id }}"
-        method: PATCH
-        headers:
-          Authorization: "Bearer {{ ai_access_token }}"
-          Content-Type: application/json
-        body: "{{ {'host_name': item.hostname} | to_json }}"
-        body_format: raw
-        status_code: [200, 201]
-      loop: "{{ cluster_hosts | selectattr('is_master', 'equalto', true) | list }}"
-      loop_control: { label: "{{ item.ip }} → {{ item.hostname }}" }
+        # ── Set hostname for each master via AI API ──────────────────────────
+        # Workers stay with AI's default hostname (MAC-derived) — they get
+        # renamed by the kubelet bootstrap based on the providerID anyway.
+        - name: PATCH hostname for masters
+          ansible.builtin.uri:
+            url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts/{{ item.id }}"
+            method: PATCH
+            headers:
+              Authorization: "Bearer {{ ai_access_token }}"
+              Content-Type: application/json
+            body: "{{ {'host_name': item.hostname} | to_json }}"
+            body_format: raw
+            status_code: [200, 201]
+          loop: "{{ cluster_hosts | selectattr('is_master', 'equalto', true) | list }}"
+          loop_control: { label: "{{ item.ip }} → {{ item.hostname }}" }
 
-    # ── Pin coreos-installer to /dev/vdb (Alibaba ECS install workaround) ──
-    # /dev/vda holds the Discovery ISO and can't be written (busy
-    # partitions).  ansible/files/clone-vdb-to-vda.{sh,service} (injected
-    # via 01-prepare-iso ignition_config_override) clones vdb → vda just
-    # before the post-install reboot, so ECS boots from the vda clone.
-    - name: PATCH installation disk to /dev/vdb for every host
-      ansible.builtin.uri:
-        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts/{{ item.id }}"
-        method: PATCH
-        headers:
-          Authorization: "Bearer {{ ai_access_token }}"
-          Content-Type: application/json
-        body: "{{ {'disks_selected_config': [{'id': item.install_disk_id, 'role': 'install'}]} | to_json }}"
-        body_format: raw
-        status_code: [200, 201]
-      loop: "{{ cluster_hosts | selectattr('install_disk_id', 'ne', '') | list }}"
-      loop_control: { label: "{{ item.ip }} → install on {{ item.install_disk_id }}" }
+        # ── Pin coreos-installer to /dev/vdb (Alibaba ECS install workaround) ──
+        # /dev/vda holds the Discovery ISO and can't be written (busy
+        # partitions).  ansible/files/clone-vdb-to-vda.{sh,service} (injected
+        # via 01-prepare-iso ignition_config_override) clones vdb → vda just
+        # before the post-install reboot, so ECS boots from the vda clone.
+        - name: PATCH installation disk to /dev/vdb for every host
+          ansible.builtin.uri:
+            url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts/{{ item.id }}"
+            method: PATCH
+            headers:
+              Authorization: "Bearer {{ ai_access_token }}"
+              Content-Type: application/json
+            body: "{{ {'disks_selected_config': [{'id': item.install_disk_id, 'role': 'install'}]} | to_json }}"
+            body_format: raw
+            status_code: [200, 201]
+          loop: "{{ cluster_hosts | selectattr('install_disk_id', 'ne', '') | list }}"
+          loop_control: { label: "{{ item.ip }} → install on {{ item.install_disk_id }}" }
 
-    # ── Assign roles (IP-driven, not order-driven) ────────────────────────
-    - name: PATCH host roles
-      ansible.builtin.uri:
-        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts/{{ item.id }}"
-        method: PATCH
-        headers:
-          Authorization: "Bearer {{ ai_access_token }}"
-          Content-Type: application/json
-        body: "{{ {'host_role': item.role} | to_json }}"
-        body_format: raw
-        status_code: [200, 201]
-      loop: "{{ cluster_hosts }}"
-      loop_control: { label: "{{ item.ip }} → {{ item.role }}" }
+        # ── Assign roles (IP-driven, not order-driven) ────────────────────────
+        - name: PATCH host roles
+          ansible.builtin.uri:
+            url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}/hosts/{{ item.id }}"
+            method: PATCH
+            headers:
+              Authorization: "Bearer {{ ai_access_token }}"
+              Content-Type: application/json
+            body: "{{ {'host_role': item.role} | to_json }}"
+            body_format: raw
+            status_code: [200, 201]
+          loop: "{{ cluster_hosts }}"
+          loop_control: { label: "{{ item.ip }} → {{ item.role }}" }
 
-    # ── Upload custom manifests ───────────────────────────────────────────
-    # Root cause: AI backend DELETE removes the logical record but NOT the
-    # physical file on disk.  Each POST creates a new physical file with an
-    # incrementing suffix (-00, -01, …).  When ignition-configs is generated
-    # it finds multiple physical files for the same MachineConfig → fatal.
-    #
-    # Fix: use PATCH (update-in-place) when a manifest already exists, and
-    # POST only when it is truly new.  PATCH rewrites the existing physical
-    # file instead of creating a new one, so no duplicates ever accumulate.
-    - name: List existing custom manifests
-      ansible.builtin.uri:
-        url: "{{ assisted_api }}/clusters/{{ cluster_id }}/manifests"
-        headers: { Authorization: "Bearer {{ ai_access_token }}" }
-        return_content: true
-      register: existing_manifests
+        # ── Upload custom manifests ───────────────────────────────────────────
+        # Root cause: AI backend DELETE removes the logical record but NOT the
+        # physical file on disk.  Each POST creates a new physical file with an
+        # incrementing suffix (-00, -01, …).  When ignition-configs is generated
+        # it finds multiple physical files for the same MachineConfig → fatal.
+        #
+        # Fix: use PATCH (update-in-place) when a manifest already exists, and
+        # POST only when it is truly new.  PATCH rewrites the existing physical
+        # file instead of creating a new one, so no duplicates ever accumulate.
+        - name: List existing custom manifests
+          ansible.builtin.uri:
+            url: "{{ assisted_api }}/clusters/{{ cluster_id }}/manifests"
+            headers: { Authorization: "Bearer {{ ai_access_token }}" }
+            return_content: true
+          register: existing_manifests
 
-    - name: Slurp each manifest
-      ansible.builtin.slurp:
-        src: "{{ item.src }}"
-      register: manifest_slurps
-      loop: "{{ manifests_to_upload }}"
-      loop_control: { label: "{{ item.folder }}/{{ item.name }}" }
+        - name: Slurp each manifest
+          ansible.builtin.slurp:
+            src: "{{ item.src }}"
+          register: manifest_slurps
+          loop: "{{ manifests_to_upload }}"
+          loop_control: { label: "{{ item.folder }}/{{ item.name }}" }
 
-    - name: PATCH existing manifests (update in-place, avoids new physical file)
-      ansible.builtin.uri:
-        url: "{{ assisted_api }}/clusters/{{ cluster_id }}/manifests"
-        method: PATCH
-        headers:
-          Authorization: "Bearer {{ ai_access_token }}"
-          Content-Type: application/json
-        # PATCH uses updated_content / updated_folder / updated_file_name (not 'content')
-        body: >-
-          {{ {
-               'folder':           item.item.folder,
-               'file_name':        item.item.name,
-               'updated_content':  item.content,
-               'updated_folder':   item.item.folder,
-               'updated_file_name': item.item.name
-             } | to_json }}
-        body_format: raw
-        status_code: [200, 201]
-      loop: "{{ manifest_slurps.results }}"
-      loop_control: { label: "{{ item.item.folder }}/{{ item.item.name }}" }
-      when: >-
-        (existing_manifests.json
-         | selectattr('folder',    'equalto', item.item.folder)
-         | selectattr('file_name', 'equalto', item.item.name)
-         | list | length) > 0
+        - name: PATCH existing manifests (update in-place, avoids new physical file)
+          ansible.builtin.uri:
+            url: "{{ assisted_api }}/clusters/{{ cluster_id }}/manifests"
+            method: PATCH
+            headers:
+              Authorization: "Bearer {{ ai_access_token }}"
+              Content-Type: application/json
+            # PATCH uses updated_content / updated_folder / updated_file_name (not 'content')
+            body: >-
+              {{ {
+                   'folder':           item.item.folder,
+                   'file_name':        item.item.name,
+                   'updated_content':  item.content,
+                   'updated_folder':   item.item.folder,
+                   'updated_file_name': item.item.name
+                 } | to_json }}
+            body_format: raw
+            status_code: [200, 201]
+          loop: "{{ manifest_slurps.results }}"
+          loop_control: { label: "{{ item.item.folder }}/{{ item.item.name }}" }
+          when: >-
+            (existing_manifests.json
+             | selectattr('folder',    'equalto', item.item.folder)
+             | selectattr('file_name', 'equalto', item.item.name)
+             | list | length) > 0
 
-    - name: POST new manifests (first-time upload, not yet known to AI)
-      ansible.builtin.uri:
-        url: "{{ assisted_api }}/clusters/{{ cluster_id }}/manifests"
-        method: POST
-        headers:
-          Authorization: "Bearer {{ ai_access_token }}"
-          Content-Type: application/json
-        body: "{{ {'folder': item.item.folder, 'file_name': item.item.name, 'content': item.content} | to_json }}"
-        body_format: raw
-        status_code: [201]
-      loop: "{{ manifest_slurps.results }}"
-      loop_control: { label: "{{ item.item.folder }}/{{ item.item.name }}" }
-      when: >-
-        (existing_manifests.json
-         | selectattr('folder',    'equalto', item.item.folder)
-         | selectattr('file_name', 'equalto', item.item.name)
-         | list | length) == 0
+        - name: POST new manifests (first-time upload, not yet known to AI)
+          ansible.builtin.uri:
+            url: "{{ assisted_api }}/clusters/{{ cluster_id }}/manifests"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ ai_access_token }}"
+              Content-Type: application/json
+            body: "{{ {'folder': item.item.folder, 'file_name': item.item.name, 'content': item.content} | to_json }}"
+            body_format: raw
+            status_code: [201]
+          loop: "{{ manifest_slurps.results }}"
+          loop_control: { label: "{{ item.item.folder }}/{{ item.item.name }}" }
+          when: >-
+            (existing_manifests.json
+             | selectattr('folder',    'equalto', item.item.folder)
+             | selectattr('file_name', 'equalto', item.item.name)
+             | list | length) == 0
 
-    # ── Wait cluster ready ────────────────────────────────────────────────
-    - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+        # ── Wait cluster ready ────────────────────────────────────────────────
+        - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
 
-    - name: Poll cluster until ready-to-install
-      ansible.builtin.uri:
-        url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
-        headers: { Authorization: "Bearer {{ ai_access_token }}" }
-        return_content: true
-      register: cluster_poll
-      retries: 40
-      delay: 15
-      until: cluster_poll.json.status == 'ready'
-      failed_when:
-        - cluster_poll.json.status is defined
-        - cluster_poll.json.status in ['pending-for-input', 'installing-pending-user-action', 'error', 'cancelled']
+        - name: Poll cluster until ready-to-install
+          ansible.builtin.uri:
+            url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
+            headers: { Authorization: "Bearer {{ ai_access_token }}" }
+            return_content: true
+          register: cluster_poll
+          retries: 40
+          delay: 15
+          until: cluster_poll.json.status == 'ready'
+          failed_when:
+            - cluster_poll.json.status is defined
+            - cluster_poll.json.status in ['pending-for-input', 'installing-pending-user-action', 'error', 'cancelled']
 
-    # ── Inject per-registry mirror CA on each master (live ISO) ──────────────
-    #
-    # The infra-env's additional_trust_bundle alone is NOT enough: it writes
-    # the CA to /etc/pki/ca-trust/source/anchors/ but `update-ca-trust extract`
-    # isn't run during RHCOS Live ignition, AND containers/image library
-    # (skopeo / ostree-container / cri-o) doesn't read the system trust store.
-    # Without /etc/containers/certs.d/<mirror>:<port>/ca.crt, the cluster's
-    # rhel-coreos image pull during "Starting installation" stage falls back
-    # from mirror → upstream quay.io → cross-border timeout → AI 30-min kill.
-    #
-    # 04's recent PATCH to ignition_config_override bakes this CA into FUTURE
-    # discovery-ISO downloads.  But for THIS install (existing live ISO),
-    # we have to scp the file in here, before triggering install.
-    # Idempotent — re-running 07 just re-writes the same file.
-    - name: Inject mirror CA into /etc/containers/certs.d/ on each host
-      ansible.builtin.shell: |
-        set -euo pipefail
-        SSH_BASE="-i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
-        PROXY="ssh $SSH_BASE -W %h:%p root@{{ jump_host_ip }}"
-        scp $SSH_BASE -o "ProxyCommand=$PROXY" \
-            {{ mirror_ca_cert_path }} core@{{ item.ip }}:/tmp/mirror-ca.crt
-        ssh $SSH_BASE -o "ProxyCommand=$PROXY" core@{{ item.ip }} \
-            "sudo mkdir -p /etc/containers/certs.d/{{ mirror_private_ip }}:8443 \
-          && sudo cp /tmp/mirror-ca.crt /etc/containers/certs.d/{{ mirror_private_ip }}:8443/ca.crt \
-          && sudo rm -f /tmp/mirror-ca.crt \
-          && echo ✓ CA installed on {{ item.ip }}"
-      loop: "{{ cluster_hosts }}"
-      loop_control:
-        label: "{{ item.ip }}"
-      when:
-        - mirror_enabled | default(false) | bool
-        - mirror_ca_cert_path is defined
-        - mirror_ca_cert_path | length > 0
-      changed_when: true
+        # ── Inject per-registry mirror CA on each master (live ISO) ──────────────
+        #
+        # The infra-env's additional_trust_bundle alone is NOT enough: it writes
+        # the CA to /etc/pki/ca-trust/source/anchors/ but `update-ca-trust extract`
+        # isn't run during RHCOS Live ignition, AND containers/image library
+        # (skopeo / ostree-container / cri-o) doesn't read the system trust store.
+        # Without /etc/containers/certs.d/<mirror>:<port>/ca.crt, the cluster's
+        # rhel-coreos image pull during "Starting installation" stage falls back
+        # from mirror → upstream quay.io → cross-border timeout → AI 30-min kill.
+        #
+        # 04's recent PATCH to ignition_config_override bakes this CA into FUTURE
+        # discovery-ISO downloads.  But for THIS install (existing live ISO),
+        # we have to scp the file in here, before triggering install.
+        # Idempotent — re-running 07 just re-writes the same file.
+        - name: Inject mirror CA into /etc/containers/certs.d/ on each host
+          ansible.builtin.shell: |
+            set -euo pipefail
+            SSH_BASE="-i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
+            PROXY="ssh $SSH_BASE -W %h:%p root@{{ jump_host_ip }}"
+            scp $SSH_BASE -o "ProxyCommand=$PROXY" \
+                {{ mirror_ca_cert_path }} core@{{ item.ip }}:/tmp/mirror-ca.crt
+            ssh $SSH_BASE -o "ProxyCommand=$PROXY" core@{{ item.ip }} \
+                "sudo mkdir -p /etc/containers/certs.d/{{ mirror_private_ip }}:8443 \
+              && sudo cp /tmp/mirror-ca.crt /etc/containers/certs.d/{{ mirror_private_ip }}:8443/ca.crt \
+              && sudo rm -f /tmp/mirror-ca.crt \
+              && echo ✓ CA installed on {{ item.ip }}"
+          loop: "{{ cluster_hosts }}"
+          loop_control:
+            label: "{{ item.ip }}"
+          when:
+            - mirror_enabled | default(false) | bool
+            - mirror_ca_cert_path is defined
+            - mirror_ca_cert_path | length > 0
+          changed_when: true
 
-    # ── Install ───────────────────────────────────────────────────────────
-    # (No SLB self-loop hack needed — ROS template uses NLB, which supports
-    #  hairpin / backend → VIP loopback natively.)
-    - name: Trigger install
-      ansible.builtin.uri:
-        url: "{{ assisted_api }}/clusters/{{ cluster_id }}/actions/install"
-        method: POST
-        headers: { Authorization: "Bearer {{ ai_access_token }}" }
-        status_code: [202, 409]   # 409 if already installing
-      when: cluster_poll.json.status == 'ready'
+        # ── Install ───────────────────────────────────────────────────────────
+        # (No SLB self-loop hack needed — ROS template uses NLB, which supports
+        #  hairpin / backend → VIP loopback natively.)
+        - name: Trigger install
+          ansible.builtin.uri:
+            url: "{{ assisted_api }}/clusters/{{ cluster_id }}/actions/install"
+            method: POST
+            headers: { Authorization: "Bearer {{ ai_access_token }}" }
+            status_code: [202, 409]   # 409 if already installing
+          when: cluster_poll.json.status == 'ready'
 
-    # ── Poll until installed (token refreshes each iteration) ─────────────
-    - name: Poll install status (~45-60 min)
+        # ── Two-phase poll: required by the *.apps DNS chicken-and-egg ──────────
+        # OBSERVED 2026-05-30 first install + 2026-05-31 re-run: the cluster
+        # enters `finalizing` after ~20 min (all hosts Done, control plane up)
+        # then sits there indefinitely waiting for console operator to become
+        # Available.  console probes https://console-openshift-console.apps.<cluster>.<base>;
+        # that hostname is a *.apps wildcard PrivateZone A record seeded to the
+        # IngressVip placeholder (10.0.16.6 = bogon).  On platform=external the
+        # IngressController defaults to HostNetwork (no LoadBalancer Service),
+        # so router-default binds master:80/443 — wildcard must point at a
+        # master IP, not the placeholder.
+        #
+        # Old single-phase poll waited for `installed` and ran the DNS-rewrite
+        # post-hook AFTER.  Two problems:
+        #   1. `installed` never arrived → the post-hook never ran.
+        #   2. The post-hook ran `oc` on the operator box, but kubeconfig's
+        #      server URL is api.<cluster>.<base> (PrivateZone, intranet-only)
+        #      and the ApiNLB is AddressType=Intranet.  Operator (outside VPC)
+        #      can neither resolve nor reach it → oc silently returns nothing
+        #      → _apps_target_ip empty → all PATCH tasks silently `when`-skip.
+        #      The auto-fix had NEVER actually fired in any prior run.
+        #
+        # Fix: poll until `finalizing or installed` (kubeconfig is downloadable
+        # in either state), then run the DNS rewrite via the jump host (which
+        # IS inside the VPC and can resolve api), then poll until `installed`.
+    - name: Phase A — poll until cluster reaches finalizing or installed
       block:
         - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
-        - name: Get cluster status
+        - name: Get cluster status (Phase A)
           ansible.builtin.uri:
             url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
             headers: { Authorization: "Bearer {{ ai_access_token }}" }
             return_content: true
           register: install_poll
-          retries: 60
+          retries: 35   # ~35 min — typical: 20 min from trigger to finalizing
           delay: 60
           # AI's GET /clusters/{id} occasionally returns a response body
           # missing the top-level 'status' field (transient).  Without
@@ -665,12 +703,12 @@
           # "'dict object' has no attribute 'status'" and aborts the
           # whole polling loop — which then leaves a healthy ongoing
           # install with no operator following it.
-          until: install_poll.json.status | default('') == 'installed'
+          until: install_poll.json.status | default('') in ['finalizing', 'installed']
           failed_when:
             - install_poll.json.status | default('') != ''
             - install_poll.json.status in ['error', 'cancelled', 'pending-for-input', 'installing-pending-user-action']
 
-    # ── Download credentials ──────────────────────────────────────────────
+    # ── Download credentials (AI allows during both finalizing and installed) ──
     - name: Ensure auth dir
       ansible.builtin.file:
         path: "{{ output_dir }}/auth"
@@ -693,90 +731,16 @@
         dest: "{{ output_dir }}/auth/kubeadmin-password"
         mode: "0600"
 
-    # ── Post-install: point *.apps wildcard DNS at real router pods ──────
-    # cluster-stack ROS template seeds *.apps as A → IngressVip param
-    # (default 10.0.16.6 = bogon placeholder).  IngressController on
-    # platform=external defaults to endpointPublishingStrategy=HostNetwork
-    # — no LoadBalancer Service auto-created — so router-default pods
-    # bind master:80/443 via hostNetwork.  Wildcard needs to point at the
-    # IPs of nodes actually running router-default.
-    #
-    # Idempotent: skip when CCM eventually deploys a LoadBalancer Service
-    # for ingress (future: install an external LB controller flow); for
-    # now always rewrite to current router-default pod hostIPs.
-    - name: Discover hostIPs of router-default pods (via downloaded kubeconfig)
-      ansible.builtin.command:
-        argv:
-          - oc
-          - --kubeconfig={{ output_dir }}/auth/kubeconfig
-          - -n
-          - openshift-ingress
-          - get
-          - pods
-          - -l
-          - ingresscontroller.operator.openshift.io/deployment-ingresscontroller=default
-          - -o
-          - jsonpath={range .items[*]}{.status.hostIP}{"\n"}{end}
-      register: _router_ips
-      changed_when: false
-
-    - name: Resolve current *.apps record ID + new IP target
-      ansible.builtin.set_fact:
-        # Pick first hostIP — pvtz A records support multiple values via
-        # multiple records but a single one suffices for HostNetwork (any
-        # one will route inside the cluster).  Future: write one A per
-        # router pod hostIP for round-robin.
-        _apps_target_ip: "{{ (_router_ips.stdout_lines | first) | trim }}"
-
-    - name: PATCH *.apps PrivateZone record to real router pod node IP
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - pvtz
-          - DescribeZoneRecords
-          - --ZoneId
-          - "{{ forward_zone_id }}"
-          - --Keyword
-          - apps
-          - --SearchMode
-          - LIKE
-          - --profile
-          - "{{ aliyun_profile }}"
-      register: _apps_rec_query
-      changed_when: false
-      when: _apps_target_ip | length > 0
-
-    - name: Extract *.apps record id
-      ansible.builtin.set_fact:
-        _apps_record_id: >-
-          {{ ((_apps_rec_query.stdout | from_json).Records.Record | default([])
-              | selectattr('Rr','equalto','*.apps') | list | first).RecordId }}
-      when: _apps_target_ip | length > 0
-
-    - name: UpdateZoneRecord *.apps → {{ _apps_target_ip }}
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - pvtz
-          - UpdateZoneRecord
-          - --RecordId
-          - "{{ _apps_record_id }}"
-          - --Rr
-          - "*.apps"
-          - --Type
-          - A
-          - --Value
-          - "{{ _apps_target_ip }}"
-          - --Ttl
-          - "60"
-          - --profile
-          - "{{ aliyun_profile }}"
-      when:
-        - _apps_target_ip | length > 0
-        - _apps_record_id is defined
-      changed_when: true
-
-    # ── SCP kubeconfig to jump host (if available) ────────────────────────
+    # ── Stage kubeconfig on jump host EARLY (needed by *.apps DNS rewrite) ──
+    # The DNS-rewrite block below runs `oc` to discover router-default pod
+    # hostIPs.  kubeconfig server URL is api.<cluster>.<base> which only
+    # resolves via PrivateZone (intranet) and ApiNLB is AddressType=Intranet
+    # — neither resolvable nor reachable from the operator box.  We MUST
+    # run oc via SSH to the jump host (which is inside the VPC).
+    # Historical bug fixed 2026-05-31: the previous architecture ran oc on
+    # the operator, got an empty stdout, set _apps_target_ip = '', and the
+    # downstream PATCH tasks silently `when`-skipped.  Install hung in
+    # finalizing waiting for console operator that could never recover.
     - name: Wait for jump host cloud-init to finish (userdata.done marker)
       ansible.builtin.command:
         argv:
@@ -797,7 +761,7 @@
       until: jump_ready.rc == 0
       when: jump_host_ip | default('') | length > 0
 
-    - name: Copy kubeconfig to jump host
+    - name: Copy kubeconfig to jump host (needed for oc-via-jumphost below)
       ansible.builtin.command:
         argv:
           - scp
@@ -808,8 +772,136 @@
           - "{{ output_dir }}/auth/kubeconfig"
           - "root@{{ jump_host_ip }}:/root/kubeconfig"
       when: jump_host_ip | default('') | length > 0
-      register: scp_result
-      changed_when: scp_result.rc == 0
+      register: scp_kc_result
+      changed_when: scp_kc_result.rc == 0
+
+    # ── *.apps wildcard DNS rewrite (BEFORE final installed poll) ──────────
+    # cluster-stack ROS template seeds *.apps as A → IngressVip param
+    # (default 10.0.16.6 = bogon placeholder).  IngressController on
+    # platform=external defaults to endpointPublishingStrategy=HostNetwork
+    # — no LoadBalancer Service auto-created — so router-default pods
+    # bind master:80/443 via hostNetwork.  Wildcard needs to point at a
+    # node actually running router-default, otherwise console operator
+    # stays Degraded forever and AI cluster never transitions from
+    # finalizing → installed.  This is the chicken-and-egg the
+    # two-phase poll above breaks.
+    - name: Discover hostIPs of router-default pods (run via jump host, inside VPC)
+      # IMPORTANT: pass the entire remote command as ONE quoted shell string
+      # (not as separate argv elements).  ssh joins argv after user@host with
+      # spaces WITHOUT escaping, so the remote shell would re-split on
+      # whitespace — the jsonpath `{range .items[*]}{.status.hostIP}{"\n"}{end}`
+      # contains spaces and `[*]`, which the remote shell would mangle:
+      # `{range` and `.items[*]}{.status.hostIP}{"\n"}{end}` become two
+      # separate arguments, the second is passed to `oc get pods` as a name,
+      # and oc errors `name cannot be provided when a selector is specified`.
+      # Observed 2026-05-31 P0-3 stage 3 rerun2 — task retried 12 times.
+      # Fix: collapse to single shell string with single-quoted jsonpath, and
+      # use the simpler `{.items[*].status.hostIP}` form (space-separated
+      # IPs, no embedded spaces in the expression itself — safer everywhere).
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -i
+          - "{{ ssh_priv_key_file }}"
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - ConnectTimeout=10
+          - "root@{{ jump_host_ip }}"
+          - "oc --kubeconfig=/root/kubeconfig -n openshift-ingress get pods -l ingresscontroller.operator.openshift.io/deployment-ingresscontroller=default -o jsonpath='{.items[*].status.hostIP}'"
+      register: _router_ips
+      changed_when: false
+      retries: 12   # ~2 min — router-default pods may take a moment after
+      delay: 10     # control plane is up to be Scheduled+Running
+      until: ((_router_ips.stdout | default('')).split() | length) > 0
+      when: jump_host_ip | default('') | length > 0
+
+    - name: Resolve current *.apps record ID + new IP target
+      ansible.builtin.set_fact:
+        # oc jsonpath above returns IPs space-separated on one line.
+        # Pick first — pvtz A records support multiple values via
+        # multiple records but a single one suffices for HostNetwork
+        # (any router pod handles wildcard).  Future: write one A
+        # record per hostIP for round-robin.
+        _apps_target_ip: "{{ ((_router_ips.stdout | default('')).split() | first | default('')) | trim }}"
+
+    - name: Fail loudly if router pod discovery returned nothing
+      ansible.builtin.fail:
+        msg: |
+          Could not discover any router-default pod hostIP via jump host.
+          This means oc-on-jumphost returned empty; without a real router
+          node IP the *.apps DNS rewrite below would silently skip and
+          install will hang in finalizing.
+          Check: ssh root@{{ jump_host_ip }} oc --kubeconfig=/root/kubeconfig -n openshift-ingress get pods
+      when: _apps_target_ip | length == 0
+
+    - name: Query *.apps PrivateZone record id
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - pvtz
+          - DescribeZoneRecords
+          - --ZoneId
+          - "{{ forward_zone_id }}"
+          - --Keyword
+          - apps
+          - --SearchMode
+          - LIKE
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _apps_rec_query
+      changed_when: false
+
+    - name: Extract *.apps record id
+      ansible.builtin.set_fact:
+        _apps_record_id: >-
+          {{ ((_apps_rec_query.stdout | from_json).Records.Record | default([])
+              | selectattr('Rr','equalto','*.apps') | list | first).RecordId }}
+
+    - name: UpdateZoneRecord *.apps → {{ _apps_target_ip }}
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - pvtz
+          - UpdateZoneRecord
+          - --RecordId
+          - "{{ _apps_record_id }}"
+          - --Rr
+          - "*.apps"
+          - --Type
+          - A
+          - --Value
+          - "{{ _apps_target_ip }}"
+          - --Ttl
+          - "60"
+          - --profile
+          - "{{ aliyun_profile }}"
+      changed_when: true
+
+    # ── Phase B — now poll until fully installed (console etc. converge) ───
+    # After the DNS rewrite above, console operator probes the route again
+    # within ~30 s and turns Available; AI cluster status moves to
+    # `installed`.  Typical Phase B duration: 5-15 min.  Skip the wait if
+    # already installed (e.g., re-run after a successful install).
+    - name: Phase B — poll until cluster status = installed
+      block:
+        - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+        - name: Get cluster status (Phase B)
+          ansible.builtin.uri:
+            url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
+            headers: { Authorization: "Bearer {{ ai_access_token }}" }
+            return_content: true
+          register: install_poll_b
+          retries: 30   # ~30 min — operators converging after DNS fix
+          delay: 60
+          until: install_poll_b.json.status | default('') == 'installed'
+          failed_when:
+            - install_poll_b.json.status | default('') != ''
+            - install_poll_b.json.status in ['error', 'cancelled', 'pending-for-input', 'installing-pending-user-action']
+      when: install_poll.json.status | default('') != 'installed'
+
+    # (Earlier "Copy kubeconfig to jump host" task moved up to support the
+    #  DNS-rewrite block above.  Don't add it again here.)
 
     # ── Persist + summary ─────────────────────────────────────────────────
     - name: Save state
