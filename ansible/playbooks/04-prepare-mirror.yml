@@ -783,14 +783,22 @@
       changed_when: false
 
     - name: Pull CAPA image to operator-local docker-archive (skopeo)
+      # quay.io's edge CDN intermittently returns 502 mid-blob; retry a
+      # few times before giving up.  Observed 2026-06-01 P1-CAPA.b — 14
+      # of 15 blobs copied, then 502 on the last one killed site.yml.
       ansible.builtin.command:
         argv:
           - skopeo
           - copy
           - --src-tls-verify=true
+          - --retry-times=5
           - docker://quay.io/samzhu/openshift-capi-alicloud:v0.1.0
           - docker-archive:/tmp/capa-v0.1.0.tar:quay.io/samzhu/openshift-capi-alicloud:v0.1.0
       delegate_to: localhost
+      register: _capa_pull
+      retries: 3
+      delay: 20
+      until: _capa_pull.rc == 0
       when: "'MISSING' in _capa_on_mirror.stdout"
       changed_when: true
 
@@ -808,6 +816,10 @@
           - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
           - /tmp/capa-v0.1.0.tar
           - "root@{{ mirror_private_ip }}:/tmp/capa-v0.1.0.tar"
+      register: _capa_scp
+      retries: 3
+      delay: 10
+      until: _capa_scp.rc == 0
       when: "'MISSING' in _capa_on_mirror.stdout"
       changed_when: true
 
@@ -825,6 +837,10 @@
         rm -f /tmp/capa-v0.1.0.tar
         echo "OK: $DST now on mirror"
         REMOTE
+      register: _capa_push
+      retries: 3
+      delay: 10
+      until: _capa_push.rc == 0
       when: "'MISSING' in _capa_on_mirror.stdout"
       changed_when: true
 
