@@ -653,6 +653,29 @@
         REMOTE
       when: already_ready.rc != 0
 
+    # ── Mark mirror-ready as EARLY as possible (right after import succeeds) ─
+    # The heavy work (download 25 GB tarball + install Quay + oc-mirror
+    # import) is now done.  Write the resume marker NOW so any subsequent
+    # task failure (CCM/CAPA pre-pull, IDMS PATCH, etc.) lets the next
+    # site.yml rerun short-circuit straight into already_ready=True and
+    # skip the heavy work — those follow-on tasks are individually
+    # idempotent and re-run cheap.
+    # Also stage the CA cert onto /var/lib/mirror-ca.crt for the "Fetch
+    # mirror CA cert to ansible host" task below — both used to live in
+    # one task at the very end, gated on already_ready.rc != 0; gating it
+    # there meant any failure between here and there lost the marker AND
+    # the CA exposure.  Observed 2026-06-01 P1-CAPA.b: CAPA pre-pull
+    # failed → marker never written → rerun re-downloaded 25 GB tarball.
+    - name: Stage CA cert + write mirror-ready marker (early, right after import)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        cp /etc/quay-config/ssl.cert /var/lib/mirror-ca.crt
+        echo "$(date -Iseconds) READY (import done; CCM/CAPA pre-pull + IDMS PATCH still to run)" > /var/lib/mirror-ready
+        REMOTE
+      when: already_ready.rc != 0
+      changed_when: true
+
     # ── Add commit-tag aliases for rhai images (ALWAYS runs, idempotent) ─────
     # The isc uses @sha256:digest form for additionalImages so oc-mirror v2
     # mirrors them deterministically.  But the AI discovery agent's
@@ -851,15 +874,11 @@
       delegate_to: localhost
       when: "'MISSING' in _capa_on_mirror.stdout"
 
-    # ── Step 9: expose CA + signal ready ────────────────────────────────────
-    - name: Expose CA cert + write ready signal
-      ansible.builtin.shell: |
-        {{ _ssh_root_mirror }} bash <<'REMOTE'
-        set -euxo pipefail
-        cp /etc/quay-config/ssl.cert /var/lib/mirror-ca.crt
-        echo "$(date -Iseconds) READY" > /var/lib/mirror-ready
-        REMOTE
-      when: already_ready.rc != 0
+    # (Former "Expose CA cert + write ready signal" task here removed —
+    # both side-effects are now done by the "Stage CA cert + write
+    # mirror-ready marker" task placed right after "Reclaim disk after
+    # import" above.  Doing it early means a CAPA pre-pull failure no
+    # longer wastes a 25 GB tarball re-download on the next site.yml run.)
 
     # ── Step 10: fetch CA cert back to ansible host ─────────────────────────
     - name: Fetch mirror CA cert to ansible host
