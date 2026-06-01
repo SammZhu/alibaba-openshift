@@ -1,0 +1,37 @@
+name: lint
+
+# Backstop for the same checks pre-commit runs locally — catches commits
+# from contributors who haven't run `pre-commit install`, web-UI edits,
+# and bypassed hooks (--no-verify).
+#
+# Currently only runs scripts/lint-ansible-quotes.py.  Add yamllint /
+# ansible-lint / shellcheck steps here as they become needed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  ansible-shell-quote-balance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run ansible shell quote-balance lint
+        # The script enforces: no ansible.builtin.shell: | block contains
+        # an odd number of single quotes.  Catches the class of bug where
+        # an English contraction (that's, can't, …) inside a bash heredoc
+        # comment unbalances the count, then split_args refuses the whole
+        # playbook with "either an unbalanced jinja2 block or quotes".
+        # See scripts/lint-ansible-quotes.py for the rationale.
+        run: |
+          python3 scripts/lint-ansible-quotes.py ansible/**/*.yml ansible/**/*.yaml
