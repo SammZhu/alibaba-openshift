@@ -8,7 +8,7 @@
   gather_facts: false
   vars:
     csi_operator_img: quay.io/samzhu/alibaba-cloud-csi-operator:v1.35.3
-    capi_provider_img: quay.io/samzhu/openshift-capi-alicloud:v0.1.0
+    capi_provider_img: quay.io/samzhu/openshift-capi-alicloud:v0.1.1
     kubeconfig_file: "{{ ansible_env.KUBECONFIG | default('/root/kubeconfig') }}"
   tasks:
     - name: Assert kubeconfig is present
