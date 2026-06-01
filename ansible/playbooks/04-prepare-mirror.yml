@@ -716,10 +716,11 @@
     #   (b) imageset import skipped/failed for the CCM entry specifically
     # Idempotent: skopeo inspect on mirror first; only pull-tag-push when
     # the manifest is missing.  Cheap ~5 s when already present.
-    # NOTE: CAPA image (samzhu/openshift-capi-alicloud) is covered solely
-    # by build-mirror-tarball.sh; no parallel pre-pull task — quay.io is
-    # not routable from the mirror ECS without VPN, so a fallback pull
-    # wouldn't work anyway.
+    # See also the CAPA pre-pull below: same belt-and-suspenders pattern
+    # but routed via the operator box (quay.io is unreliable from
+    # mirror ECS cross-border, so we relay through localhost which is
+    # assumed to be on a network that can reach quay.io — the same
+    # assumption build-mirror-tarball.sh makes).
     - name: Ensure Alibaba CCM image is on mirror (pre-pull + push if missing)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
@@ -742,6 +743,97 @@
         echo "✓ $REG/$REPO:$TAG now on mirror"
         REMOTE
       changed_when: true
+
+    # ── CAPA controller image: belt-and-suspenders pre-pull via operator relay ──
+    # The CAPA Deployment in custom_manifests/02-capa-controller.yaml
+    # references quay.io/samzhu/openshift-capi-alicloud:v0.1.0.
+    # build-mirror-tarball.sh has pinned CAPA into the imageset since
+    # commit 7054bfe (2026-05-31), so any tarball built after that
+    # already contains the image — this task no-ops.  But mirrors
+    # built from older tarballs (or restored from older snapshots)
+    # lack CAPA; 08-deploy-post-install would then hit ImagePullBackOff.
+    #
+    # Mirror ECS in China regions cannot reach quay.io reliably across
+    # the border, so unlike the CCM task (which pulls from Aliyun ACR
+    # over the Aliyun backbone), this relays through the operator box:
+    #   operator: skopeo copy quay.io → docker-archive on disk
+    #   transit:  scp the tar through jumphost to mirror ECS
+    #   mirror:   podman load + tag + push to local Quay
+    # Same outside-China connectivity assumption build-mirror-tarball.sh
+    # makes.  Operator needs skopeo (already required for the build script).
+    #
+    # Idempotent: check mirror first via the same curl + bearer pattern
+    # the CCM task uses; skip everything when the manifest is present.
+    - name: Check whether CAPA image is already on mirror
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euo pipefail
+        REG={{ mirror_private_ip }}:8443
+        REPO=samzhu/openshift-capi-alicloud
+        TAG=v0.1.0
+        TOKEN=$(curl -ks -u "$(jq -r .auths[].auth /root/.docker/config.json | base64 -d)" \
+          "https://$REG/v2/auth?service=$REG&scope=repository:$REPO:pull" | jq -r .token)
+        if curl -ksf -H "Authorization: Bearer $TOKEN" "https://$REG/v2/$REPO/manifests/$TAG" > /dev/null; then
+          echo PRESENT
+        else
+          echo MISSING
+        fi
+        REMOTE
+      register: _capa_on_mirror
+      changed_when: false
+
+    - name: Pull CAPA image to operator-local docker-archive (skopeo)
+      ansible.builtin.command:
+        argv:
+          - skopeo
+          - copy
+          - --src-tls-verify=true
+          - docker://quay.io/samzhu/openshift-capi-alicloud:v0.1.0
+          - docker-archive:/tmp/capa-v0.1.0.tar:quay.io/samzhu/openshift-capi-alicloud:v0.1.0
+      delegate_to: localhost
+      when: "'MISSING' in _capa_on_mirror.stdout"
+      changed_when: true
+
+    - name: Stage CAPA tar onto mirror ECS via jumphost ProxyCommand
+      ansible.builtin.command:
+        argv:
+          - scp
+          - -i
+          - "{{ ssh_priv_key_file }}"
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - UserKnownHostsFile=/dev/null
+          - -o
+          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
+          - /tmp/capa-v0.1.0.tar
+          - "root@{{ mirror_private_ip }}:/tmp/capa-v0.1.0.tar"
+      when: "'MISSING' in _capa_on_mirror.stdout"
+      changed_when: true
+
+    - name: Load + tag + push CAPA on mirror ECS
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        REG={{ mirror_private_ip }}:8443
+        SRC=quay.io/samzhu/openshift-capi-alicloud:v0.1.0
+        DST=$REG/samzhu/openshift-capi-alicloud:v0.1.0
+        # podman load reads the docker-archive format skopeo wrote.
+        podman load -i /tmp/capa-v0.1.0.tar
+        podman tag  "$SRC" "$DST"
+        podman push --tls-verify=false "$DST"
+        rm -f /tmp/capa-v0.1.0.tar
+        echo "OK: $DST now on mirror"
+        REMOTE
+      when: "'MISSING' in _capa_on_mirror.stdout"
+      changed_when: true
+
+    - name: Clean up operator-local CAPA tar (we don't need to keep ~200 MB)
+      ansible.builtin.file:
+        path: /tmp/capa-v0.1.0.tar
+        state: absent
+      delegate_to: localhost
+      when: "'MISSING' in _capa_on_mirror.stdout"
 
     # ── Step 9: expose CA + signal ready ────────────────────────────────────
     - name: Expose CA cert + write ready signal
