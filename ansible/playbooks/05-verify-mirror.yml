@@ -261,7 +261,7 @@
             # We do NOT stop quay-pod.service: killing the infra container
             # tears down the pod and the data volume bind-mounts, which is
             # more disruptive.  As long as app/redis/postgres are stopped
-            # Postgres checkpoints — that's a sufficient consistency point.
+            # Postgres checkpoints, which is a sufficient consistency point.
             sync; sync; sync
             REMOTE
           changed_when: true
