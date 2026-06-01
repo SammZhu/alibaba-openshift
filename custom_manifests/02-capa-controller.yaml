@@ -76,14 +76,41 @@ spec:
           # Image is mirrored by build-mirror-tarball.sh (additionalImages +
           # TAG_MAPPING entry), so restricted clusters resolve it via the
           # IDMS rule on samzhu/openshift-capi-alicloud → mirror:8443.
-          # Quay digest (2026-06-01 v0.1.1 build (fixes version.go MustParse panic)):
-          #   sha256:b52c8a703747e... (was 9252d22... for v0.1.0) (see `skopeo inspect docker://...:v0.1.1`)
-          image: quay.io/samzhu/openshift-capi-alicloud:v0.1.1
+          # Version history:
+          #   v0.1.0 → init() panic on non-semver build version (semver.MustParse)
+          #   v0.1.1 → parseVersionOrFallback fix (a4dc369)
+          #   v0.1.2 → explicit credential resolution from env / RAM role (bb1f73e),
+          #           required because the aliyun SDK's NewClientWithOptions
+          #           returns UnsupportedCredential on a nil credential and
+          #           does NOT auto-discover env vars.
+          # Quay digest pinned by tag; resolve current digest with
+          #   skopeo inspect docker://quay.io/samzhu/openshift-capi-alicloud:v0.1.2
+          image: quay.io/samzhu/openshift-capi-alicloud:v0.1.2
           imagePullPolicy: IfNotPresent
           command: [/manager]
           args:
             - --leader-elect=true
             - --concurrency=1
+          # Inject Alibaba Cloud credentials from a Secret in the same
+          # namespace.  Required for CAPA's resolveCredential() to pick
+          # them up (the aliyun Go SDK does NOT auto-discover env vars
+          # — see https://github.com/SammZhu/openshift-capi-alicloud
+          # commit bb1f73e for the rationale).
+          #
+          # The Secret is NOT shipped here; create it once per cluster
+          # with the operator's AK/SK before applying this manifest:
+          #
+          #   oc -n capa-system create secret generic alibaba-creds \
+          #     --from-literal=ALIBABA_CLOUD_ACCESS_KEY_ID=$AK \
+          #     --from-literal=ALIBABA_CLOUD_ACCESS_KEY_SECRET=$SK
+          #
+          # optional=false → Pod won't start until the Secret exists,
+          # making the missing-credential mode a hard failure instead
+          # of a silent UnsupportedCredential reconcile loop.
+          envFrom:
+            - secretRef:
+                name: alibaba-creds
+                optional: false
           resources:
             requests:
               cpu: 100m

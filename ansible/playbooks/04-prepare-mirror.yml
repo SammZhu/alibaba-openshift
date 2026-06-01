@@ -769,7 +769,7 @@
 
     # ── CAPA controller image: belt-and-suspenders pre-pull via operator relay ──
     # The CAPA Deployment in custom_manifests/02-capa-controller.yaml
-    # references quay.io/samzhu/openshift-capi-alicloud:v0.1.1.
+    # references quay.io/samzhu/openshift-capi-alicloud:v0.1.2.
     # build-mirror-tarball.sh has pinned CAPA into the imageset since
     # commit 7054bfe (2026-05-31), so any tarball built after that
     # already contains the image — this task no-ops.  But mirrors
@@ -793,7 +793,7 @@
         set -euo pipefail
         REG={{ mirror_private_ip }}:8443
         REPO=samzhu/openshift-capi-alicloud
-        TAG=v0.1.1
+        TAG=v0.1.2
         TOKEN=$(curl -ks -u "$(jq -r .auths[].auth /root/.docker/config.json | base64 -d)" \
           "https://$REG/v2/auth?service=$REG&scope=repository:$REPO:pull" | jq -r .token)
         if curl -ksf -H "Authorization: Bearer $TOKEN" "https://$REG/v2/$REPO/manifests/$TAG" > /dev/null; then
@@ -815,8 +815,8 @@
           - copy
           - --src-tls-verify=true
           - --retry-times=5
-          - docker://quay.io/samzhu/openshift-capi-alicloud:v0.1.1
-          - docker-archive:/tmp/capa-v0.1.1.tar:quay.io/samzhu/openshift-capi-alicloud:v0.1.1
+          - docker://quay.io/samzhu/openshift-capi-alicloud:v0.1.2
+          - docker-archive:/tmp/capa-v0.1.2.tar:quay.io/samzhu/openshift-capi-alicloud:v0.1.2
       delegate_to: localhost
       register: _capa_pull
       retries: 3
@@ -837,8 +837,8 @@
           - UserKnownHostsFile=/dev/null
           - -o
           - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
-          - /tmp/capa-v0.1.1.tar
-          - "root@{{ mirror_private_ip }}:/tmp/capa-v0.1.1.tar"
+          - /tmp/capa-v0.1.2.tar
+          - "root@{{ mirror_private_ip }}:/tmp/capa-v0.1.2.tar"
       register: _capa_scp
       retries: 3
       delay: 10
@@ -851,13 +851,13 @@
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
         REG={{ mirror_private_ip }}:8443
-        SRC=quay.io/samzhu/openshift-capi-alicloud:v0.1.1
-        DST=$REG/samzhu/openshift-capi-alicloud:v0.1.1
+        SRC=quay.io/samzhu/openshift-capi-alicloud:v0.1.2
+        DST=$REG/samzhu/openshift-capi-alicloud:v0.1.2
         # podman load reads the docker-archive format skopeo wrote.
-        podman load -i /tmp/capa-v0.1.1.tar
+        podman load -i /tmp/capa-v0.1.2.tar
         podman tag  "$SRC" "$DST"
         podman push --tls-verify=false "$DST"
-        rm -f /tmp/capa-v0.1.1.tar
+        rm -f /tmp/capa-v0.1.2.tar
         echo "OK: $DST now on mirror"
         REMOTE
       register: _capa_push
@@ -869,7 +869,7 @@
 
     - name: Clean up operator-local CAPA tar (we don't need to keep ~200 MB)
       ansible.builtin.file:
-        path: /tmp/capa-v0.1.1.tar
+        path: /tmp/capa-v0.1.2.tar
         state: absent
       delegate_to: localhost
       when: "'MISSING' in _capa_on_mirror.stdout"
@@ -983,7 +983,7 @@
     #         (CCM v2.14.0 — referenced by custom_manifests/01-alibaba-ccm.yaml.j2,
     #          mirrored in by build-mirror-tarball.sh CCM section + 04 belt-and-suspenders.)
     #   1 × quay.io/samzhu/openshift-capi-alicloud
-    #         (CAPA controller v0.1.1 — referenced by custom_manifests/02-capa-controller.yaml,
+    #         (CAPA controller v0.1.2 — referenced by custom_manifests/02-capa-controller.yaml,
     #          mirrored in by build-mirror-tarball.sh CAPA section.  Note: only relevant for
     #          08-deploy-post-install; install (Phase 07) never pulls this image.)
     #

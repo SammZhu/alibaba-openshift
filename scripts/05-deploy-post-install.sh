@@ -51,7 +51,7 @@ MANIFEST_DIR="${REPO_ROOT}/custom_manifests"
 
 # Image defaults — override with environment variables.
 CSI_OPERATOR_IMG="${CSI_OPERATOR_IMG:-quay.io/samzhu/alibaba-cloud-csi-operator:v1.35.3}"
-CAPI_PROVIDER_IMG="${CAPI_PROVIDER_IMG:-quay.io/samzhu/openshift-capi-alicloud:v0.1.1}"
+CAPI_PROVIDER_IMG="${CAPI_PROVIDER_IMG:-quay.io/samzhu/openshift-capi-alicloud:v0.1.2}"
 
 WITH_OADP=false
 DRY_RUN=false
