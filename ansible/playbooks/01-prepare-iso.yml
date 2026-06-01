@@ -11,6 +11,53 @@
     - ansible.builtin.include_tasks: ../tasks/mirror_defaults.yml
     - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
 
+    # ── Self-heal stale state from a prior teardown ────────────────────────
+    # Past bug: teardown_target=cluster (the common "drop cluster, keep
+    # mirror" pattern) does NOT clear cluster_id / infra_env_id from
+    # state.yml, but the corresponding Assisted records may have been
+    # garbage-collected on the server side OR explicitly deleted by a
+    # later teardown.  Without this self-heal, downstream tasks here
+    # ("Look up infra-env" is gated on `infra_env_id is not defined`)
+    # blindly trust the stale ID and the playbook eventually 404s at
+    # "Poll for ISO download URL" 30 retries later — opaque.
+    # Observed 2026-06-01 P1-CAPA.b first attempt.
+    # Fix: probe each stale ID with a cheap GET; on 404, clear it (and
+    # any derived state) so the create-or-adopt logic below treats the
+    # cluster / infra-env as fresh.
+    - name: Probe whether state's cluster_id still exists on AI
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        status_code: [200, 404]
+      register: _cluster_probe
+      when: cluster_id is defined and cluster_id | length > 0
+
+    - name: Clear stale cluster_id + derived AI state when probe returned 404
+      ansible.builtin.set_fact:
+        cluster_id: ''
+        infra_env_id: ''
+        dynamic_manifest_file: ''
+      when:
+        - cluster_id is defined and cluster_id | length > 0
+        - _cluster_probe.status | default(0) == 404
+
+    - name: Probe whether state's infra_env_id still exists on AI (cluster_id was OK)
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}"
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        status_code: [200, 404]
+      register: _infra_probe
+      when:
+        - infra_env_id is defined and infra_env_id | length > 0
+        - cluster_id is defined and cluster_id | length > 0   # cluster was alive; only infra-env in question
+
+    - name: Clear stale infra_env_id when probe returned 404
+      ansible.builtin.set_fact:
+        infra_env_id: ''
+      when:
+        - infra_env_id is defined and infra_env_id | length > 0
+        - _infra_probe.status | default(0) == 404
+
     # ── Adopt existing cluster by name to avoid duplicates ─────────────────
     - name: List existing Assisted clusters
       ansible.builtin.uri:
