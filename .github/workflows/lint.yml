@@ -34,4 +34,4 @@ jobs:
         # playbook with "either an unbalanced jinja2 block or quotes".
         # See scripts/lint-ansible-quotes.py for the rationale.
         run: |
-          python3 scripts/lint-ansible-quotes.py ansible/**/*.yml ansible/**/*.yaml
+          python3 scripts/lint-ansible-quotes.py ansible
