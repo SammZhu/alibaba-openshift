@@ -50,10 +50,32 @@ def find_imbalanced_shell_blocks(text: str) -> list[tuple[int, str]]:
     return bad
 
 
-def main(paths: list[str]) -> int:
+def _expand_args(args: list[str]) -> list[Path]:
+    """Each arg is either a file or a directory.  Directories recurse for
+    *.yml / *.yaml so callers can pass a single `ansible` arg from the
+    GitHub Actions workflow or pre-commit hook — no shell globstar
+    required (GHA bash has globstar off by default, which bit us once)."""
+    out: list[Path] = []
+    for a in args:
+        p = Path(a)
+        if p.is_dir():
+            out.extend(sorted(p.rglob("*.yml")))
+            out.extend(sorted(p.rglob("*.yaml")))
+        elif p.is_file():
+            out.append(p)
+        else:
+            print(f"warning: skipping non-existent path: {a}", file=sys.stderr)
+    return out
+
+
+def main(args: list[str]) -> int:
+    paths = _expand_args(args)
+    if not paths:
+        print("error: no files to scan (after expansion)", file=sys.stderr)
+        return 2
     rc = 0
     for p in paths:
-        text = Path(p).read_text()
+        text = p.read_text()
         for line, snippet in find_imbalanced_shell_blocks(text):
             print(f"::error file={p},line={line}:: shell heredoc has odd "
                   f"number of single quotes — ansible arg parser will refuse")
@@ -70,6 +92,8 @@ def main(paths: list[str]) -> int:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("usage: lint-ansible-quotes.py FILE [FILE...]", file=sys.stderr)
+        print("usage: lint-ansible-quotes.py PATH [PATH...]\n"
+              "  PATH can be a file or a directory (dirs recurse for .yml/.yaml).",
+              file=sys.stderr)
         sys.exit(2)
     sys.exit(main(sys.argv[1:]))
