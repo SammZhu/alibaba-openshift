@@ -130,7 +130,23 @@ fi
 # 2>/dev/null) → tar xf crashed with "Cannot open: No such file".
 TARBALL_NAME="${CLUSTER_NAME}-${OPENSHIFT_PATCH_VERSION}.tar"
 
-OSS_ENDPOINT="oss-${REGION}.aliyuncs.com"
+# OSS endpoint — internal when running inside aliyun ECS, public otherwise.
+# Internal endpoint traffic is free + bypasses the NAT gateway entirely;
+# public endpoint costs ¥0.50/GB OSS egress AND consumes NAT CU Fee on
+# every transfer.  Auto-detect via the aliyun metadata service (only
+# reachable from inside an aliyun ECS, ~1s timeout otherwise).
+# Saves ~¥150-200/month at current usage (see docs/COST.md).
+_detect_oss_endpoint() {
+  local region="$1"
+  if curl -sfo /dev/null --max-time 1 \
+       http://100.100.100.200/latest/meta-data/region-id 2>/dev/null; then
+    echo "oss-${region}-internal.aliyuncs.com"
+  else
+    echo "oss-${region}.aliyuncs.com"
+  fi
+}
+OSS_ENDPOINT="$(_detect_oss_endpoint "$REGION")"
+echo "OSS endpoint: $OSS_ENDPOINT"
 OSS_PREFIX="mirror-tarballs"
 OSS_OBJECT="${OSS_PREFIX}/${TARBALL_NAME}"
 

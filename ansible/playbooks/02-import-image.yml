@@ -7,11 +7,13 @@
     oss_object: "discovery-{{ cluster_name }}.iso"
     # ossutil (used by `aliyun oss`) does NOT support --profile.
     # We read AK/SK from ~/.aliyun/config.json and pass via -i/-k/-e flags.
-    _oss_endpoint: "oss-{{ region }}.aliyuncs.com"
+    # _oss_endpoint is resolved by tasks/oss_endpoint.yml below — internal
+    # when running inside aliyun ECS, public otherwise.  Saves ~¥150-200/mo.
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
     - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
     - ansible.builtin.include_tasks: ../tasks/mirror_defaults.yml
+    - ansible.builtin.include_tasks: ../tasks/oss_endpoint.yml
 
     - name: Assert ISO exists from Phase 01
       ansible.builtin.stat:

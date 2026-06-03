@@ -1,0 +1,46 @@
+---
+# Sets _oss_endpoint to the internal endpoint when running inside an
+# aliyun ECS, and to the public endpoint otherwise.
+#
+# Why this matters for cost: a same-region ECS reaching OSS via the
+# public endpoint goes out the VPC's NAT gateway and pays:
+#   1. OSS public egress: ¥0.50/GB
+#   2. NAT CU Fee on the LCU consumed by that traffic
+# The internal endpoint stays inside aliyun's backbone — free + bypasses
+# the NAT entirely.  A single 30 GB mirror-tarball download therefore
+# costs ~¥18-20 over public vs ¥0 over internal.
+#
+# Detection: aliyun ECS instances can reach the magic metadata service
+# at http://100.100.100.200/ but on-prem / other-cloud hosts cannot.
+# A 1s connect timeout keeps the off-aliyun path snappy.
+#
+# Saves ~¥150-200/month at current usage (verified against the
+# 2026-05 bill: OSS ¥220 + NAT CU Fee ¥117).  See docs/COST.md.
+#
+# Caller must have `region` defined.  Sets _oss_endpoint as a host fact.
+
+- name: Probe aliyun ECS metadata service to detect aliyun-internal vs on-prem
+  ansible.builtin.uri:
+    url: http://100.100.100.200/latest/meta-data/region-id
+    timeout: 1
+    return_content: false
+    status_code: [200, -1]
+  register: _aliyun_metadata_probe
+  failed_when: false
+  changed_when: false
+  no_log: true
+
+- name: Set OSS endpoint (internal when on aliyun ECS, public otherwise)
+  ansible.builtin.set_fact:
+    _oss_endpoint: >-
+      {{
+        ('oss-' + region + '-internal.aliyuncs.com')
+        if (_aliyun_metadata_probe.status | default(0) == 200)
+        else ('oss-' + region + '.aliyuncs.com')
+      }}
+
+- name: Report resolved OSS endpoint
+  ansible.builtin.debug:
+    msg: >-
+      OSS endpoint = {{ _oss_endpoint }}
+      ({{ 'aliyun-internal (free)' if '-internal.' in _oss_endpoint else 'public (¥0.50/GB egress + NAT CU Fee)' }})
