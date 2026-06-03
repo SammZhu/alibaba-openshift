@@ -106,10 +106,62 @@ aliyun 控制台 → 费用中心 → 预算管理 → 设月度 ¥400/¥500 阈
 
 ---
 
-## 5. 改动历史
+## 5. 月报与预算告警
+
+### 5.1 月报脚本
+
+`scripts/aliyun-billing-report.sh` 调 `bssopenapi QueryBillOverview`
+拉指定月（默认上月）账单，按 ProductCode 汇总 + 跟前一月对比 + 输出
+Markdown：
+
+```bash
+# 默认上月报告
+scripts/aliyun-billing-report.sh
+
+# 指定月份
+scripts/aliyun-billing-report.sh 2026-05
+
+# 加 --detail 钻入前 3 大产品的 instance 级明细
+scripts/aliyun-billing-report.sh --detail
+
+# 归档到 git
+scripts/aliyun-billing-report.sh > docs/billing/2026-05.md
+git add docs/billing/2026-05.md && git commit -m 'docs(billing): 2026-05'
+```
+
+调用 QueryBillOverview API 是**免费**的（不收钱）。
+
+可加 cron / systemd-timer 月初自动跑：
+```
+0 9 1 * * cd /home/sam/work/alibabacloud/openshift-alibaba/alibaba-openshift && \
+  scripts/aliyun-billing-report.sh > docs/billing/$(date -d 'last month' +\%Y-\%m).md
+```
+
+### 5.2 预算告警（最关键 — 5 分钟一次性配置）
+
+aliyun 控制台 → 费用中心 → 预算管理 → 新建预算：
+- 名称：`openshift-alibaba 月度预算`
+- 类型：成本预算
+- 周期：每月
+- 金额：¥500（上限）
+- 告警阈值：80%（¥400 时触发短信 + email + 控制台通知）
+- 通知对象：你自己 + 任何相关 owner
+
+**这是防再失控的兜底**。这次 ¥800 是没设告警导致月底才发现。
+
+也可以用 aliyun CLI 设（一次性）：
+```bash
+aliyun bssopenapi CreateCostUnit \
+  --UnitName "openshift-alibaba" --OwnerUid "$(aliyun --profile openshift-test sts GetCallerIdentity | jq -r .AccountId)"
+# 然后用 Budget API 关联...（详见 aliyun 文档，控制台更直观）
+```
+
+---
+
+## 6. 改动历史
 
 | 日期 | 改动 | 节省 |
 |:-|:-|:-:|
-| 2026-06-02 | OSS endpoint dual-mode（commit TBD）| ~¥150-200/月 |
-| TBD | SNO ROS 模板（P3-COST.2 / task #36）| ~¥150/月 |
-| TBD | 预算告警 + 月报（P3-COST.3 / task #37）| 防失控 |
+| 2026-06-02 | OSS endpoint dual-mode (commit 4f2db64) | ~¥150-200/月 |
+| 2026-06-02 | SNO ROS 模板 + cluster_topology 开关 (commit d45f16a) | ~¥150/月 dev 集群 |
+| 2026-06-02 | 月报脚本 + 预算告警文档（task #37）| 防失控 |
