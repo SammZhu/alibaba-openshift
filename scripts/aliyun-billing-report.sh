@@ -16,6 +16,12 @@
 #     'openshift-test' matches the existing project convention).
 #   - jq
 #
+# Notes on endpoints:
+#   bssopenapi is a centralised service (not region-scoped).  We pin
+#   --endpoint business.aliyuncs.com explicitly because RAM profiles
+#   configured with cn-wulanchabu (or other regions without a BSS
+#   endpoint) error out with InvalidRegionId otherwise.
+#
 # Cost: bssopenapi QueryBillOverview is FREE to call.
 #
 # Notes:
@@ -61,6 +67,7 @@ fi
 fetch_overview() {
   local month="$1"
   aliyun --profile "$ALIYUN_PROFILE" bssopenapi QueryBillOverview \
+    --endpoint business.aliyuncs.com \
     --BillingCycle "$month" 2>/dev/null || echo '{}'
 }
 
@@ -135,6 +142,7 @@ EOF
     # QueryBill returns per-instance detail; can be slow + paginated.
     # MaxResults=20 keeps this snappy.  For full detail use DescribeInstanceBill.
     aliyun --profile "$ALIYUN_PROFILE" bssopenapi QueryBill \
+      --endpoint business.aliyuncs.com \
       --BillingCycle "$MONTH" --ProductCode "$pc" --PageSize 20 2>/dev/null \
       | jq -r '.Data.Items.Item[]? | [.InstanceID // "-", .BillingItem // "-", .PretaxGrossAmount] | @tsv' \
       | sort -t$'\t' -k3 -rn \
