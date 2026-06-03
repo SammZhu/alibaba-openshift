@@ -1,0 +1,376 @@
+ROSTemplateFormatVersion: '2015-09-01'
+Description: |
+  OpenShift on Alibaba Cloud — SHORT-LIVED (cluster) stack, SNO variant.
+
+  Single Node OpenShift topology — control-plane = compute = 1 ECS.
+  Use this template instead of cluster-stack.yaml when
+  group_vars/all.yml has `cluster_topology: sno`.
+
+  Differences from cluster-stack.yaml (HA, 3-master):
+    * 1 ECS instance only (master also schedules workloads)
+    * NO NLB (api/api-int A-records point directly at master IP)
+    * NO worker SecurityGroup (master SG covers all roles)
+    * NO etcd-1 / etcd-2 records (single-node etcd)
+    * Worker InstanceGroup removed
+
+  Outputs are kept name-compatible with cluster-stack.yaml so the
+  ansible side (06-create-cluster-stack.yml, 07-install-cluster.yml,
+  99-teardown.yml) needs zero changes to consume them:
+    * ApiLBEndpoint    = master private IP   (HA: NLB DNS name)
+    * MasterIp1        = master private IP
+    * MasterIp2,IP3    = ""  (not applicable)
+    * WorkerSecurityGroup = ""  (not applicable)
+
+  Cost savings vs HA (cn-wulanchabu, ecs.g7.xlarge masters, pay-by-use):
+    * ECS:  -2 masters    → -¥1.62/h    ≈ -¥39/day at 24h uptime
+    * NLB:  -1 Intranet   → -¥0.06/h    ≈ -¥1.44/day base
+    * Total: ~-¥40/day cluster on; SNO is ~33% the cost of HA.
+
+  See docs/SNO-MODE.md for when to use SNO vs HA and the install-config
+  bits that change.
+
+Parameters:
+  # ── References to mirror-stack outputs (passed straight through) ─────────
+  VpcId:
+    Type: String
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+  PrivateVSwitchId:
+    Type: String
+  PrivateVSwitch2Id:
+    Type: String
+  ZoneId:
+    Type: String
+  ZoneId2:
+    Type: String
+  NodeRamRoleName:
+    Type: String
+    Default: openshift-node-role
+  JumpHostSecurityGroupId:
+    Type: String
+    Default: "none"
+    Description: Optional jump host SG ID — used iff EnableJumpHostSsh=true.
+  EnableJumpHostSsh:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+
+  # ── Cluster identity ─────────────────────────────────────────────────────
+  ClusterName:
+    Type: String
+  BaseDomain:
+    Type: String
+  Region:
+    Type: String
+
+  # ── Compute sizing ───────────────────────────────────────────────────────
+  # ControlPlaneCount / ComputeCount kept as parameters for input compat
+  # with the HA template, but for SNO they are pinned to 1 / 0 below.
+  ControlPlaneCount:
+    Type: Number
+    Default: 1
+    AllowedValues: [1]
+    Description: SNO requires exactly 1 master.
+  ControlPlaneInstanceType:
+    Type: String
+  ComputeCount:
+    Type: Number
+    Default: 0
+    AllowedValues: [0]
+    Description: SNO has no separate workers.
+  ComputeInstanceType:
+    Type: String
+    Default: ""
+  SystemDiskCategory:
+    Type: String
+  SystemDiskSize:
+    Type: Number
+  InstallDiskSize:
+    Type: Number
+
+  # ── Install method ───────────────────────────────────────────────────────
+  InstallationMethod:
+    Type: String
+    Default: Assisted
+    AllowedValues: [Assisted, Agent-based]
+  ImageId:
+    Type: String
+  RendezvousIp:
+    Type: String
+    Default: ""
+    Description: |
+      Agent-based only: the master takes this fixed IP so agent-config
+      can refer to it.  Assisted ignores this (the master IP is
+      auto-allocated and discovered via outputs).
+  IngressVip:
+    Type: String
+    Default: ""
+    Description: |
+      Ignored on SNO (no separate ingress VIP — *.apps points at the
+      master IP directly).  Kept as a parameter only for input compat.
+  SshPublicKey:
+    Type: String
+    Default: ""
+    Description: Informational only; RHCOS gets SSH keys via ignition.
+
+Conditions:
+  IsAgentBased: !Equals [!Ref InstallationMethod, Agent-based]
+  HasJumpHost:  !Equals [!Ref EnableJumpHostSsh, "true"]
+
+Resources:
+  # ── Security Group (single SG — master is also worker on SNO) ────────────
+  ControlPlaneSecurityGroup:
+    Type: ALIYUN::ECS::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      SecurityGroupName: !Sub '${ClusterName}-master-sg'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          PortRange: 6443/6443
+          SourceCidrIp: !Ref VpcCidr
+          Description: Kubernetes API
+        - IpProtocol: tcp
+          PortRange: 22623/22623
+          SourceCidrIp: !Ref VpcCidr
+          Description: Machine Config Server
+        - IpProtocol: tcp
+          PortRange: 2379/2380
+          SourceCidrIp: !Ref VpcCidr
+          Description: etcd (single-node, intra-host only — still required)
+        # router-default runs on this node via hostNetwork (platform=external)
+        - IpProtocol: tcp
+          PortRange: 80/80
+          SourceCidrIp: !Ref VpcCidr
+          Description: Ingress HTTP (router-default hostNetwork)
+        - IpProtocol: tcp
+          PortRange: 443/443
+          SourceCidrIp: !Ref VpcCidr
+          Description: Ingress HTTPS (router-default hostNetwork)
+        # NodePort range: included because SNO masters are also workers and
+        # may serve NodePort Services (no separate worker SG to put this on).
+        - IpProtocol: tcp
+          PortRange: 30000/32767
+          SourceCidrIp: !Ref VpcCidr
+          Description: NodePort services (VPC-internal)
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+
+  CPSGSSHFromJumpHost:
+    Type: ALIYUN::ECS::SecurityGroupIngress
+    Condition: HasJumpHost
+    DependsOn: ControlPlaneSecurityGroup
+    Properties:
+      SecurityGroupId: !Ref ControlPlaneSecurityGroup
+      IpProtocol: tcp
+      PortRange: 22/22
+      NicType: intranet
+      SourceGroupId: !Ref JumpHostSecurityGroupId
+      Description: SSH from jump host (mirror-stack) to the SNO master
+
+  # ── Private DNS — A records point directly at the master IP ──────────────
+  # No NLB on SNO: with 1 master there's nothing to load-balance over.
+  # api / api-int / *.apps all resolve to the single master's private IP.
+  PrivateZone:
+    Type: ALIYUN::PVTZ::Zone
+    Properties:
+      ZoneName: !Sub '${ClusterName}.${BaseDomain}'
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+
+  PrivateZoneVpcBinding:
+    Type: ALIYUN::PVTZ::ZoneVpcBinder
+    Properties:
+      ZoneId: !Ref PrivateZone
+      Vpcs:
+        - VpcId: !Ref VpcId
+          RegionId: !Ref Region
+
+  ApiRecord:
+    Type: ALIYUN::PVTZ::ZoneRecord
+    DependsOn: [RendezvousInstance, PrivateZone]
+    Properties:
+      ZoneId: !Ref PrivateZone
+      Rr: api
+      Type: A
+      Value: !GetAtt RendezvousInstance.PrivateIp
+      Ttl: 60
+
+  ApiIntRecord:
+    Type: ALIYUN::PVTZ::ZoneRecord
+    DependsOn: [RendezvousInstance, PrivateZone]
+    Properties:
+      ZoneId: !Ref PrivateZone
+      Rr: api-int
+      Type: A
+      Value: !GetAtt RendezvousInstance.PrivateIp
+      Ttl: 60
+
+  AppsRecord:
+    Type: ALIYUN::PVTZ::ZoneRecord
+    DependsOn: [RendezvousInstance, PrivateZone]
+    Properties:
+      ZoneId: !Ref PrivateZone
+      Rr: '*.apps'
+      Type: A
+      Value: !GetAtt RendezvousInstance.PrivateIp
+      Ttl: 60
+
+  # Single etcd member — kept as a record for any client that reads SRV
+  # (etcd-operator does not require it on SNO, but cheap to include).
+  EtcdRecord0:
+    Type: ALIYUN::PVTZ::ZoneRecord
+    DependsOn: [RendezvousInstance, PrivateZone]
+    Properties:
+      ZoneId: !Ref PrivateZone
+      Rr: etcd-0
+      Type: A
+      Value: !GetAtt RendezvousInstance.PrivateIp
+      Ttl: 60
+
+  # ── Reverse DNS zones (PTR records added by Phase 03 post-creation) ──────
+  ReverseZone1:
+    Type: ALIYUN::PVTZ::Zone
+    Properties:
+      ZoneName: 16.0.10.in-addr.arpa
+
+  ReverseZone1VpcBinding:
+    Type: ALIYUN::PVTZ::ZoneVpcBinder
+    DependsOn: ReverseZone1
+    Properties:
+      ZoneId: !Ref ReverseZone1
+      Vpcs:
+        - VpcId: !Ref VpcId
+          RegionId: !Ref Region
+
+  ReverseZone2:
+    Type: ALIYUN::PVTZ::Zone
+    Properties:
+      ZoneName: 32.0.10.in-addr.arpa
+
+  ReverseZone2VpcBinding:
+    Type: ALIYUN::PVTZ::ZoneVpcBinder
+    DependsOn: ReverseZone2
+    Properties:
+      ZoneId: !Ref ReverseZone2
+      Vpcs:
+        - VpcId: !Ref VpcId
+          RegionId: !Ref Region
+
+  # ── The one ECS instance ─────────────────────────────────────────────────
+  # Name "RendezvousInstance" kept for ansible compat (06-create-cluster-stack
+  # reads MasterIp1 from RendezvousInstance via the output mapping).
+  RendezvousInstance:
+    Type: ALIYUN::ECS::Instance
+    Properties:
+      InstanceName: !Sub '${ClusterName}-master-1'
+      InstanceType: !Ref ControlPlaneInstanceType
+      ImageId: !Ref ImageId
+      SecurityGroupId: !Ref ControlPlaneSecurityGroup
+      VSwitchId: !Ref PrivateVSwitch2Id
+      SystemDiskCategory: !Ref SystemDiskCategory
+      SystemDiskSize: !Ref SystemDiskSize
+      DiskMappings:
+        - Category: !Ref SystemDiskCategory
+          Size: !Ref InstallDiskSize
+          DiskName: !Sub '${ClusterName}-master-1-install'
+      AllocatePublicIP: false
+      PrivateIpAddress: !If [IsAgentBased, !Ref RendezvousIp, !Ref 'ALIYUN::NoValue']
+      RamRoleName: !Ref NodeRamRoleName
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+        - Key: openshift-node-role
+          Value: master
+
+Outputs:
+  ApiLBEndpoint:
+    # SNO: the master IP itself.  Downstream 07-install-cluster + IDMS
+    # PATCH consumers treat this opaquely as "the api-int endpoint"; an
+    # IP is just as good as an NLB DNS name.
+    Value: !GetAtt RendezvousInstance.PrivateIp
+    Description: api-int endpoint (master IP — no NLB on SNO)
+  PrivateZoneName:
+    Value: !Sub '${ClusterName}.${BaseDomain}'
+  RendezvousInstanceId:
+    Value: !Ref RendezvousInstance
+  MasterIp1:
+    Value: !GetAtt RendezvousInstance.PrivateIp
+  MasterIp2:
+    Value: ""
+    Description: Not applicable on SNO; empty for output-name compat with HA.
+  MasterIp3:
+    Value: ""
+    Description: Not applicable on SNO; empty for output-name compat with HA.
+  WorkerSecurityGroup:
+    Value: ""
+    Description: |
+      SNO has no separate worker SG — the master SG covers all roles.
+      Returned empty for output-name compat with HA.  Consumers that
+      need to attach future workers should use ControlPlaneSecurityGroup.
+  ReverseZoneId1:
+    Value: !Ref ReverseZone1
+  ReverseZoneId2:
+    Value: !Ref ReverseZone2
+  InstallConfig:
+    Description: install-config.yaml for SNO (controlPlane=1, compute=0)
+    Value: !Sub |
+      apiVersion: v1
+      metadata:
+        name: ${ClusterName}
+      baseDomain: ${BaseDomain}
+      networking:
+        clusterNetwork:
+          - cidr: 10.128.0.0/14
+            hostPrefix: 23
+        networkType: OVNKubernetes
+        machineNetwork:
+          - cidr: ${VpcCidr}
+        serviceNetwork:
+          - 172.30.0.0/16
+      compute:
+        - architecture: amd64
+          hyperthreading: Enabled
+          name: worker
+          replicas: 0
+      controlPlane:
+        architecture: amd64
+        hyperthreading: Enabled
+        name: master
+        replicas: 1
+      platform:
+        external:
+          platformName: AlibabaCloud
+          cloudControllerManager: External
+      pullSecret: '<replace-with-pull-secret>'
+      sshKey: '<replace-with-ssh-public-key>'
+  AgentConfig:
+    Description: agent-config.yaml for SNO (Agent-based only)
+    Value: !Sub |
+      apiVersion: v1alpha1
+      kind: AgentConfig
+      metadata:
+        name: ${ClusterName}
+      rendezvousIP: ${RendezvousIp}
+      hosts: []
+  DynamicCustomManifest:
+    Description: alibaba-cloud-config ConfigMap — same shape as HA.
+    Value: !Sub |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: alibaba-cloud-config
+        namespace: alibaba-cloud-controller-manager
+      data:
+        cloud.conf: |
+          {
+            "Global": {
+              "clusterID": "${ClusterName}",
+              "region": "${Region}",
+              "vpcid": "${VpcId}",
+              "zoneid": "${ZoneId}",
+              "vswitchid": "${PrivateVSwitchId}"
+            }
+          }

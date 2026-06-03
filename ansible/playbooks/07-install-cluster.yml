@@ -5,7 +5,13 @@
   hosts: local
   gather_facts: false
   vars:
-    expected_hosts: "{{ (control_plane_count | int) + (compute_count | int) }}"
+    # Topology-effective sizing: for cluster_topology=sno the AI installer +
+    # ROS template pin (1 master, 0 compute) — must mirror that here, else
+    # the "wait for N hosts to discover" + master-IP sanity assert will hang
+    # waiting for hosts that will never exist.  ha → use group_vars as-is.
+    _effective_control_plane_count: "{{ 1 if (cluster_topology | default('ha')) == 'sno' else (control_plane_count | int) }}"
+    _effective_compute_count: "{{ 0 if (cluster_topology | default('ha')) == 'sno' else (compute_count | int) }}"
+    expected_hosts: "{{ (_effective_control_plane_count | int) + (_effective_compute_count | int) }}"
     # Rendered Jinja templates land here.  Path is deterministic from
     # output_dir so the manifests_to_upload list can reference it without
     # needing to be re-evaluated after the template task runs.
@@ -474,12 +480,12 @@
                 {{ h.ip }}  →  role={{ h.role }}  hostname={{ h.hostname or '(default)' }}  install_disk={{ h.install_disk_id or '(default vda)' }}
               {% endfor %}
 
-        - name: Sanity — exactly {{ control_plane_count }} masters identified by IP
+        - name: Sanity — exactly {{ _effective_control_plane_count }} masters identified by IP
           ansible.builtin.assert:
             that:
-              - cluster_hosts | selectattr('is_master', 'equalto', true) | list | length == (control_plane_count | int)
+              - cluster_hosts | selectattr('is_master', 'equalto', true) | list | length == (_effective_control_plane_count | int)
             fail_msg: |
-              Expected {{ control_plane_count }} master IP matches but found
+              Expected {{ _effective_control_plane_count }} master IP matches but found
               {{ cluster_hosts | selectattr('is_master', 'equalto', true) | list | length }}.
               state.yml master_ip{1,2,3} = {{ [master_ip1|default(''), master_ip2|default(''), master_ip3|default('')] }}
               Current host IPs            = {{ cluster_hosts | map(attribute='ip') | list }}

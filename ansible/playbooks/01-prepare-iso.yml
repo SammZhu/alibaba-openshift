@@ -180,6 +180,11 @@
     # - install-config overrides (imageDigestSources + additionalTrustBundle)
     #   are NOT applied here — they go via PATCH /v2/clusters/{id}/install-config
     #   in Phase 03 once the mirror CA cert exists.
+    # cluster_topology drives both AI installer mode and effective master count:
+    #   sno → high_availability_mode=None + control_plane_count forced to 1
+    #   ha  → high_availability_mode=Full + control_plane_count from group_vars
+    # The ROS template (06) also pins this via AllowedValues, so any
+    # accidental drift would be caught at stack-create time too.
     - name: Build cluster create payload
       ansible.builtin.set_fact:
         _cluster_body: "{{ {
@@ -187,8 +192,8 @@
           'openshift_version': openshift_version | string,
           'cpu_architecture': 'x86_64',
           'base_dns_domain': base_domain,
-          'high_availability_mode': 'Full',
-          'control_plane_count': control_plane_count | int,
+          'high_availability_mode': ('None' if (cluster_topology | default('ha')) == 'sno' else 'Full'),
+          'control_plane_count': (1 if (cluster_topology | default('ha')) == 'sno' else (control_plane_count | int)),
           'pull_secret': _pull_secret_with_mirror if (mirror_enabled | default(false) | bool) else (pull_slurp.content | b64decode),
           'ssh_public_key': ssh_pub_slurp.content | b64decode | trim,
           'platform': {

@@ -26,7 +26,18 @@ zone2:               cn-wulanchabu-b
 oss_bucket:          openshift-iso-samzhu-test   # must be globally unique
 aliyun_profile:      openshift-test              # aliyun-cli profile
 
-# ── Compute sizing (compact 3-node, no separate workers) ─────────────────────
+# ── Cluster topology ─────────────────────────────────────────────────────────
+# cluster_topology controls which ROS template + AI installer mode is used:
+#   ha  (default) — 3-master HA cluster (ros-templates/cluster-stack.yaml,
+#                   Assisted Installer high_availability_mode=Full)
+#   sno           — Single Node OpenShift (ros-templates/cluster-stack-sno.yaml,
+#                   high_availability_mode=None).  ~33% of HA cost.  Use for
+#                   dev / smoke / iteration.  See docs/SNO-MODE.md.
+cluster_topology:     ha
+
+# ── Compute sizing ───────────────────────────────────────────────────────────
+# For cluster_topology=sno the ROS layer pins control_plane_count=1 +
+# compute_count=0 via AllowedValues — values below are silently overridden.
 control_plane_count:  3
 control_plane_type:   ecs.g7.xlarge
 compute_count:        0       # 0 = compact (masters schedule workloads)

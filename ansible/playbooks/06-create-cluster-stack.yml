@@ -105,11 +105,26 @@
           - ParameterKey: SshPublicKey
             ParameterValue: "{{ _ssh_pub_slurp.content | b64decode | trim }}"
 
+    # cluster_topology selects between HA (3-master + NLB) and SNO (1 ECS,
+    # no NLB).  Defaults to 'ha' for back-compat.  See docs/SNO-MODE.md.
+    - name: Resolve ROS template path per cluster_topology
+      ansible.builtin.set_fact:
+        _cs_template_file: >-
+          {{ 'cluster-stack-sno.yaml'
+             if (cluster_topology | default('ha')) == 'sno'
+             else 'cluster-stack.yaml' }}
+
+    - name: Announce template selection
+      ansible.builtin.debug:
+        msg: >-
+          cluster_topology={{ cluster_topology | default('ha') }}
+          → using ros-templates/{{ _cs_template_file }}
+
     - name: Create / adopt cluster-stack
       ansible.builtin.include_tasks: ../tasks/create_stack.yml
       vars:
         _cs_stack_name: "{{ cluster_name }}-cluster"
-        _cs_template_path: "{{ repo_root }}/ros-templates/cluster-stack.yaml"
+        _cs_template_path: "{{ repo_root }}/ros-templates/{{ _cs_template_file }}"
         _cs_parameters: "{{ _cluster_stack_params }}"
         _cs_state_key_id: "cluster_stack_id"
         _cs_timeout_minutes: 30
@@ -173,12 +188,13 @@
     - name: Phase 06 (cluster-stack) done
       ansible.builtin.debug:
         msg: |
-          ✓ cluster-stack ready.
+          ✓ cluster-stack ready (topology={{ cluster_topology | default('ha') }}).
 
-          API NLB      : {{ api_lb_endpoint }}
-          master-1 IP  : {{ master_ip1 }}
-          master-2 IP  : {{ master_ip2 }}
-          master-3 IP  : {{ master_ip3 }}
+          api-int endpoint : {{ api_lb_endpoint }}{{
+            ' (SNO: master IP — no NLB)' if (cluster_topology | default('ha')) == 'sno' else ' (HA: NLB DNS)' }}
+          master-1 IP      : {{ master_ip1 }}
+          master-2 IP      : {{ master_ip2 if master_ip2 else '(n/a — SNO)' }}
+          master-3 IP      : {{ master_ip3 if master_ip3 else '(n/a — SNO)' }}
 
           Next:
             ansible-playbook ansible/playbooks/07-install-cluster.yml
