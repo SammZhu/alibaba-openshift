@@ -83,8 +83,8 @@ if [[ "$(echo "$cur_items" | jq 'length')" == "0" ]]; then
 fi
 
 # ── Render Markdown ───────────────────────────────────────────────────────
-total_cur="$(echo "$cur_items" | jq '[.[].PretaxGrossAmount] | add')"
-total_prev="$(echo "$prev_raw" | jq '[.Data.Items.Item[]?.PretaxGrossAmount] | add // 0')"
+total_cur="$(echo "$cur_items" | jq '[.[].PretaxGrossAmount] | add | . * 100 | round / 100')"
+total_prev="$(echo "$prev_raw" | jq '([.Data.Items.Item[]?.PretaxGrossAmount] | add // 0) | . * 100 | round / 100')"
 
 # Helper: lookup previous-month amount for a given ProductCode
 prev_amount_for() {
@@ -114,13 +114,20 @@ cat <<EOF
 |:-|--:|--:|:-:|
 EOF
 
+# Group by ProductCode + ProductName, sum PretaxGrossAmount, round to 2 decimals.
+# Some products (e.g. SLB classic + ALB) come back as separate items under the
+# same ProductCode — collapse them so the table doesn't show duplicate rows.
 echo "$cur_items" \
-  | jq -r '.[] | [.ProductCode, .ProductName, .PretaxGrossAmount] | @tsv' \
-  | sort -t$'\t' -k3 -rn \
+  | jq -r 'group_by(.ProductCode + "|" + .ProductName)
+           | map({pc: .[0].ProductCode, pn: .[0].ProductName,
+                  amt: ([.[].PretaxGrossAmount] | add | . * 100 | round / 100)})
+           | sort_by(-.amt)
+           | .[] | [.pc, .pn, .amt] | @tsv' \
   | while IFS=$'\t' read -r pcode pname amount; do
       prev="$(prev_amount_for "$pcode")"
+      prev_rounded="$(printf '%.2f' "$prev")"
       delta="$(delta_str "$amount" "$prev")"
-      printf '| %s (%s) | %s | %s | %s |\n' "$pname" "$pcode" "$amount" "$prev" "$delta"
+      printf '| %s (%s) | %s | %s | %s |\n' "$pname" "$pcode" "$amount" "$prev_rounded" "$delta"
     done
 
 # ── Detail mode: drill into top 3 products ───────────────────────────────
