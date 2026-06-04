@@ -274,6 +274,39 @@ _CAPI_REPO_PATH="${_CAPI_REPO#quay.io/}"
 printf '%s\t%s\t%s\n' "$_CAPI_REPO_PATH" "$_CAPI_TAG" "$_CAPI_DIGEST" >> "$TAG_MAPPING"
 echo "    → pinned ${_CAPI_TAG} → ${_CAPI_DIGEST}"
 
+# Alibaba Cloud CSI Operator (OLM bundle) — three images required to install
+# the CSI driver via OLM after cluster install (see custom_manifests/04-csi-*).
+# Same digest-pin + tag-alias treatment as CCM/CAPA so the manifests'
+# tag-form references resolve on the mirror.  Quay public, no auth.
+#
+# Note: the catalog image expands at OLM install time into the operator-bundle
+# image, which expands into the operator image.  All three must be present on
+# the mirror or OLM Subscription will hit ImagePullBackOff at random points
+# during the install chain.
+_pin_quay_public_image() {
+  local var_name="$1" default_ref="$2" step_label="$3"
+  local img_ref="${!var_name:-$default_ref}"
+  echo "[${step_label}] Pinning Alibaba CSI image: $img_ref"
+  local repo="${img_ref%:*}" tag="${img_ref##*:}"
+  local digest
+  digest=$(skopeo inspect --no-tags "docker://$img_ref" 2>/dev/null | jq -r .Digest)
+  if [[ -z "$digest" || "$digest" == "null" ]]; then
+    echo "ERROR: skopeo inspect failed for $img_ref — can't resolve digest." >&2
+    exit 1
+  fi
+  echo "    - name: ${repo}@${digest}" >> imageset-config.yaml
+  local repo_path="${repo#quay.io/}"
+  printf '%s\t%s\t%s\n' "$repo_path" "$tag" "$digest" >> "$TAG_MAPPING"
+  echo "    → pinned ${tag} → ${digest}"
+}
+
+_pin_quay_public_image ALIBABA_CSI_OPERATOR_IMAGE \
+  "quay.io/samzhu/alibaba-cloud-csi-operator:v1.35.3"          "2d/8"
+_pin_quay_public_image ALIBABA_CSI_BUNDLE_IMAGE \
+  "quay.io/samzhu/alibaba-cloud-csi-operator-bundle:v1.35.3"   "2e/8"
+_pin_quay_public_image ALIBABA_CSI_CATALOG_IMAGE \
+  "quay.io/samzhu/alibaba-cloud-csi-operator-catalog:v1.35.3"  "2f/8"
+
 # Optional: mirror operator catalogs (post-install OperatorHub) so installing
 # any operator from those catalogs also works fully offline.
 # Set OPERATOR_CATALOGS=redhat-operators,certified-operators (comma-separated).

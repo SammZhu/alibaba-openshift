@@ -867,6 +867,111 @@
       when: "'MISSING' in _capa_on_mirror.stdout"
       changed_when: true
 
+    # ── CSI Operator (OLM bundle 3 images): same belt-and-suspenders pattern ──
+    # custom_manifests/04-csi-{catalogsource,subscription}.yaml reference
+    # three OLM images.  All three must be on the mirror for OLM to install
+    # the operator successfully.  build-mirror-tarball.sh pins them since
+    # P3-CSI.1; this block recovers older mirrors / snapshots.
+    #
+    # Implementation: 4 tasks looped over the 3-image dict, mirroring the
+    # CAPA pattern.  Each task is conditional on `MISSING` in the per-image
+    # `_csi_on_mirror.results` register.  Looping cuts ~36 lines (3×12) of
+    # copy-paste down to ~24 lines total.
+    - name: Define CSI image list for pre-pull
+      ansible.builtin.set_fact:
+        _csi_images:
+          - { repo: samzhu/alibaba-cloud-csi-operator,         tag: v1.35.3, tarname: csi-operator-v1.35.3 }
+          - { repo: samzhu/alibaba-cloud-csi-operator-bundle,  tag: v1.35.3, tarname: csi-bundle-v1.35.3 }
+          - { repo: samzhu/alibaba-cloud-csi-operator-catalog, tag: v1.35.3, tarname: csi-catalog-v1.35.3 }
+
+    - name: Check whether each CSI image is already on mirror
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euo pipefail
+        REG={{ mirror_private_ip }}:8443
+        REPO={{ item.repo }}
+        TAG={{ item.tag }}
+        TOKEN=$(curl -ks -u "$(jq -r .auths[].auth /root/.docker/config.json | base64 -d)" \
+          "https://$REG/v2/auth?service=$REG&scope=repository:$REPO:pull" | jq -r .token)
+        if curl -ksf -H "Authorization: Bearer $TOKEN" "https://$REG/v2/$REPO/manifests/$TAG" > /dev/null; then
+          echo PRESENT
+        else
+          echo MISSING
+        fi
+        REMOTE
+      register: _csi_on_mirror
+      changed_when: false
+      loop: "{{ _csi_images }}"
+      loop_control:
+        label: "{{ item.repo }}:{{ item.tag }}"
+
+    - name: Pull missing CSI images to operator-local docker-archive (skopeo)
+      ansible.builtin.command:
+        argv:
+          - skopeo
+          - copy
+          - --src-tls-verify=true
+          - --retry-times=5
+          - "docker://quay.io/{{ item.item.repo }}:{{ item.item.tag }}"
+          - "docker-archive:/tmp/{{ item.item.tarname }}.tar:quay.io/{{ item.item.repo }}:{{ item.item.tag }}"
+      delegate_to: localhost
+      register: _csi_pull
+      retries: 3
+      delay: 20
+      until: _csi_pull.rc == 0
+      loop: "{{ _csi_on_mirror.results }}"
+      loop_control:
+        label: "{{ item.item.repo }}:{{ item.item.tag }}"
+      when: "'MISSING' in (item.stdout | default(''))"
+      changed_when: true
+
+    - name: Stage missing CSI tars onto mirror ECS via jumphost ProxyCommand
+      ansible.builtin.command:
+        argv:
+          - scp
+          - -i
+          - "{{ ssh_priv_key_file }}"
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - UserKnownHostsFile=/dev/null
+          - -o
+          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
+          - "/tmp/{{ item.item.tarname }}.tar"
+          - "root@{{ mirror_private_ip }}:/tmp/{{ item.item.tarname }}.tar"
+      register: _csi_scp
+      retries: 3
+      delay: 10
+      until: _csi_scp.rc == 0
+      loop: "{{ _csi_on_mirror.results }}"
+      loop_control:
+        label: "{{ item.item.repo }}:{{ item.item.tag }}"
+      when: "'MISSING' in (item.stdout | default(''))"
+      changed_when: true
+
+    - name: Load + tag + push CSI images on mirror ECS
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        REG={{ mirror_private_ip }}:8443
+        SRC=quay.io/{{ item.item.repo }}:{{ item.item.tag }}
+        DST=$REG/{{ item.item.repo }}:{{ item.item.tag }}
+        podman load -i /tmp/{{ item.item.tarname }}.tar
+        podman tag  "$SRC" "$DST"
+        podman push --tls-verify=false "$DST"
+        rm -f /tmp/{{ item.item.tarname }}.tar
+        echo "OK: $DST now on mirror"
+        REMOTE
+      register: _csi_push
+      retries: 3
+      delay: 10
+      until: _csi_push.rc == 0
+      loop: "{{ _csi_on_mirror.results }}"
+      loop_control:
+        label: "{{ item.item.repo }}:{{ item.item.tag }}"
+      when: "'MISSING' in (item.stdout | default(''))"
+      changed_when: true
+
     - name: Clean up operator-local CAPA tar (we don't need to keep ~200 MB)
       ansible.builtin.file:
         path: /tmp/capa-v0.1.2.tar
@@ -1009,7 +1114,13 @@
               {'source': 'registry-cn-hangzhou.ack.aliyuncs.com/acs/cloud-controller-manager',
                'mirrors': [mirror_private_ip + ':8443/acs/cloud-controller-manager']},
               {'source': 'quay.io/samzhu/openshift-capi-alicloud',
-               'mirrors': [mirror_private_ip + ':8443/samzhu/openshift-capi-alicloud']}
+               'mirrors': [mirror_private_ip + ':8443/samzhu/openshift-capi-alicloud']},
+              {'source': 'quay.io/samzhu/alibaba-cloud-csi-operator',
+               'mirrors': [mirror_private_ip + ':8443/samzhu/alibaba-cloud-csi-operator']},
+              {'source': 'quay.io/samzhu/alibaba-cloud-csi-operator-bundle',
+               'mirrors': [mirror_private_ip + ':8443/samzhu/alibaba-cloud-csi-operator-bundle']},
+              {'source': 'quay.io/samzhu/alibaba-cloud-csi-operator-catalog',
+               'mirrors': [mirror_private_ip + ':8443/samzhu/alibaba-cloud-csi-operator-catalog']}
             ],
             'additionalTrustBundle': mirror_ca_slurp.content | b64decode,
             'additionalTrustBundlePolicy': 'Always'
