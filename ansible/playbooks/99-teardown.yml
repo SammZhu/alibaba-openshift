@@ -198,6 +198,40 @@
           when: infra_env_id is defined and infra_env_id | length > 0
           failed_when: false
 
+        # aliyun `DeleteImage --Force=true` does NOT cascade-delete the
+        # underlying SnapshotForImage entries.  Manually: query → delete
+        # image → delete each backing snapshot.  Without this, every
+        # 02-import-image cycle leaves a 2 GB SnapshotForImage-* orphan
+        # in the region — accumulates ~¥0.24/月 per orphan, indefinitely.
+        # Observed 2026-06-04: 5 stale ISO snapshots from prior runs.
+        - name: ECS — look up backing snapshots of the custom image (for cascade delete)
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DescribeImages
+              - --RegionId
+              - "{{ region }}"
+              - --ImageId
+              - "{{ ecs_image_id }}"
+              - --profile
+              - "{{ aliyun_profile }}"
+          register: _ecs_image_desc
+          when: ecs_image_id is defined and ecs_image_id | length > 0
+          changed_when: false
+          failed_when: false
+
+        - name: ECS — extract backing snapshot IDs
+          ansible.builtin.set_fact:
+            _ecs_image_backing_snaps: >-
+              {{ ((_ecs_image_desc.stdout | default('{}') | from_json)
+                  .Images.Image | default([]) | first | default({}))
+                 .DiskDeviceMappings.DiskDeviceMapping | default([])
+                 | map(attribute='SnapshotId') | list }}
+          when:
+            - ecs_image_id is defined and ecs_image_id | length > 0
+            - _ecs_image_desc.stdout is defined
+
         - name: ECS — delete custom image
           ansible.builtin.command:
             argv:
@@ -213,6 +247,25 @@
               - --profile
               - "{{ aliyun_profile }}"
           when: ecs_image_id is defined and ecs_image_id | length > 0
+          failed_when: false
+          changed_when: true
+
+        - name: ECS — cascade-delete backing snapshots (aliyun has no auto cascade)
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DeleteSnapshot
+              - --RegionId
+              - "{{ region }}"
+              - --SnapshotId
+              - "{{ item }}"
+              - --profile
+              - "{{ aliyun_profile }}"
+          loop: "{{ _ecs_image_backing_snaps | default([]) }}"
+          loop_control:
+            label: "{{ item }} (was backing image {{ ecs_image_id }})"
+          when: (_ecs_image_backing_snaps | default([])) | length > 0
           failed_when: false
           changed_when: true
 
@@ -268,10 +321,12 @@
         #
         # Note: DeleteImage requires --ImageId (it does not accept --ImageName);
         # so DescribeImages first to look up the ID by name, then Delete.
-        # Only the image itself is removed (the CLI does not cascade to the
-        # underlying snapshot by default; cascade requires the console
-        # checkbox "delete associated snapshots").
-        - name: Look up the snapshot-derived custom image by name
+        # DescribeImages already returns DiskDeviceMappings → SnapshotId, so we
+        # can capture the backing SnapshotForImage entries in the same call
+        # and explicitly delete them after DeleteImage (aliyun CLI has no
+        # cascade; the console "delete associated snapshots" checkbox is
+        # not exposed via API).
+        - name: Look up the snapshot-derived custom image by name (+ backing snapshots)
           ansible.builtin.command:
             argv:
               - aliyun
@@ -288,6 +343,16 @@
           register: _snap_image_lookup
           changed_when: false
           failed_when: false
+
+        - name: Collect SnapshotIds backing the snapshot-derived image (cascade fodder)
+          ansible.builtin.set_fact:
+            _snap_image_backing_snaps: >-
+              {{ (_snap_image_lookup.stdout | default('{}') | from_json).Images.Image | default([])
+                 | map(attribute='DiskDeviceMappings')
+                 | map(attribute='DiskDeviceMapping')
+                 | flatten
+                 | map(attribute='SnapshotId')
+                 | list }}
 
         - name: Delete the snapshot-derived custom image (default behaviour — always)
           ansible.builtin.command:
@@ -306,6 +371,25 @@
           loop: "{{ (_snap_image_lookup.stdout | default('{}') | from_json).Images.Image | default([]) }}"
           loop_control:
             label: "{{ item.ImageId }} ({{ item.ImageName }})"
+          failed_when: false
+          changed_when: true
+
+        - name: Cascade-delete SnapshotForImage entries from the snapshot-derived image
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DeleteSnapshot
+              - --RegionId
+              - "{{ region }}"
+              - --SnapshotId
+              - "{{ item }}"
+              - --profile
+              - "{{ aliyun_profile }}"
+          loop: "{{ _snap_image_backing_snaps | default([]) }}"
+          loop_control:
+            label: "{{ item }} (was backing {{ cluster_name }}-mirror-system-from-snap)"
+          when: (_snap_image_backing_snaps | default([])) | length > 0
           failed_when: false
           changed_when: true
 
@@ -336,6 +420,64 @@
           loop:
             - "{{ mirror_snapshot_system_id | default('') }}"
             - "{{ mirror_snapshot_data_id   | default('') }}"
+          failed_when: false
+          changed_when: true
+
+        # ── Orphan SnapshotForImage sweep ──────────────────────────────────
+        # The cascade DeleteSnapshot tasks above only catch snapshots backing
+        # images we delete in THIS teardown.  Snapshots whose parent image
+        # was deleted in a PREVIOUS teardown (before the cascade fix landed)
+        # remain orphaned with no parent — accumulating ~¥0.24/月 per orphan.
+        # Observed 2026-06-04: 5 stale SnapshotForImage-openshift-aliocp1-iso.
+        # Sweep them by name pattern; safe because by this point all our
+        # cluster_name-tagged images are gone, so any matching SnapshotForImage
+        # is necessarily orphaned.
+        - name: Orphan sweep — find SnapshotForImage entries for this cluster
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DescribeSnapshots
+              - --RegionId
+              - "{{ region }}"
+              - --SnapshotName
+              - "{{ item }}"
+              - --profile
+              - "{{ aliyun_profile }}"
+          register: _orphan_query
+          changed_when: false
+          failed_when: false
+          loop:
+            - "SnapshotForImage-openshift-{{ cluster_name }}-iso"
+            - "SnapshotForImage-{{ cluster_name }}-mirror-system-from-snap"
+
+        - name: Orphan sweep — flatten to ID list
+          ansible.builtin.set_fact:
+            _orphan_snap_ids: >-
+              {{ _orphan_query.results
+                 | map(attribute='stdout')
+                 | map('from_json')
+                 | map(attribute='Snapshots.Snapshot')
+                 | flatten
+                 | map(attribute='SnapshotId')
+                 | list }}
+
+        - name: Orphan sweep — delete each
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DeleteSnapshot
+              - --RegionId
+              - "{{ region }}"
+              - --SnapshotId
+              - "{{ item }}"
+              - --profile
+              - "{{ aliyun_profile }}"
+          loop: "{{ _orphan_snap_ids | default([]) }}"
+          loop_control:
+            label: "{{ item }} (orphan SnapshotForImage)"
+          when: (_orphan_snap_ids | default([])) | length > 0
           failed_when: false
           changed_when: true
 
