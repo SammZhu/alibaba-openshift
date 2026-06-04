@@ -85,6 +85,24 @@
 
 **对比 ACR 企业版**：节省 **~85 RMB / 月**（前提是不长期持有 mirror ECS）。
 
+### Sizing per mirror flow (P3-COST.5)
+
+03-create-mirror-stack.yml 现在按 mirror_flow 自动选 instance type：
+
+| Flow | 触发条件 | Instance | RAM 用量 |
+|:-|:-|:-|:-|
+| **fresh** | state.yml 无 snapshot id → 04 跑 oc-mirror v2 d2m import | `ecs.g7.xlarge` (4C/16G) | peak ~12 GB heap during d2m |
+| **restore** | state.yml 含 snapshot id → 03 从 snapshot 重建 ECS，04 跳过 d2m | `ecs.g7.large` (2C/8G) | peak ~2 GB (just Quay + podman) |
+
+两种价格（cn-wulanchabu pay-by-use）：
+- g7.xlarge: ~¥0.81/h × 24 × 30 = **¥583/月**
+- g7.large:  ~¥0.54/h × 24 × 30 = **¥389/月**
+- → 长期跑（dev 24/7 模式）：restore 路径月省 **~¥194**
+
+**OOM 阈值**：若 fresh 路径强制走 g7.large，oc-mirror v2 d2m 在 ~70% 进度时 RSS 撞 8 GB 上限 → 进程被 OOM killer 杀掉 → 04 fail at "Import image tarball into mirror-registry"。一次性恢复成本 ~30 min（清理 + 重新跑），不值得省那 ¥0.27/h。
+
+**override**：group_vars/all.yml 设 `mirror_instance_type: "ecs.xxx"` 非空可强制覆盖两条路径。仅在调试 / 异常机型测试时用。
+
 ---
 
 ## 组件清单

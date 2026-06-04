@@ -94,6 +94,32 @@
         - _snap_verify.rc == 0
         - ((_snap_verify.stdout | from_json).Snapshots.Snapshot | default([]) | length) < 2
 
+    # P3-COST.5: pick mirror_instance_type based on whether this run will
+    # actually run oc-mirror v2 d2m import (fresh path) or skip it
+    # (snapshot-restore fast-path).  d2m peak heap ~12 GB → needs g7.xlarge
+    # (16 GB).  Snapshot-restore peak ~2 GB (just Quay + podman) → g7.large
+    # (8 GB) is plenty.  Saves ~¥194/mo when mirror ECS runs 24/7 on dev.
+    #
+    # Resolution order:
+    #   1. mirror_instance_type (legacy single var) — explicit override wins
+    #   2. mirror_instance_type_restore — picked when snapshot-restore active
+    #   3. mirror_instance_type_fresh — picked when fresh prep is required
+    #   4. ecs.g7.xlarge — final safety fallback
+    - name: Resolve effective mirror_instance_type per mirror_flow
+      ansible.builtin.set_fact:
+        _effective_mirror_type: >-
+          {{ mirror_instance_type
+             if ((mirror_instance_type | default('') | length) > 0)
+             else (mirror_instance_type_restore | default('ecs.g7.large'))
+                  if _mirror_restore_from_snapshot
+                  else (mirror_instance_type_fresh | default('ecs.g7.xlarge')) }}
+
+    - name: Announce mirror instance type selection
+      ansible.builtin.debug:
+        msg: >-
+          mirror_flow={{ 'snapshot-restore' if _mirror_restore_from_snapshot else 'fresh' }}
+          → mirror_instance_type={{ _effective_mirror_type }}
+
     - name: Snapshot-path decision summary
       ansible.builtin.debug:
         msg: |
@@ -230,7 +256,7 @@
           - ParameterKey: MirrorPrivateIp
             ParameterValue: "{{ mirror_private_ip }}"
           - ParameterKey: MirrorInstanceType
-            ParameterValue: "{{ mirror_instance_type }}"
+            ParameterValue: "{{ _effective_mirror_type }}"
           - ParameterKey: MirrorDataDiskSize
             ParameterValue: "{{ mirror_data_disk_size | string }}"
           # Populated only on the fast-path; empty string = ROS uses default blank disk + auto-discovered image.

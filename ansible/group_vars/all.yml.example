@@ -103,10 +103,20 @@ teardown_confirmed: false    # true = skip "Type yes to proceed" prompt (set tru
 mirror_enabled:         false
 mirror_oss_object:      "mirror-tarballs/{{ cluster_name }}-{{ openshift_version }}.tar"
 mirror_private_ip:      "10.0.16.4"           # static IP in private_subnet_cidr
-# Mirror ECS sizing — see docs/MIRROR.md.  g7.xlarge (4vCPU/16GB) is the
-# documented minimum; g7.large (8GB) walks a memory tightrope during
-# oc-mirror v2 d2m; c7.large (4GB) is impossible without manual swap.
-mirror_instance_type:   "ecs.g7.xlarge"
+# Mirror ECS sizing — 03 picks per mirror_flow (P3-COST.5):
+#   fresh path (no snapshot in state → oc-mirror v2 d2m runs):
+#                                    needs ≥16 GB; ecs.g7.xlarge default
+#   restore path (snapshot present → d2m skipped):
+#                                    peak ~2 GB; ecs.g7.large enough
+#                                    (~¥0.27/h cheaper than xlarge)
+#
+# Backwards compat: set `mirror_instance_type` non-empty to override both —
+# 03 will use that literal value regardless of mirror_flow.
+#
+# See docs/MIRROR.md "Sizing per mirror flow" for the OOM threshold detail.
+mirror_instance_type_fresh:   "ecs.g7.xlarge"
+mirror_instance_type_restore: "ecs.g7.large"
+mirror_instance_type:         ""              # legacy explicit override; empty = use per-flow
 # 100 GB peak runtime usage; 200 GB leaves room for re-runs.
 mirror_data_disk_size:  200
 mirror_init_user:       "mirror-admin"
