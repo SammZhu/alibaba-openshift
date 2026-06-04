@@ -133,11 +133,38 @@ imageset-config.yaml + tag-mapping.tsv).
 Run each stage in `tmux`/`screen`, validate before advancing.  All
 playbooks are individually idempotent.
 
+### 4.0 tmux invocation template — ALWAYS set PYTHONUNBUFFERED
+
+When `ansible-playbook` runs under tmux + `tee` (no TTY), Python's
+stdout switches to block-buffering (~4 KB).  In `retries:N delay:60`
+polling tasks (Phase A, Phase B, ROS poll, etc.) each retry emits
+~80 bytes; buffering means up to 50 retries' worth of output sits
+unflushed.  Result: log mtime appears frozen for 30+ minutes while
+the playbook is actually progressing normally.  Observed 2026-06-05
+P3-COST.2 verification run — appeared "hung" at Phase A for 30 min
+when ansible was healthily retrying.
+
+**Always launch tmux+ansible with `env PYTHONUNBUFFERED=1`**:
+
+```bash
+tmux new -d -s install \
+  "env PYTHONUNBUFFERED=1 \
+   ansible-playbook -i inventory.yml playbooks/site.yml \
+   2>&1 | tee /tmp/install.log"
+
+# Then tail.  Output now flushes line-by-line.
+tail -f /tmp/install.log
+```
+
+Alternative: `python3 -u`-invoke ansible explicitly, but PYTHONUNBUFFERED
+is the cleanest fix.  Affects only Python's own buffering; tee is
+line-buffered to a file by default.
+
 ### Stage 1 — preflight + ISO + image (10–30 min)
 
 ```bash
 cd ansible/
-ansible-playbook -i inventory.yml \
+env PYTHONUNBUFFERED=1 ansible-playbook -i inventory.yml \
   playbooks/00-preflight.yml \
   playbooks/01-prepare-iso.yml \
   playbooks/02-import-image.yml \
@@ -158,7 +185,7 @@ aliyun ecs DescribeImages --RegionId $region --ImageOwnerAlias self \
 ### Stage 2 — mirror-stack + content (30–60 min)
 
 ```bash
-ansible-playbook -i inventory.yml \
+env PYTHONUNBUFFERED=1 ansible-playbook -i inventory.yml \
   playbooks/03-create-mirror-stack.yml \
   playbooks/04-prepare-mirror.yml \
   playbooks/05-verify-mirror.yml \
@@ -189,7 +216,7 @@ If 04 hits `unauthorized` while pushing CCM to mirror (HTTP 401), see
 ### Stage 3 — cluster-stack + install (60–90 min)
 
 ```bash
-ansible-playbook -i inventory.yml \
+env PYTHONUNBUFFERED=1 ansible-playbook -i inventory.yml \
   playbooks/06-create-cluster-stack.yml \
   playbooks/07-install-cluster.yml \
   2>&1 | tee logs/stage3.log
