@@ -58,6 +58,59 @@
         - infra_env_id is defined and infra_env_id | length > 0
         - _infra_probe.status | default(0) == 404
 
+    # ── P3-FIX.1: stale 'installed' AI state after teardown_target=both ────
+    # Scenario: a previous run completed install + saved cluster_id /
+    # infra_env_id to state.  Then `99-teardown.yml teardown_target=both
+    # teardown_preserves_ai=true` deleted the ROS cluster-stack (cluster_stack_id
+    # cleared from state) but kept cluster_id + infra_env_id in state.  This
+    # run's hardware is fresh (cluster_stack_id == ''), but AI's view of the
+    # cluster is still 'installed' from the previous run.
+    #
+    # Without this self-heal, 07's Phase A poll sees status=installed and
+    # exits immediately → DNS rewrite / kubeconfig download / Phase B all
+    # run against nonexistent hardware → fatal 'connection refused' on
+    # api.<cluster>.<base>:6443.  Observed 2026-06-04.
+    #
+    # Detection: cluster GET returns 200 + status in {installing-*, finalizing,
+    # installed} + no cluster_stack_id in state.  Fix: DELETE the AI cluster +
+    # infra-env so the create-fresh branch below runs.
+    - name: Detect stale 'installed' AI cluster (no hardware behind it)
+      ansible.builtin.set_fact:
+        _ai_stale_install: >-
+          {{ (_cluster_probe.status | default(0) == 200)
+             and ((_cluster_probe.json.status | default('')) in
+                  ['installing', 'installing-pending-user-action',
+                   'finalizing', 'installed'])
+             and ((cluster_stack_id | default('') | length) == 0) }}
+      when:
+        - cluster_id is defined and cluster_id | length > 0
+        - _cluster_probe is defined
+
+    - name: Reset stale AI cluster — DELETE on AI side
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
+        method: DELETE
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        status_code: [204, 404]
+      when: _ai_stale_install | default(false) | bool
+
+    - name: Reset stale AI infra-env — DELETE on AI side
+      ansible.builtin.uri:
+        url: "{{ assisted_api }}/infra-envs/{{ infra_env_id }}"
+        method: DELETE
+        headers: { Authorization: "Bearer {{ ai_access_token }}" }
+        status_code: [204, 404]
+      when:
+        - _ai_stale_install | default(false) | bool
+        - infra_env_id is defined and infra_env_id | length > 0
+
+    - name: Clear stale cluster_id + infra_env_id facts after reset
+      ansible.builtin.set_fact:
+        cluster_id: ''
+        infra_env_id: ''
+        dynamic_manifest_file: ''
+      when: _ai_stale_install | default(false) | bool
+
     # ── Adopt existing cluster by name to avoid duplicates ─────────────────
     - name: List existing Assisted clusters
       ansible.builtin.uri:
@@ -496,6 +549,42 @@
       ansible.builtin.stat:
         path: "{{ iso_path }}"
       register: iso_stat
+
+    # P3-FIX.2: defensive check — even when `infra_create is skipped` (adopted
+    # the same infra-env we knew about), the ISO file at iso_path could have
+    # been left over from a DIFFERENT infra-env in a prior project state (e.g.
+    # state.yml partially cleared by hand but iso_path file not removed).
+    # The agent's --infra-env-id parameter is baked into the ISO; if it doesn't
+    # match current infra_env_id, master will register to a deleted infra-env
+    # and AI will show hosts=[] forever.  Observed 2026-06-04.
+    #
+    # Cheap check: grep -a (binary-safe) for the current infra_env_id UUID in
+    # the ISO bytes.  Match → ISO is for this infra-env, safe to reuse.  No
+    # match → stale, force re-download.
+    - name: Verify existing ISO has current infra_env_id baked in
+      ansible.builtin.command:
+        argv: [grep, -aq, "{{ infra_env_id }}", "{{ iso_path }}"]
+      register: _iso_infra_match
+      changed_when: false
+      failed_when: false
+      when:
+        - iso_stat.stat.exists | default(false)
+        - infra_env_id | default('') | length > 0
+
+    - name: Delete stale ISO when infra-env-id baked in doesn't match
+      ansible.builtin.file:
+        path: "{{ iso_path }}"
+        state: absent
+      when:
+        - iso_stat.stat.exists | default(false)
+        - _iso_infra_match.rc | default(0) != 0
+      register: _stale_iso_deleted
+
+    - name: Re-stat ISO after possible stale-deletion
+      ansible.builtin.stat:
+        path: "{{ iso_path }}"
+      register: iso_stat
+      when: _stale_iso_deleted is changed
 
     - name: Download Discovery ISO
       ansible.builtin.get_url:
