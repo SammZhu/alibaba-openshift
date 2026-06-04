@@ -539,6 +539,136 @@
               ecs_image_id: "{{ ecs_image_id | default('') if (teardown_preserves_ai | default(false) | bool) else '' }}"
               iso_path:     "{{ iso_path     | default('') if (teardown_preserves_ai | default(false) | bool) else '' }}"
 
+    # ── Post-teardown sanity (P3-FIX.4) ──────────────────────────────────
+    # Audit the actual cloud state against what teardown_target promised.
+    # The history before this block: at multiple layers (aliyun API,
+    # ansible logic, sweep query, error masking, NO verification), bugs
+    # let resources accumulate while PLAY RECAP still showed failed=0.
+    # 2026-06-05 audit found 17 stale snapshots wasting ~¥38/month that
+    # had silently leaked across many teardown cycles.  This block
+    # converts "teardown said OK" into "teardown actually cleaned up".
+    #
+    # Asserts depend on target + delete_mirror_snapshots:
+    #   - target in [cluster,both]: cluster-stack ROS + cluster ECS gone
+    #   - target in [mirror,both]:  mirror-stack ROS + mirror ECS + NAT
+    #                               + EIP + (image cascade) all gone
+    #   - delete_mirror_snapshots:  mirror data/system snapshots gone
+    #                               else expect ≤ 2 (1 system + 1 data)
+    #   - any target:               SnapshotForImage orphans for our
+    #                               cluster_name must be 0
+    - name: Post-teardown sanity — query actual cloud state
+      block:
+        - name: Audit — ROS stacks still bearing this cluster's names
+          ansible.builtin.command:
+            argv: [aliyun, ros, ListStacks, --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
+          register: _audit_stacks
+          changed_when: false
+          failed_when: false
+
+        - name: Audit — ECS instances still bearing this cluster's names
+          ansible.builtin.command:
+            argv: [aliyun, ecs, DescribeInstances, --RegionId, "{{ region }}",
+                   --InstanceName, "{{ cluster_name }}-*",
+                   --PageSize, "100",
+                   --profile, "{{ aliyun_profile }}"]
+          register: _audit_ecs
+          changed_when: false
+          failed_when: false
+
+        - name: Audit — orphan SnapshotForImage (ISO + mirror-from-snap)
+          ansible.builtin.command:
+            argv: [aliyun, ecs, DescribeSnapshots, --RegionId, "{{ region }}",
+                   --SnapshotName, "{{ item }}",
+                   --PageSize, "100",
+                   --profile, "{{ aliyun_profile }}"]
+          register: _audit_orphan
+          changed_when: false
+          failed_when: false
+          loop:
+            - "SnapshotForImage-openshift-{{ cluster_name }}-iso"
+            - "SnapshotForImage-{{ cluster_name }}-mirror-system-from-snap"
+
+        - name: Audit — mirror data/system snapshots
+          ansible.builtin.command:
+            argv: [aliyun, ecs, DescribeSnapshots, --RegionId, "{{ region }}",
+                   --SnapshotName, "{{ item }}",
+                   --PageSize, "100",
+                   --profile, "{{ aliyun_profile }}"]
+          register: _audit_mirror_snap
+          changed_when: false
+          failed_when: false
+          loop:
+            - "{{ cluster_name }}-mirror-system"
+            - "{{ cluster_name }}-mirror-data"
+
+        - name: Audit — derive observed counts
+          ansible.builtin.set_fact:
+            _obs_cluster_stack: >-
+              {{ ((_audit_stacks.stdout | default('{}') | from_json).Stacks | default([]))
+                 | selectattr('StackName', 'equalto', cluster_name + '-cluster')
+                 | list | length }}
+            _obs_mirror_stack: >-
+              {{ ((_audit_stacks.stdout | default('{}') | from_json).Stacks | default([]))
+                 | selectattr('StackName', 'equalto', cluster_name + '-mirror')
+                 | list | length }}
+            _obs_ecs: >-
+              {{ ((_audit_ecs.stdout | default('{}') | from_json).Instances.Instance | default([]))
+                 | length }}
+            _obs_orphans: >-
+              {{ _audit_orphan.results
+                 | map(attribute='stdout') | map('default', '{}', true) | map('from_json')
+                 | map(attribute='Snapshots.Snapshot', default=[]) | flatten | length }}
+            _obs_mirror_snaps: >-
+              {{ _audit_mirror_snap.results
+                 | map(attribute='stdout') | map('default', '{}', true) | map('from_json')
+                 | map(attribute='Snapshots.Snapshot', default=[]) | flatten | length }}
+
+        - name: Audit — derive expected counts per target / flags
+          ansible.builtin.set_fact:
+            _exp_cluster_stack: "{{ 0 if (teardown_target in ['cluster', 'both']) else (_obs_cluster_stack | int) }}"
+            _exp_mirror_stack:  "{{ 0 if (teardown_target in ['mirror',  'both']) else (_obs_mirror_stack  | int) }}"
+            _exp_ecs:           "{{ 0 if (teardown_target == 'both') else (_obs_ecs | int) }}"
+            _exp_orphans:       0
+            _exp_mirror_snaps: >-
+              {{ 0
+                 if ((teardown_target in ['mirror','both']) and (delete_mirror_snapshots | default(false) | bool))
+                 else 2 if (teardown_target in ['mirror','both'])
+                 else (_obs_mirror_snaps | int) }}
+
+        - name: Audit — assert observed == expected
+          ansible.builtin.assert:
+            that:
+              - (_obs_cluster_stack | int) == (_exp_cluster_stack | int)
+              - (_obs_mirror_stack  | int) == (_exp_mirror_stack  | int)
+              - (_obs_ecs           | int) == (_exp_ecs           | int)
+              - (_obs_orphans       | int) == (_exp_orphans       | int)
+              - (_obs_mirror_snaps  | int) <= (_exp_mirror_snaps  | int)
+            fail_msg: |
+              ❌ post-teardown sanity FAILED for cluster '{{ cluster_name }}' in {{ region }}.
+              Target={{ teardown_target }}  delete_snapshots={{ delete_mirror_snapshots }}
+              ┌──────────────────────────────┬────────┬────────┐
+              │ Item                         │ Expect │ Actual │
+              ├──────────────────────────────┼────────┼────────┤
+              │ cluster-stack ROS            │ {{ _exp_cluster_stack }}      │ {{ _obs_cluster_stack }}      │
+              │ mirror-stack ROS             │ {{ _exp_mirror_stack }}      │ {{ _obs_mirror_stack }}      │
+              │ ECS instances ({{ cluster_name }}-*)│ {{ _exp_ecs }}      │ {{ _obs_ecs }}      │
+              │ SnapshotForImage orphans     │ {{ _exp_orphans }}      │ {{ _obs_orphans }}      │
+              │ mirror data/system snapshots │ ≤{{ _exp_mirror_snaps }}     │ {{ _obs_mirror_snaps }}      │
+              └──────────────────────────────┴────────┴────────┘
+              Likely root cause: a deletion step inside this teardown errored
+              and `failed_when:false` swallowed it.  Run with -v or check
+              prior tasks marked OK but "changed=false".
+
+              Quick manual cleanup commands:
+                aliyun ecs DescribeSnapshots --SnapshotName 'SnapshotForImage-openshift-{{ cluster_name }}-iso' --PageSize 100 --RegionId {{ region }} --profile {{ aliyun_profile }} | jq -r '.Snapshots.Snapshot[].SnapshotId' | xargs -n1 -I{} aliyun ecs DeleteSnapshot --SnapshotId {} --RegionId {{ region }} --profile {{ aliyun_profile }}
+            success_msg: |
+              ✓ post-teardown sanity PASSED.
+                cluster-stack={{ _obs_cluster_stack }}/{{ _exp_cluster_stack }}
+                mirror-stack={{ _obs_mirror_stack }}/{{ _exp_mirror_stack }}
+                ECS={{ _obs_ecs }}/{{ _exp_ecs }}
+                orphan-snapshots={{ _obs_orphans }}/{{ _exp_orphans }}
+                mirror-snapshots={{ _obs_mirror_snaps }}/≤{{ _exp_mirror_snaps }}
+
     - name: Teardown done
       ansible.builtin.debug:
         msg: |
