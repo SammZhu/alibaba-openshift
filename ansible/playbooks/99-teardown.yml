@@ -432,6 +432,12 @@
         # Sweep them by name pattern; safe because by this point all our
         # cluster_name-tagged images are gone, so any matching SnapshotForImage
         # is necessarily orphaned.
+        # `DescribeSnapshots` default PageSize=10.  When a project has
+        # accumulated >10 orphan SnapshotForImage entries (observed
+        # 2026-06-05: 16 entries), the API silently truncates to 10 and
+        # the next 6+ get missed every teardown forever.  Use --PageSize
+        # 100 (max).  Future-proof: if a project ever exceeds 100, this
+        # task would still miss the tail — would need a pagination loop.
         - name: Orphan sweep — find SnapshotForImage entries for this cluster
           ansible.builtin.command:
             argv:
@@ -442,6 +448,8 @@
               - "{{ region }}"
               - --SnapshotName
               - "{{ item }}"
+              - --PageSize
+              - "100"
               - --profile
               - "{{ aliyun_profile }}"
           register: _orphan_query
@@ -451,16 +459,27 @@
             - "SnapshotForImage-openshift-{{ cluster_name }}-iso"
             - "SnapshotForImage-{{ cluster_name }}-mirror-system-from-snap"
 
+        # Defensive flatten: each iteration's .stdout MAY be "" if the
+        # describe call errored (failed_when:false above masks that).
+        # `default('{}', true)` gives us a valid empty JSON object to
+        # parse instead of an empty string that crashes from_json.
         - name: Orphan sweep — flatten to ID list
           ansible.builtin.set_fact:
             _orphan_snap_ids: >-
               {{ _orphan_query.results
                  | map(attribute='stdout')
+                 | map('default', '{}', true)
                  | map('from_json')
-                 | map(attribute='Snapshots.Snapshot')
+                 | map(attribute='Snapshots.Snapshot', default=[])
                  | flatten
                  | map(attribute='SnapshotId')
                  | list }}
+
+        - name: Orphan sweep — report what will be deleted
+          ansible.builtin.debug:
+            msg: >-
+              Orphan SnapshotForImage entries to delete: {{ _orphan_snap_ids | length }}
+              (PageSize=100 cap).  IDs: {{ _orphan_snap_ids }}
 
         - name: Orphan sweep — delete each
           ansible.builtin.command:
