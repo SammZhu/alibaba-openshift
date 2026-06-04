@@ -47,6 +47,18 @@
         src: "{{ ssh_pub_key_file }}"
       register: _ssh_pub_slurp
 
+    # Topology-effective sizing (same pattern 07-install-cluster.yml uses).
+    # For cluster_topology=sno the ROS template pins ControlPlaneCount=1 +
+    # ComputeCount=0 via AllowedValues; sending the HA group_vars defaults
+    # straight through would violate AllowedValues and ROS would reject
+    # the CreateStack with UserParameterMissing / value-out-of-range
+    # (observed 2026-06-04 P3-COST.2 verification run, fix d45f16a missed
+    # this site).  Derive effective counts up-front and use them below.
+    - name: Resolve effective control-plane / compute counts per cluster_topology
+      ansible.builtin.set_fact:
+        _effective_control_plane_count: "{{ 1 if (cluster_topology | default('ha')) == 'sno' else (control_plane_count | int) }}"
+        _effective_compute_count: "{{ 0 if (cluster_topology | default('ha')) == 'sno' else (compute_count | int) }}"
+
     - name: Build cluster-stack Parameters
       ansible.builtin.set_fact:
         _cluster_stack_params:
@@ -83,11 +95,11 @@
           - ParameterKey: ImageId
             ParameterValue: "{{ ecs_image_id }}"
           - ParameterKey: ControlPlaneCount
-            ParameterValue: "{{ control_plane_count | string }}"
+            ParameterValue: "{{ _effective_control_plane_count | string }}"
           - ParameterKey: ControlPlaneInstanceType
             ParameterValue: "{{ control_plane_type }}"
           - ParameterKey: ComputeCount
-            ParameterValue: "{{ compute_count | string }}"
+            ParameterValue: "{{ _effective_compute_count | string }}"
           - ParameterKey: ComputeInstanceType
             ParameterValue: "{{ compute_type }}"
           - ParameterKey: SystemDiskCategory
