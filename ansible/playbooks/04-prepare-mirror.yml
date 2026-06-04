@@ -98,6 +98,32 @@
         msg: "mirror-registry is already ready (/var/lib/mirror-ready exists). Skipping install + import + PATCH still runs."
       when: already_ready.rc == 0
 
+    # P3-COST.6 watchdog: snapshot fast-path is supposed to save ~25 min by
+    # restoring a Quay that's already imported.  This only works if the marker
+    # /var/lib/mirror-ready was inside the snapshot when 05-verify-mirror
+    # took it.  Snapshots created BEFORE commit b72f4a0 (mirror-ready marker
+    # written immediately after import, 2026-06-01) don't contain the marker —
+    # restore brings up the disk but 04 still runs full prep, wasting ~25 min
+    # of mirror ECS uptime + the snapshot's ¥29/month is effectively dead.
+    #
+    # Detect this here so the operator sees a clear message instead of just
+    # observing 04 "taking longer than expected".  Recovery: this run will
+    # finish, 05 will take a NEW snapshot WITH the marker, future restores
+    # will fast-path properly.  See docs/SNAPSHOT.md.
+    - name: Warn when snapshot-restore was attempted but marker missing
+      ansible.builtin.debug:
+        msg: |
+          ⚠  fast-path degraded: state.yml carries snapshot IDs (system={{ mirror_snapshot_system_id }},
+              data={{ mirror_snapshot_data_id }}) but /var/lib/mirror-ready is MISSING
+              from the restored disk.  This run will do full Phase 04 prep
+              (~25 min); 05 will then take a fresh snapshot containing the
+              marker, restoring fast-path behavior for the next teardown +
+              restore cycle.  See docs/SNAPSHOT.md (P3-COST.6).
+      when:
+        - already_ready.rc != 0
+        - (mirror_snapshot_system_id | default('') | length) > 0
+        - (mirror_snapshot_data_id   | default('') | length) > 0
+
     # ── Step 2a: snapshot-restore password drift sentinel ───────────────────
     # When fast-path restored Quay from a snapshot, the Quay DB inside that
     # snapshot has the password baked at snapshot time.  If state.yml's

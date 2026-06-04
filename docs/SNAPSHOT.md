@@ -203,3 +203,59 @@ ansible-playbook ansible/playbooks/99-teardown.yml \
 
 每个 cluster 一对 snapshot ≈ ¥17/月，换 ~60 min 重建时间。绝大多数场景
 值得保留；只在彻底放弃这个 cluster 时才用 `delete_mirror_snapshots=true`。
+
+---
+
+## P3-COST.6 — fast-path 的 invariant：marker 必须入 snapshot
+
+### 现象
+
+snapshot 在状态文件里有，03 fast-path 也成功用它启了 mirror ECS，但
+**Phase 04 仍然跑完整的 25 min 准备流程** — 即 fast-path 实际只省了 ECS
+启动时间（~10 min），没有省 oc-mirror import（~15 min）+ 30 GB OSS
+download（这次因 #35 走 internal endpoint 不要钱了，但浪费 mirror ECS
+时间）。
+
+实测 2026-06-04：6-1 拍的 snapshot 不含 `/var/lib/mirror-ready` marker，
+6-4 fast-path 起 ECS 后 04 看 `test -f /var/lib/mirror-ready` 失败 → 跑
+full prep。snapshot ¥29/月在交白钱（仅省 ECS 启动时间，价值~3 min/次）。
+
+### 根因
+
+snapshot 是否真节省时间，取决于 **marker 是否在 snapshot 里**。Marker
+由 04 在 `Stage CA cert + write mirror-ready marker` 任务写入；05 在 04
+结束之后才拍 snapshot。理论上 marker 应该在 snapshot 里。
+
+历史 bug：commit b72f4a0 之前，marker 写在 04 末尾（CCM/CAPA pre-pull
+之后）。如果 04 在 marker 写入前任何地方报错（如 commit cfe5f6b 之前
+quay 502 抓 CAPA 时），05 不会执行（site.yml 顺序），但操作员手工补救
+后单独再跑 05 时 marker 仍未写 → snapshot 里没 marker。
+
+### 防线
+
+**`04-prepare-mirror.yml`** 现在加了 watchdog warn：snapshot ID 在 state
+但 marker 不在 mirror ECS → log 警告 + 继续走 full prep（行为不变）。
+便于 ops 观察到这次 fast-path 失败 +「这次跑完 05 会拍新 snapshot 修正」。
+
+**`05-verify-mirror.yml`** 现在加了 assert：拍 snapshot 前强制
+`test -f /var/lib/mirror-ready`。Missing → 05 fail，明确报错 +
+指引：`Action: re-run Phase 04 until "Stage CA cert + write
+mirror-ready marker" task completes, then re-run Phase 05`。
+
+### 验证
+
+```bash
+# 在 mirror ECS 上
+ssh -i ... root@<jumphost> ssh root@<mirror_ip> test -f /var/lib/mirror-ready && echo "OK marker present"
+
+# snapshot 内容验证（间接）：
+# 1. 99-teardown -e teardown_target=both -e delete_mirror_snapshots=false
+# 2. 重跑 site.yml
+# 3. 04 头部 log 应该看到「mirror-registry is already ready (/var/lib/mirror-ready exists). Skipping...」
+# 4. 而不是 warn「fast-path degraded」
+```
+
+### 恢复路径（marker 不在旧 snapshot 里）
+
+不用慌：当前这次 install 跑完后 05 会拍新 snapshot（含 marker），下次 teardown+restore
+就能真正 fast-path。一次性的修复，不需要手工干预。
