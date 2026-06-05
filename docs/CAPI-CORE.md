@@ -377,8 +377,33 @@ UserData.  Tracked as a P3 / design discussion.
 
 ---
 
-## 8. Version history
+## 8. CAPI contract behaviour as of CAPA v0.1.3
+
+The CRDs-only path in this doc crafts `Cluster`/`Machine` owners and patches
+OwnerRefs by hand (§3). With CAPA `v0.1.3` (PR1) the provider follows the
+upstream CAPI contract more faithfully, which changes what to expect when
+driving it manually:
+
+- **A `Machine` with no `spec.bootstrap.dataSecretName` will NOT boot an ECS.**
+  The machine controller requeues with `WaitingForBootstrapData`. When testing
+  RunInstances by hand, either set `bootstrap.dataSecretName` on the owning
+  Machine or fall back to `AlibabaCloudMachine.spec.userDataSecret`.
+- **providerID is `alicloud://<region>/<instanceID>`** (slash). Delete now
+  parses the region back out of providerID and clears its own finalizer — the
+  hand-patched-OwnerRef delete no longer hangs.
+- **`AlibabaCloudCluster` stays `ready=false` until
+  `status.controlPlaneEndpoint.host` is set** (`ControlPlaneEndpointMissing`).
+  Supply `spec.controlPlaneEndpoint` (BYO api-int) on the cluster CR or it never
+  goes ready. Mind the CRD-regen pruning gotcha —
+  see [CAPA-SMOKE.md §8](CAPA-SMOKE.md).
+
+Full smoke evidence lives in [CAPA-SMOKE.md §8](CAPA-SMOKE.md).
+
+---
+
+## 9. Version history
 
 | Date | Change |
 |---|---|
 | 2026-06-01 | Initial — P2-CAPI verification run.  CRDs-only path works; CAPA v0.1.2 (with the credential fix from openshift-capi-alicloud `bb1f73e`) calls RunInstances and a real ECS `i-0jl0ucoda565o2pq16wj` boots in cn-wulanchabu.  Commits: `6033915` (alibaba-openshift v0.1.1→v0.1.2 + envFrom alibaba-creds) + `bb1f73e` (openshift-capi-alicloud resolveCredential). |
+| 2026-06-05 | CAPA `v0.1.3` (PR1) tightens CAPI-contract behaviour (§8): bootstrap-data gate, slash providerID + self-clearing finalizer, controlPlaneEndpoint Ready gate.  Affects how the manual CRDs-only path must be driven. |

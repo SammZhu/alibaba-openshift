@@ -289,8 +289,49 @@ oc -n capa-system describe pod -l app=capa-controller-manager
 
 ---
 
-## 8. Version history
+## 8. PR1 (v0.1.3) — CAPI contract-compliance verification
+
+Smoke-validated `quay.io/samzhu/openshift-capi-alicloud:v0.1.3` on a live SNO
+cluster (cn-wulanchabu). This is the build from openshift-capi-alicloud PR1
+(#23/#24/#25/#28). What was confirmed end-to-end:
+
+| # | Behaviour | Observed result |
+|---|---|---|
+| #23 | providerID format | `alicloud://cn-wulanchabu/i-0jl2w0y4apxvj9d1j56r` — slash separator and a real region (no longer `alicloud://.<id>`). |
+| #23 | delete-path region parse | `oc delete alibabacloudmachine` → `regionFromMachine` parsed the region → "Deleted ECS instance" → finalizer auto-cleared → object gone. **The original P2 finalizer-hang is fixed.** |
+| #24 | bootstrap gate | Before `spec.bootstrap.dataSecretName` was set, the controller requeued with `WaitingForBootstrapData` and made **no** `RunInstances` call; once the data-secret existed it proceeded to create the ECS. |
+| #25 | controlPlaneEndpoint mirror | `status.controlPlaneEndpoint.host = api-int.aliocp1.example.local` mirrored from spec; with the endpoint missing the cluster stayed `ready=false` reason `ControlPlaneEndpointMissing`. |
+| #28 | paused | `cluster.x-k8s.io/paused` annotation skipped reconciliation as expected. |
+
+Post-test: ECS instance count back to 0; smoke CRs deleted.
+
+### CRD-regeneration gotcha (important)
+
+`status.controlPlaneEndpoint` is a **new** status field added in #25. The API
+server **prunes any status field absent from the deployed CRD's OpenAPI
+schema** (structural-schema pruning). On first apply the field was silently
+dropped — `oc get -o yaml` never showed it — until the regenerated CRD was
+applied.
+
+Rule: **after any Go struct change to a `*_types.go`, run `make generate` in
+openshift-capi-alicloud AND re-apply the CRDs here** before trusting status.
+The regenerated CRDs live in
+[`custom_manifests/02-capa-crds.yaml`](../custom_manifests/02-capa-crds.yaml)
+(commit `a59828e` carries the `status.controlPlaneEndpoint` schema).
+
+```bash
+# Sanity-check the deployed CRD actually carries the field:
+oc get crd alibabacloudclusters.infrastructure.cluster.x-k8s.io -o json \
+  | jq '.spec.versions[].schema.openAPIV3Schema.properties.status.properties.controlPlaneEndpoint'
+# null  → CRD is stale, re-apply 02-capa-crds.yaml
+# {...} → good
+```
+
+---
+
+## 9. Version history
 
 | Date | Change |
 |---|---|
 | 2026-06-01 | Initial — P1-CAPA verification run.  CAPA image v0.1.0 panic discovered; rebuilt as v0.1.1 with semver fallback; smoke test reached Cluster-API OwnerRef gate as expected.  All commits: `c7b4b9a` (alibaba-openshift) + `a4dc369` (openshift-capi-alicloud). |
+| 2026-06-05 | PR1 contract-compliance (§8) — CAPA `v0.1.3` smoke-validated on live SNO: providerID slash+region, delete finalizer auto-clear (P2 hang fixed), bootstrap gate, controlPlaneEndpoint mirror, paused.  CRD-regen pruning gotcha documented.  Commits: `a59828e` (02-capa-crds.yaml) + `0239b97`/`0d91747` (openshift-capi-alicloud PR1 + CRD regen, tag `v0.1.3`). |
