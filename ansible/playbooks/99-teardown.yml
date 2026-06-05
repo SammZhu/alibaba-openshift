@@ -623,12 +623,31 @@
                  | map(attribute='stdout') | map('default', '{}', true) | map('from_json')
                  | map(attribute='Snapshots.Snapshot', default=[]) | flatten | length }}
 
+        # SnapshotForImage entries are legitimately backing a preserved ECS
+        # image whenever the teardown KEEPS that image.  Images are deleted by:
+        #   - the "Delete Assisted cluster + infra-env + ECS image" block
+        #     (target in [mirror,both] and NOT preserves_ai), OR
+        #     (target==cluster and cluster_includes_ai)
+        #   - the "Delete snapshot-derived custom image" task (target in
+        #     [mirror,both], always)
+        # We can only assert orphans==0 when images were actually deleted.
+        # When images are preserved, SnapshotForImage by-name lookup matches
+        # the LIVE backing snapshot (not an orphan), so asserting 0 would
+        # false-positive.  Observed 2026-06-05: teardown_target=cluster left
+        # openshift-aliocp1-iso image + its backing snapshot (correctly
+        # preserved), but the assert flagged it as an orphan.
+        - name: Audit — derive whether ECS images were deleted this teardown
+          ansible.builtin.set_fact:
+            _images_deleted: >-
+              {{ (teardown_target in ['mirror', 'both'])
+                 or (teardown_target == 'cluster' and (cluster_includes_ai | default(false) | bool)) }}
+
         - name: Audit — derive expected counts per target / flags
           ansible.builtin.set_fact:
             _exp_cluster_stack: "{{ 0 if (teardown_target in ['cluster', 'both']) else (_obs_cluster_stack | int) }}"
             _exp_mirror_stack:  "{{ 0 if (teardown_target in ['mirror',  'both']) else (_obs_mirror_stack  | int) }}"
             _exp_ecs:           "{{ 0 if (teardown_target == 'both') else (_obs_ecs | int) }}"
-            _exp_orphans:       0
+            _exp_orphans:       "{{ 0 if (_images_deleted | bool) else (_obs_orphans | int) }}"
             _exp_mirror_snaps: >-
               {{ 0
                  if ((teardown_target in ['mirror','both']) and (delete_mirror_snapshots | default(false) | bool))
