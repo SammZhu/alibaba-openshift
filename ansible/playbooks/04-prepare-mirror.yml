@@ -718,6 +718,48 @@
     # Re-running is idempotent — podman tag+push on an existing tag pointer
     # is essentially a manifest no-op (Quay dedupes by digest).  Cost ~15 s.
 
+    # P3-FIX.6: Quay push-readiness gate.
+    # /health/instance returning 200 only means the web frontend is up.
+    # The Docker-registry token endpoint (/v2/auth) and the blob upload
+    # path come online slightly later.  Pushing in that window fails with
+    #   Requesting bearer token: invalid status code from registry 405
+    # mid-push (observed 2026-06-04 + 2026-06-05, both at the CCM pre-pull —
+    # the first task that pushes a fresh external blob to the mirror).
+    # The existing per-task retries don't help: each retry re-pulls then
+    # re-pushes, and if Quay is still racy after delay seconds it 405s again.
+    #
+    # Gate here: request a token WITH PUSH SCOPE in a loop until Quay issues
+    # a valid (>50-char) JWT.  Once push-scope tokens mint cleanly, the
+    # subsequent push tasks succeed first try.  ~10s when already ready;
+    # up to 5 min on a cold Quay.  Only meaningful on fresh path (after
+    # mirror-registry install); on snapshot-restore Quay is already warm
+    # but the probe is a cheap no-op so we run it unconditionally.
+    - name: Wait for Quay token endpoint to mint push-scope tokens
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -uo pipefail
+        export HOME=/root
+        REG={{ mirror_private_ip }}:8443
+        CREDS=$(jq -r '.auths["'"$REG"'"].auth' /root/.docker/config.json | base64 -d)
+        for i in $(seq 1 30); do
+          TOKEN=$(curl -ks -u "$CREDS" \
+            "https://$REG/v2/auth?service=$REG&scope=repository:probe/readiness:pull,push" \
+            | jq -r '.token // empty' 2>/dev/null)
+          if [ -n "$TOKEN" ] && [ "${#TOKEN}" -gt 50 ]; then
+            echo "Quay push-scope token OK after $((i*10))s"
+            exit 0
+          fi
+          sleep 10
+        done
+        echo "Quay never minted a push-scope token after 300s" >&2
+        exit 1
+        REMOTE
+      register: _quay_push_ready
+      retries: 3
+      delay: 20
+      until: _quay_push_ready.rc == 0
+      changed_when: false
+
     # Refresh the OSS-side tag-mapping.tsv first — covers two cases:
     #   - build-mirror-tarball.sh was an older version that didn't write it
     #   - AI rotated commit-tags since the last build (happens every few days)
