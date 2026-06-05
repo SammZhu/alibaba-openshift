@@ -34,24 +34,22 @@
              else (lookup('password', '/dev/null length=20 chars=ascii_letters,digits')) }}
       no_log: true
 
-    # ─── Snapshot fast-path restore ────────────────────────────────────────────
-    # If state.yml carries mirror_snapshot_system_id + mirror_snapshot_data_id
-    # (written by 05-verify-mirror.yml's snapshot step), use them to restore
-    # the mirror ECS:
-    #   - system disk: first CreateImage to convert the vda snapshot into a
-    #     custom ECS image (ROS's ALIYUN::ECS::Instance does not accept
-    #     SystemDiskSnapshotId directly), then pass the resulting ImageId
-    #     through the MirrorOverrideImageId stack parameter.
-    #   - data disk: pass the snapshot ID via MirrorDataDiskSnapshotId; ROS
-    #     wires it into DiskMappings.SnapshotId natively.
-    # No snapshot → fall through to the legacy empty-disk + cloud-init
-    # bootstrap + full Phase 04 import path.
+    # ─── Snapshot fast-path restore (P3-FIX.9: vdb-only) ────────────────────────
+    # All Quay persistent state now lives on the vdb data disk (image blobs,
+    # config, AND — via the relocated podman graphroot — the container images +
+    # the pg-storage catalog DB).  So a restore needs ONLY the data-disk
+    # snapshot: the mirror ECS launches from the STOCK image (no CreateImage,
+    # no system snapshot, no sysprep) and cloud-init mounts the restored vdb,
+    # rewires storage.conf, and starts Quay from the stashed systemd units.
+    #   - data disk: pass mirror_snapshot_data_id via MirrorDataDiskSnapshotId;
+    #     ROS wires it into DiskMappings.SnapshotId natively.
+    # No snapshot → fall through to the empty-disk + cloud-init bootstrap +
+    # full Phase 04 import path.  See docs/mirror-vdb-persistence.md.
     # Force the slow path: -e mirror_restore_from_snapshot=false
-    - name: Decide whether to take the snapshot-restore fast-path (state has IDs?)
+    - name: Decide whether to take the snapshot-restore fast-path (state has data snapshot?)
       ansible.builtin.set_fact:
         _mirror_restore_from_snapshot: >-
           {{ (mirror_restore_from_snapshot | default(true) | bool)
-             and (mirror_snapshot_system_id | default('') | length > 0)
              and (mirror_snapshot_data_id   | default('') | length > 0) }}
 
     # Defensive: a snapshot ID in state.yml does not guarantee the snapshot
@@ -62,7 +60,7 @@
     # In either case CreateImage --SnapshotId hits InvalidSnapshotId.NotFound
     # → 03 fails.  Run a defensive DescribeSnapshots to confirm both
     # snapshots are alive; otherwise downgrade to the fresh-path.
-    - name: (fast-path) verify system + data snapshots still exist in cloud
+    - name: (fast-path) verify data snapshot still exists in cloud
       ansible.builtin.command:
         argv:
           - aliyun
@@ -71,7 +69,7 @@
           - --RegionId
           - "{{ region }}"
           - --SnapshotIds
-          - '["{{ mirror_snapshot_system_id }}","{{ mirror_snapshot_data_id }}"]'
+          - '["{{ mirror_snapshot_data_id }}"]'
           - --profile
           - "{{ aliyun_profile }}"
       register: _snap_verify
@@ -79,20 +77,18 @@
       failed_when: false
       when: _mirror_restore_from_snapshot
 
-    - name: (fast-path) downgrade to fresh-path when cloud snapshots are missing
+    - name: (fast-path) downgrade to fresh-path when cloud snapshot is missing
       ansible.builtin.set_fact:
         _mirror_restore_from_snapshot: false
         _snapshot_missing_reason: >-
-          Snapshot IDs in state.yml are missing from the cloud ({{ _snap_found_count }}/2 found).
-          Likely causes: cascade from 99 -e delete_mirror_snapshots=true, or
-          manual cleanup in the console.  Falling back to fresh bring-up;
-          the next 05 will recreate the snapshots.
-      vars:
-        _snap_found_count: "{{ (_snap_verify.stdout | default('{}') | from_json).Snapshots.Snapshot | default([]) | length }}"
+          Data snapshot {{ mirror_snapshot_data_id }} in state.yml is missing from
+          the cloud.  Likely causes: cascade from 99 -e delete_mirror_snapshots=true,
+          or manual cleanup in the console.  Falling back to fresh bring-up;
+          the next 05 will recreate the snapshot.
       when:
         - _mirror_restore_from_snapshot
         - _snap_verify.rc == 0
-        - ((_snap_verify.stdout | from_json).Snapshots.Snapshot | default([]) | length) < 2
+        - ((_snap_verify.stdout | from_json).Snapshots.Snapshot | default([]) | length) < 1
 
     # P3-COST.5: pick mirror_instance_type based on whether this run will
     # actually run oc-mirror v2 d2m import (fresh path) or skip it
@@ -124,95 +120,23 @@
       ansible.builtin.debug:
         msg: |
           {% if _mirror_restore_from_snapshot %}
-          OK: snapshots present — taking fast-path to restore mirror ECS:
-              system snapshot : {{ mirror_snapshot_system_id }}
-              data   snapshot : {{ mirror_snapshot_data_id }}
-            (Will first convert the system snapshot into a custom image,
-             then boot ECS from it.  Once ECS is up, Quay is already ready;
-             Phase 04's "already prepared" check skips the whole
-             download/install/import flow.)
+          OK: data snapshot present — taking vdb-only fast-path to restore mirror ECS:
+              data snapshot : {{ mirror_snapshot_data_id }}
+            (ECS boots from the STOCK image; the restored vdb carries all Quay
+             state — blobs, config, container images, and the pg catalog DB —
+             so cloud-init rewires podman's graphroot to vdb and starts Quay
+             from the stashed systemd units.  Phase 04's "already prepared"
+             health gate then skips the whole download/install/import flow.)
           {% else %}
           → Taking fresh bring-up path{% if _snapshot_missing_reason is defined %} (auto-downgraded):
             {{ _snapshot_missing_reason }}{% else %} (no snapshot, or explicitly disabled){% endif %}.
             Phase 04 will execute the full download tarball + install Quay + oc-mirror import.
           {% endif %}
 
-    - name: (fast-path) check whether a same-named custom image already exists — idempotency, skip repeat CreateImage
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - ecs
-          - DescribeImages
-          - --RegionId
-          - "{{ region }}"
-          - --ImageName
-          - "{{ cluster_name }}-mirror-system-from-snap"
-          - --ImageOwnerAlias
-          - self
-          - --profile
-          - "{{ aliyun_profile }}"
-      register: _existing_image_query
-      when: _mirror_restore_from_snapshot
-      changed_when: false
-
-    - name: (fast-path) record existing image id (if any)
-      ansible.builtin.set_fact:
-        _existing_image_id: >-
-          {{ ((_existing_image_query.stdout | default('{}') | from_json).Images.Image
-              | default([])
-              | selectattr('Status','equalto','Available')
-              | list | map(attribute='ImageId') | first) | default('') }}
-      when: _mirror_restore_from_snapshot
-
-    - name: (fast-path) create custom image from system snapshot (only if not already present)
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - ecs
-          - CreateImage
-          - --RegionId
-          - "{{ region }}"
-          - --SnapshotId
-          - "{{ mirror_snapshot_system_id }}"
-          - --ImageName
-          - "{{ cluster_name }}-mirror-system-from-snap"
-          - --Description
-          - "Built from mirror-system snapshot for fast-path restore"
-          - --profile
-          - "{{ aliyun_profile }}"
-      register: _create_image_result
-      when:
-        - _mirror_restore_from_snapshot
-        - _existing_image_id | length == 0
-
-    - name: (fast-path) extract new image id
-      ansible.builtin.set_fact:
-        _mirror_override_image_id: >-
-          {{ _existing_image_id
-             if (_existing_image_id | length > 0)
-             else (_create_image_result.stdout | from_json).ImageId }}
-      when: _mirror_restore_from_snapshot
-
-    - name: (fast-path) wait for custom image to reach Available (up to 15 min)
-      ansible.builtin.command:
-        argv:
-          - aliyun
-          - ecs
-          - DescribeImages
-          - --RegionId
-          - "{{ region }}"
-          - --ImageId
-          - "{{ _mirror_override_image_id }}"
-          - --profile
-          - "{{ aliyun_profile }}"
-      register: _image_poll
-      retries: 30
-      delay: 30
-      until: >-
-        ((_image_poll.stdout | from_json).Images.Image
-         | default([]) | selectattr('Status','equalto','Available') | list | length) == 1
-      when: _mirror_restore_from_snapshot
-      changed_when: false
+    # P3-FIX.9: the CreateImage-from-system-snapshot machinery is gone.  The
+    # restore no longer needs a custom system image — vda is always the stock
+    # image and 100% of Quay state rides the vdb data snapshot.  MirrorOverride-
+    # ImageId is therefore always empty (ROS uses the auto-discovered RHEL image).
 
     - name: Read SSH public key
       ansible.builtin.slurp:
@@ -259,9 +183,10 @@
             ParameterValue: "{{ _effective_mirror_type }}"
           - ParameterKey: MirrorDataDiskSize
             ParameterValue: "{{ mirror_data_disk_size | string }}"
-          # Populated only on the fast-path; empty string = ROS uses default blank disk + auto-discovered image.
+          # P3-FIX.9: always empty — vda is always the stock auto-discovered
+          # image; all restore state rides MirrorDataDiskSnapshotId (vdb).
           - ParameterKey: MirrorOverrideImageId
-            ParameterValue: "{{ _mirror_override_image_id | default('') }}"
+            ParameterValue: ""
           - ParameterKey: MirrorDataDiskSnapshotId
             ParameterValue: "{{ mirror_snapshot_data_id if _mirror_restore_from_snapshot else '' }}"
 

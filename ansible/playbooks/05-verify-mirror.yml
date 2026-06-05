@@ -151,10 +151,9 @@
     # Skip:    -e mirror_snapshot_enabled=false
     # Rebuild: see docs/SNAPSHOT.md (lifecycle, fast-path, mutex rules,
     #          recovery scenarios)
-    - name: Snapshot the mirror ECS's two disks (vda + vdb)
+    - name: Snapshot the mirror ECS's data disk (vdb only — P3-FIX.9)
       when: mirror_snapshot_enabled | default(true) | bool
       vars:
-        _snap_system_name: "{{ cluster_name }}-mirror-system"
         _snap_data_name:   "{{ cluster_name }}-mirror-data"
         _ssh_to_mirror: >-
           ssh -i {{ ssh_priv_key_file }}
@@ -200,7 +199,7 @@
         # playbook.  argv is a list passed directly to subprocess — zero
         # tokenization, bulletproof.
         # Same template pattern as the repo_probes task at line 64 of this file.
-        - name: Pre-snapshot strict sanity — vda mirror-registry filesystem integrity
+        - name: Pre-snapshot strict sanity — vdb carries ALL Quay state (P3-FIX.9)
           ansible.builtin.command:
             argv:
               - ssh
@@ -215,19 +214,26 @@
               - -o
               - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
               - "root@{{ mirror_private_ip }}"
-              # Avoid bash array ${#arr[@]} — Jinja2 treats `{#` as the
-              # start of a comment ("Missing end of comment tag").
-              # Use a counter + plain echo instead.
+              # P3-FIX.9: everything Quay needs to restore now lives on vdb
+              # (/var/lib/quay-storage).  Verify the four pillars are present
+              # BEFORE freezing the snapshot, so we never bake a snapshot that
+              # restores to a dead Quay:
+              #   1) datastorage                         — image blobs
+              #   2) containers/storage/volumes/pg-storage — Postgres catalog DB
+              #      (relocated here via storage.conf graphroot)
+              #   3) systemd/quay-{app,postgres,redis,pod}.service — stashed units
+              #      (cloud-init copies these back + enable --now on restore)
+              #   4) mirror-ready                        — fast-path marker
+              # Avoid bash array ${#arr[@]} — Jinja2 treats `{#` as a comment.
               - >-
                 set -e;
                 ERRCT=0;
-                [ -x /opt/mirror-registry ] || { echo "MISSING: /opt/mirror-registry"; ERRCT=$((ERRCT+1)); };
-                [ -x /usr/local/bin/oc-mirror ] || { echo "MISSING: /usr/local/bin/oc-mirror"; ERRCT=$((ERRCT+1)); };
-                for u in quay-app quay-postgres quay-redis quay-pod; do [ -f /etc/systemd/system/${u}.service ] || { echo "MISSING: systemd unit ${u}.service"; ERRCT=$((ERRCT+1)); }; done;
-                [ -d /var/lib/containers/storage/volumes/pg-storage ] || { echo "MISSING: pg-storage podman volume"; ERRCT=$((ERRCT+1)); };
-                [ -s /root/.docker/config.json ] || { echo "MISSING: /root/.docker/config.json"; ERRCT=$((ERRCT+1)); };
-                [ "$ERRCT" -eq 0 ] || { echo "FATAL: $ERRCT vda mirror-registry files missing"; exit 1; };
-                echo "OK: vda filesystem sanity passed"
+                [ -d /var/lib/quay-storage/datastorage ] || { echo "MISSING: datastorage (image blobs)"; ERRCT=$((ERRCT+1)); };
+                [ -d /var/lib/quay-storage/containers/storage/volumes/pg-storage ] || { echo "MISSING: pg-storage volume on vdb (catalog DB)"; ERRCT=$((ERRCT+1)); };
+                for u in quay-app quay-postgres quay-redis quay-pod; do [ -f /var/lib/quay-storage/systemd/${u}.service ] || { echo "MISSING: stashed unit ${u}.service on vdb"; ERRCT=$((ERRCT+1)); }; done;
+                [ -f /var/lib/quay-storage/mirror-ready ] || { echo "MISSING: mirror-ready marker"; ERRCT=$((ERRCT+1)); };
+                [ "$ERRCT" -eq 0 ] || { echo "FATAL: $ERRCT vdb mirror state files missing — snapshot would not restore a working Quay"; exit 1; };
+                echo "OK: vdb carries datastorage + pg-storage + stashed units + marker"
           register: _snap_sanity
           changed_when: false
 
@@ -281,9 +287,8 @@
           register: _disk_lookup
           changed_when: false
 
-        - name: Extract DiskId of vda / vdb
+        - name: Extract DiskId of vdb (data disk)
           ansible.builtin.set_fact:
-            _vda_disk_id: "{{ ((_disk_lookup.stdout | from_json).Disks.Disk | selectattr('Type','equalto','system') | first).DiskId }}"
             _vdb_disk_id: "{{ ((_disk_lookup.stdout | from_json).Disks.Disk | selectattr('Type','equalto','data')   | first).DiskId }}"
 
         # P3-COST.6: snapshot fast-path INVARIANT
@@ -330,7 +335,6 @@
           register: _old_snaps_query
           changed_when: false
           loop:
-            - "{{ _snap_system_name }}"
             - "{{ _snap_data_name }}"
 
         - name: Collect old snapshot ID list
@@ -344,25 +348,7 @@
                  | map(attribute='SnapshotId')
                  | list }}
 
-        - name: Create snapshot of system disk (vda)
-          ansible.builtin.command:
-            argv:
-              - aliyun
-              - ecs
-              - CreateSnapshot
-              - --RegionId
-              - "{{ region }}"
-              - --DiskId
-              - "{{ _vda_disk_id }}"
-              - --SnapshotName
-              - "{{ _snap_system_name }}"
-              - --Description
-              - "Phase 05 verified mirror — system disk (Postgres + cert + Quay container layers)"
-              - --profile
-              - "{{ aliyun_profile }}"
-          register: _create_vda_snap
-
-        - name: Create snapshot of data disk (vdb)
+        - name: Create snapshot of data disk (vdb — now carries ALL Quay state)
           ansible.builtin.command:
             argv:
               - aliyun
@@ -375,14 +361,13 @@
               - --SnapshotName
               - "{{ _snap_data_name }}"
               - --Description
-              - "Phase 05 verified mirror — data disk (image blob storage)"
+              - "Phase 05 verified mirror — data disk (blobs + pg catalog + container images + units)"
               - --profile
               - "{{ aliyun_profile }}"
           register: _create_vdb_snap
 
-        - name: Extract new snapshot IDs
+        - name: Extract new snapshot ID
           ansible.builtin.set_fact:
-            _new_vda_snap_id: "{{ (_create_vda_snap.stdout | from_json).SnapshotId }}"
             _new_vdb_snap_id: "{{ (_create_vdb_snap.stdout | from_json).SnapshotId }}"
 
       # always block: no matter where the above block fails, bring Quay
@@ -412,10 +397,8 @@
     - name: Post-snapshot handling (wait + overwrite + save state)
       when:
         - mirror_snapshot_enabled | default(true) | bool
-        - _new_vda_snap_id is defined
         - _new_vdb_snap_id is defined
       vars:
-        _snap_system_name: "{{ cluster_name }}-mirror-system"
         _snap_data_name:   "{{ cluster_name }}-mirror-data"
         # vars from the first block are NOT inherited here — redeclare,
         # otherwise the post-snapshot verify cleanup tasks below using
@@ -426,7 +409,7 @@
           -o "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
           root@{{ mirror_private_ip }}
       block:
-        - name: Wait until both snapshots reach Progress=100% in OSS (up to 30 min)
+        - name: Wait until the data snapshot reaches Progress=100% in OSS (up to 30 min)
           ansible.builtin.command:
             argv:
               - aliyun
@@ -435,7 +418,7 @@
               - --RegionId
               - "{{ region }}"
               - --SnapshotIds
-              - '["{{ _new_vda_snap_id }}","{{ _new_vdb_snap_id }}"]'
+              - '["{{ _new_vdb_snap_id }}"]'
               - --profile
               - "{{ aliyun_profile }}"
           register: _snap_progress
@@ -444,7 +427,7 @@
           until: >-
             (_snap_progress.stdout | from_json).Snapshots.Snapshot
             | selectattr('Status','equalto','accomplished')
-            | list | length == 2
+            | list | length == 1
           changed_when: false
 
         # ── Snapshot content verification (trust-but-verify) ──────────────────
@@ -480,7 +463,7 @@
               ansible.builtin.set_fact:
                 _verify_disk_id: ''
 
-            - name: CreateDisk from new system snapshot (temp verification disk)
+            - name: CreateDisk from new data snapshot (temp verification disk)
               ansible.builtin.command:
                 argv:
                   - aliyun
@@ -491,7 +474,7 @@
                   - --ZoneId
                   - "{{ zone }}"
                   - --SnapshotId
-                  - "{{ _new_vda_snap_id }}"
+                  - "{{ _new_vdb_snap_id }}"
                   - --DiskCategory
                   - cloud_essd
                   - --DiskName
@@ -546,7 +529,7 @@
             # part 3 (lsblk on live ECS shows vda3 mounted as root).
             # Use command:argv: (NOT shell:) to bypass split_args tokenizer
             # which trips on the bash array + ${} + = combinations.
-            - name: Mount new vdc3 and check filesystem tree
+            - name: Mount new vdc (whole-disk XFS) and check vdb filesystem tree
               ansible.builtin.command:
                 argv:
                   - ssh
@@ -561,31 +544,31 @@
                   - -o
                   - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
                   - "root@{{ mirror_private_ip }}"
-                  # Avoid ${#arr[@]} for the same reason ({# triggers Jinja's comment parser).
+                  # P3-FIX.9: vdb is a WHOLE-DISK XFS (cloud-init mkfs.xfs on
+                  # /dev/vdb, no partition table) — mount /dev/vdc directly, not
+                  # vdc3.  Verify the vdb tree carries everything a restore needs.
+                  # Avoid ${#arr[@]} ({# triggers Jinja's comment parser).
                   - >-
                     set -e;
                     for i in $(seq 1 30); do [ -b /dev/vdc ] && break; sleep 2; done;
                     [ -b /dev/vdc ] || { echo "FATAL: /dev/vdc not appearing"; lsblk; exit 1; };
-                    for i in $(seq 1 10); do [ -b /dev/vdc3 ] && break; partprobe /dev/vdc 2>/dev/null || true; sleep 2; done;
-                    [ -b /dev/vdc3 ] || { echo "FATAL: /dev/vdc3 missing (partition table?)"; lsblk /dev/vdc; exit 1; };
                     mkdir -p /mnt/snap-verify;
-                    mount -o ro /dev/vdc3 /mnt/snap-verify;
+                    mount -o ro /dev/vdc /mnt/snap-verify;
                     trap 'umount /mnt/snap-verify 2>/dev/null || true' EXIT;
                     M=/mnt/snap-verify;
                     ERRCT=0;
-                    [ -x $M/opt/mirror-registry ] || { echo "MISSING: /opt/mirror-registry"; ERRCT=$((ERRCT+1)); };
-                    [ -x $M/usr/local/bin/oc-mirror ] || { echo "MISSING: /usr/local/bin/oc-mirror"; ERRCT=$((ERRCT+1)); };
-                    for u in quay-app quay-postgres quay-redis quay-pod; do [ -f $M/etc/systemd/system/${u}.service ] || { echo "MISSING: systemd unit ${u}.service"; ERRCT=$((ERRCT+1)); }; done;
-                    [ -d $M/var/lib/containers/storage/volumes/pg-storage ] || { echo "MISSING: pg-storage podman volume"; ERRCT=$((ERRCT+1)); };
-                    [ -s $M/root/.docker/config.json ] || { echo "MISSING: /root/.docker/config.json"; ERRCT=$((ERRCT+1)); };
-                    PG_FILES=$(find $M/var/lib/containers/storage/volumes/pg-storage -type f 2>/dev/null | wc -l);
+                    [ -d $M/datastorage ] || { echo "MISSING: datastorage (image blobs)"; ERRCT=$((ERRCT+1)); };
+                    [ -d $M/containers/storage/volumes/pg-storage ] || { echo "MISSING: pg-storage volume (catalog DB)"; ERRCT=$((ERRCT+1)); };
+                    for u in quay-app quay-postgres quay-redis quay-pod; do [ -f $M/systemd/${u}.service ] || { echo "MISSING: stashed unit ${u}.service"; ERRCT=$((ERRCT+1)); }; done;
+                    [ -f $M/mirror-ready ] || { echo "MISSING: mirror-ready marker"; ERRCT=$((ERRCT+1)); };
+                    PG_FILES=$(find $M/containers/storage/volumes/pg-storage -type f 2>/dev/null | wc -l);
                     [ "$PG_FILES" -ge 50 ] || { echo "MISSING: pg-storage file count $PG_FILES (suspect empty Postgres)"; ERRCT=$((ERRCT+1)); };
                     [ "$ERRCT" -eq 0 ] || { echo "FATAL: $ERRCT problems with snapshot content (E2E verification failed)"; exit 1; };
-                    echo "OK: new system snapshot E2E verified (vdc3 mount ro, key files present, pg-storage file count=$PG_FILES)"
+                    echo "OK: new vdb snapshot E2E verified (vdc mount ro, blobs + pg-storage + units + marker present, pg file count=$PG_FILES)"
               changed_when: false
 
           rescue:
-            - name: Verification failed — delete the just-taken system + data snapshots (leave no half-done state)
+            - name: Verification failed — delete the just-taken data snapshot (leave no half-done state)
               ansible.builtin.command:
                 argv:
                   - aliyun
@@ -594,26 +577,23 @@
                   - --RegionId
                   - "{{ region }}"
                   - --SnapshotId
-                  - "{{ item }}"
+                  - "{{ _new_vdb_snap_id }}"
                   - --profile
                   - "{{ aliyun_profile }}"
-              loop:
-                - "{{ _new_vda_snap_id }}"
-                - "{{ _new_vdb_snap_id }}"
               failed_when: false
 
-            - name: Abort — old snapshots are preserved; re-run 05 to retake
+            - name: Abort — old snapshot is preserved; re-run 05 to retake
               ansible.builtin.fail:
                 msg: |
-                  End-to-end snapshot verification failed.  The two new
-                  snapshots just taken have been deleted.
-                  - The OLD snapshots (from the previous 05) are untouched
-                    and can still be used to fast-path restore the mirror.
+                  End-to-end snapshot verification failed.  The new data
+                  snapshot just taken has been deleted.
+                  - The OLD snapshot (from the previous 05) is untouched and
+                    can still be used to fast-path restore the mirror.
                   - state.yml was NOT updated, so the next 03 will still
-                    use the old IDs.
-                  Where to look: does /opt/mirror-registry actually exist
-                  on the mirror ECS?  Does the Quay container really have
-                  Postgres data?  See the MISSING errors above.
+                    use the old ID.
+                  Where to look: does the vdb tree carry datastorage,
+                  containers/storage/volumes/pg-storage, systemd/quay-*.service,
+                  and mirror-ready?  See the MISSING errors above.
 
           always:
             # Temp-disk cleanup — runs on both failure and success to avoid
@@ -723,25 +703,30 @@
               - --profile
               - "{{ aliyun_profile }}"
           loop: "{{ _old_snap_ids }}"
-          when: item not in [_new_vda_snap_id, _new_vdb_snap_id]
+          when: item != _new_vdb_snap_id
           register: _delete_old
           failed_when: false
           changed_when: _delete_old.rc == 0
 
-        - name: Save snapshot IDs to state.yml
+        - name: Save snapshot ID to state.yml (P3-FIX.9 — vdb only; retire system id)
           ansible.builtin.include_tasks: ../tasks/save_state.yml
           vars:
             new_state:
-              mirror_snapshot_system_id: "{{ _new_vda_snap_id }}"
               mirror_snapshot_data_id:   "{{ _new_vdb_snap_id }}"
+              # P3-FIX.9: there is no longer a system-disk snapshot; clear any
+              # stale id left in state.yml from the old two-disk layout so 03's
+              # fast-path decision never references it.
+              mirror_snapshot_system_id: ""
 
         - name: Snapshot complete summary
           ansible.builtin.debug:
             msg: |
-              OK: mirror ECS two-disk snapshots ready (overwrite-in-place, old ones cleaned)
-                system (vda) : {{ _new_vda_snap_id }}  — "{{ _snap_system_name }}"
-                data   (vdb) : {{ _new_vdb_snap_id }}  — "{{ _snap_data_name }}"
-              Recorded in state.yml (mirror_snapshot_system_id / mirror_snapshot_data_id)
+              OK: mirror ECS vdb snapshot ready (overwrite-in-place, old one cleaned)
+                data (vdb) : {{ _new_vdb_snap_id }}  — "{{ _snap_data_name }}"
+              vdb now carries ALL Quay state (blobs + pg catalog + container
+              images + stashed units), so this single snapshot fully restores
+              the mirror.  Recorded in state.yml (mirror_snapshot_data_id).
 
-              To rebuild mirror ECS: restore from these two snapshots and
-              skip Phase 04's 1-hour import.  See docs/SNAPSHOT.md.
+              To rebuild mirror ECS: restore from this snapshot onto a stock
+              vda; cloud-init starts Quay from the stashed units — no Phase 04
+              import.  See docs/mirror-vdb-persistence.md.

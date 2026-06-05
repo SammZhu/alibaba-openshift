@@ -600,11 +600,47 @@ Resources:
               echo "/var/lib/quay-storage/swapfile none swap sw 0 0" >> /etc/fstab
             fi
 
-            dnf install -y podman tar curl jq
+            dnf install -y podman tar curl jq policycoreutils-python-utils
             curl -fLO https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz
             tar xzf aliyun-cli-linux-latest-amd64.tgz
             install -m 0755 aliyun /usr/local/bin/
             rm -f aliyun-cli-linux-latest-amd64.tgz aliyun
+
+            # ── P3-FIX.9: converge podman graphroot onto the vdb data disk ──
+            # Quay's container images AND named volumes (incl. the pg-storage
+            # catalog DB) must live on vdb so a vdb-only snapshot captures ALL
+            # Quay state.  Default graphroot is /var/lib/containers/storage on
+            # the root disk (vda) — lost to CreateImage sysprep on restore,
+            # which orphaned the 21 GB of blobs.  Point graphroot at vdb BEFORE
+            # any podman use.  See docs/mirror-vdb-persistence.md.
+            mkdir -p /var/lib/quay-storage/containers/storage
+            mkdir -p /etc/containers
+            cat > /etc/containers/storage.conf <<'STORAGECONF'
+            [storage]
+            driver = "overlay"
+            graphroot = "/var/lib/quay-storage/containers/storage"
+            runroot = "/run/containers/storage"
+            STORAGECONF
+            # SELinux: label the relocated graphroot or containers cannot start.
+            if command -v semanage >/dev/null 2>&1; then
+              semanage fcontext -a -t container_file_t \
+                '/var/lib/quay-storage/containers/storage(/.*)?' 2>/dev/null || true
+            fi
+            restorecon -R /var/lib/quay-storage/containers/storage 2>/dev/null || \
+              chcon -R -t container_file_t /var/lib/quay-storage/containers/storage 2>/dev/null || true
+
+            # ── P3-FIX.9 (Option B): restore fast-path — bring Quay up from
+            # stashed systemd units.  Fresh install (blank vdb) has no stashed
+            # units; Phase 04 installs Quay and stashes them to vdb.  A restore
+            # (vdb from snapshot) already carries the units + graphroot +
+            # catalog on vdb, so start Quay against the existing data — no
+            # re-import.  storage.conf above is already in place.
+            if [ -f /var/lib/quay-storage/systemd/quay-pod.service ]; then
+              echo "$(date -Iseconds) restore path: starting Quay from stashed units"
+              cp /var/lib/quay-storage/systemd/quay-*.service /etc/systemd/system/
+              systemctl daemon-reload
+              systemctl enable --now quay-pod.service || true
+            fi
 
             echo "$(date -Iseconds) BOOTSTRAP_READY" > /var/lib/mirror-bootstrap-ready
             echo "=== $(date -Iseconds) bootstrap complete ==="

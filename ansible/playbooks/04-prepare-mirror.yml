@@ -84,19 +84,59 @@
       when: bootstrap_check.rc | default(0) != 0
 
     # ── Step 2: idempotent check — is mirror already ready? ─────────────────
-    # If /var/lib/quay-storage/mirror-ready exists, all heavy work is done.  Skip to the
-    # AI PATCH step (which is also idempotent).
-    - name: Check if mirror is already fully prepared
+    # Readiness requires BOTH: (a) the /var/lib/quay-storage/mirror-ready marker,
+    # AND (b) Quay actually answering on :8443.
+    #
+    # Why (b) is not optional — snapshot-restore failure mode (P3-FIX):
+    #   The vdb snapshot preserves the image blobs (/var/lib/quay-storage/
+    #   datastorage) and the marker, but Quay's postgres CATALOG DB lives in a
+    #   podman named volume (pg-storage) on the ROOT disk (vda).  Aliyun
+    #   CreateImage runs sysprep on vda during restore and strips the container
+    #   runtime + that volume, so a restored ECS comes up with the marker +
+    #   ~21 GB of ORPHANED blobs but NO running Quay (8443 refused) and no
+    #   catalog.  Trusting the marker alone made 04 skip the heavy path and hit
+    #   the auth sentinel, which then misreported the connection-refused as a
+    #   "password drift" (observed 2026-06-05).  Gating on a real health probe
+    #   makes a half-restored mirror fall through to re-install + re-import
+    #   (rebuilding the catalog from the OSS tarball) instead of shipping a dead
+    #   mirror.  See docs/SNAPSHOT.md.
+    - name: Check if mirror is already fully prepared (marker present AND Quay healthy)
       ansible.builtin.shell: |
-        {{ _ssh_root_mirror }} test -f /var/lib/quay-storage/mirror-ready
+        {{ _ssh_root_mirror }} 'test -f /var/lib/quay-storage/mirror-ready \
+          && curl -ksf https://{{ mirror_private_ip }}:8443/health/instance >/dev/null'
       register: already_ready
       changed_when: false
       failed_when: false
 
     - name: Mirror already ready — skipping heavy work
       ansible.builtin.debug:
-        msg: "mirror-registry is already ready (/var/lib/quay-storage/mirror-ready exists). Skipping install + import + PATCH still runs."
+        msg: "mirror-registry is already ready (marker present and Quay healthy on :8443). Skipping install + import + PATCH still runs."
       when: already_ready.rc == 0
+
+    # Diagnostic: distinguish "never prepared" from "restored but Quay dead".
+    # When the marker IS present yet readiness failed, the snapshot landed the
+    # blobs but not a working Quay (catalog lost to vda sysprep, see above).
+    - name: (diagnostic) Was the marker present even though readiness failed?
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} test -f /var/lib/quay-storage/mirror-ready
+      register: marker_only_check
+      changed_when: false
+      failed_when: false
+      when: already_ready.rc != 0
+
+    - name: Warn — restore landed marker+blobs but Quay catalog was lost (vda sysprep)
+      ansible.builtin.debug:
+        msg: |
+          ⚠  mirror-ready marker is present but Quay is NOT serving on
+             {{ mirror_private_ip }}:8443.  The vdb snapshot preserved the image
+             blobs + marker, but Quay's postgres catalog lived on the root disk
+             and was stripped by CreateImage sysprep on restore — the blobs are
+             orphaned.  This run re-installs Quay and re-imports from the OSS
+             tarball to rebuild the catalog.  Fast-path snapshot restore cannot
+             work until pg data is relocated onto vdb.  See docs/SNAPSHOT.md.
+      when:
+        - already_ready.rc != 0
+        - marker_only_check.rc | default(1) == 0
 
     # P3-COST.6 watchdog: snapshot fast-path is supposed to save ~25 min by
     # restoring a Quay that's already imported.  This only works if the marker
@@ -157,8 +197,10 @@
     - name: Fail fast with actionable message on password drift
       ansible.builtin.fail:
         msg: |
-          Mirror Quay rejected state.yml's mirror_init_password
-          (podman login rc={{ auth_probe.rc }}).
+          Quay is healthy on {{ mirror_private_ip }}:8443 but REJECTED
+          state.yml's mirror_init_password (podman login rc={{ auth_probe.rc }}).
+          Because the readiness gate already confirmed Quay is serving, this is
+          a genuine credential mismatch (HTTP 401), not a connectivity problem.
 
           Most likely cause: snapshot-restore fast-path + a stale password.
           The Quay DB on the data-disk snapshot has the password from
@@ -167,7 +209,9 @@
 
           Recovery:
             1. Confirm 99-teardown.yml has the password-preservation fix
-               (look for: `mirror_init_password: "{{ '' if (delete_mirror_snapshots …`).
+               (the mirror_init_password line that is blanked only when
+               delete_mirror_snapshots is true — so the password is kept
+               whenever the snapshot is kept).
             2. Tear down with snapshots deleted:
                  ansible-playbook playbooks/99-teardown.yml \
                    -e teardown_target=mirror -e delete_mirror_snapshots=true \
@@ -698,6 +742,25 @@
         set -euxo pipefail
         cp /etc/quay-config/ssl.cert /var/lib/mirror-ca.crt
         echo "$(date -Iseconds) READY (import done; CCM/CAPA pre-pull + IDMS PATCH still to run)" > /var/lib/quay-storage/mirror-ready
+        REMOTE
+      when: already_ready.rc != 0
+      changed_when: true
+
+    # ── P3-FIX.9: stash Quay systemd units onto vdb for snapshot-restore ─────
+    # mirror-registry generates reboot-safe units (quay-pod/app/postgres/redis)
+    # in /etc/systemd/system on the ROOT disk (vda).  Copy them onto the vdb
+    # data disk so a future vdb-only snapshot carries them.  On restore the
+    # stock vda has no quay units; mirror-stack cloud-init copies these back and
+    # `enable --now quay-pod` brings Quay up against the restored graphroot
+    # (images + pg-storage catalog now also on vdb) — no re-install, no
+    # re-import.  See docs/mirror-vdb-persistence.md.
+    - name: (P3-FIX.9) Stash Quay systemd units onto vdb for snapshot-restore
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        mkdir -p /var/lib/quay-storage/systemd
+        cp -f /etc/systemd/system/quay-*.service /var/lib/quay-storage/systemd/
+        echo "stashed units:"; ls -1 /var/lib/quay-storage/systemd/
         REMOTE
       when: already_ready.rc != 0
       changed_when: true
