@@ -740,12 +740,10 @@
         set -uo pipefail
         export HOME=/root
         REG={{ mirror_private_ip }}:8443
-        CREDS=$(jq -r '.auths["'"$REG"'"].auth' /root/.docker/config.json | base64 -d)
+        CREDS=$(jq -r .auths[].auth /root/.docker/config.json | base64 -d)
         for i in $(seq 1 30); do
-          TOKEN=$(curl -ks -u "$CREDS" \
-            "https://$REG/v2/auth?service=$REG&scope=repository:probe/readiness:pull,push" \
-            | jq -r '.token // empty' 2>/dev/null)
-          if [ -n "$TOKEN" ] && [ "${#TOKEN}" -gt 50 ]; then
+          TOKEN=$(curl -ks -u "$CREDS" "https://$REG/v2/auth?service=$REG&scope=repository:probe/readiness:pull,push" | jq -r .token)
+          if [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] && [ ${#TOKEN} -gt 50 ]; then
             echo "Quay push-scope token OK after $((i*10))s"
             exit 0
           fi
