@@ -423,6 +423,73 @@
           failed_when: false
           changed_when: true
 
+        # ── Stale same-named mirror snapshot sweep (P3-FIX.7) ──────────────
+        # 05-verify-mirror's "overwrite" dedup CANNOT delete the snapshot the
+        # current mirror ECS was restored FROM, because that snapshot is the
+        # SourceSnapshotId of the live ECS's data disk (error
+        # SnapshotCreatedDisk) or backs the from-snap image.  So on every
+        # restore→rebuild cycle, the OLD source pair survives until the ECS is
+        # gone.  Now that DeleteStack above freed the ECS + disks, those old
+        # snapshots are finally deletable.  Sweep all same-named mirror
+        # snapshots EXCEPT the active pair state.yml points at (unless
+        # delete_mirror_snapshots already removed those above, in which case
+        # there's nothing to preserve).  Observed 2026-06-05: 200 GB old
+        # aliocp1-mirror-data lingered, locked by the live ECS's vdb disk.
+        - name: Stale-sweep — list all same-named mirror snapshots
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DescribeSnapshots
+              - --RegionId
+              - "{{ region }}"
+              - --SnapshotName
+              - "{{ item }}"
+              - --PageSize
+              - "100"
+              - --profile
+              - "{{ aliyun_profile }}"
+          register: _stale_mirror_snaps
+          changed_when: false
+          failed_when: false
+          loop:
+            - "{{ cluster_name }}-mirror-system"
+            - "{{ cluster_name }}-mirror-data"
+
+        - name: Stale-sweep — compute deletable IDs (keep active unless delete_mirror_snapshots)
+          ansible.builtin.set_fact:
+            _stale_mirror_snap_ids: >-
+              {{ _stale_mirror_snaps.results
+                 | map(attribute='stdout') | map('default', '{}', true) | map('from_json')
+                 | map(attribute='Snapshots.Snapshot', default=[]) | flatten
+                 | map(attribute='SnapshotId') | list
+                 | difference(
+                     []
+                     if (delete_mirror_snapshots | default(false) | bool)
+                     else [ mirror_snapshot_system_id | default(''),
+                            mirror_snapshot_data_id   | default('') ]
+                   )
+                 | select | list }}
+
+        - name: Stale-sweep — delete leftover source-locked snapshots
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DeleteSnapshot
+              - --RegionId
+              - "{{ region }}"
+              - --SnapshotId
+              - "{{ item }}"
+              - --profile
+              - "{{ aliyun_profile }}"
+          loop: "{{ _stale_mirror_snap_ids | default([]) }}"
+          loop_control:
+            label: "{{ item }} (stale same-named mirror snapshot)"
+          when: (_stale_mirror_snap_ids | default([])) | length > 0
+          failed_when: false
+          changed_when: true
+
         # ── Orphan SnapshotForImage sweep ──────────────────────────────────
         # The cascade DeleteSnapshot tasks above only catch snapshots backing
         # images we delete in THIS teardown.  Snapshots whose parent image
