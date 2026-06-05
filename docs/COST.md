@@ -3,8 +3,41 @@
 针对该项目在阿里云的实际消费模式，沉淀一份"哪些做法贵 / 哪些不贵 /
 为什么"的速查表，避免后续重复踩费用坑。
 
-最后更新：2026-06-02
-当前月度账单基线（2026-05 实测）：~¥800/月
+最后更新：2026-06-05
+当前月度账单基线（2026-05 实测）：~¥800/月 → P3 优化后目标 ~¥250-350/月
+
+---
+
+## 0. 2026-06-05 全量成本审计结论
+
+完整扫了一遍云端资源（ECS / image / snapshot / disk / EIP / NAT / SLB / OSS），
+结论：**P3 优化后浪费点基本归零**。对照月初 ¥848 画像：
+
+| 月初浪费点 | 现状 | 修复 |
+|:-|:-|:-|
+| OSS 公网下行 ¥150 | 走 internal endpoint；fast-path 连 download 都 skip | #35 + #45 |
+| ECS 超配（3×g7.xlarge master）| SNO 单节点 + mirror 用 g7.large | #36 + #39 |
+| snapshot 累积（曾 17 个孤儿）| 清零 + teardown 自动 dedup/cascade/sweep | #38 #44 #47 |
+| NAT base 费 | PayByLcu，闲时几乎免费 | 既有设计 |
+
+审计当时唯一的"非零"项：mirror 快照 ×2 对（旧对被 live ECS 磁盘锁住，
+~¥1.3/天临时），属 #47 已知的"锁定中"状态，下次 mirror teardown 自动清。
+**不是漏洞。**
+
+### ⚠️ 关键运维习惯：teardown 用 `teardown_target=both`
+
+mirror 快照的"旧对"只有在 **mirror ECS 被删之后**才能删（aliyun
+`SnapshotCreatedDisk` 锁：被磁盘引用的源快照删不掉）。所以：
+
+- `teardown_target=cluster`（只删集群，留 mirror）→ 旧快照对一直锁着，
+  每次 restore-rebuild 多攒一对（~¥1.3/天/对累积）
+- `teardown_target=both`（删集群 + mirror）→ #47 stale-sweep 在删 ECS
+  后触发 → 旧快照清掉 → 名下只剩 active 对（或 0）
+
+**结论：日常用 `teardown_target=both`**，除非你明确要保 mirror ECS 在线
+（如连续多次只重建集群）。保 mirror 省 ~10 min 重建时间，但代价是
+快照累积 + mirror ECS 全程计费（g7.large ¥0.54/h）。权衡：超过 1 天不
+重建就该 both。
 
 ---
 
@@ -165,3 +198,9 @@ aliyun bssopenapi CreateCostUnit \
 | 2026-06-02 | OSS endpoint dual-mode (commit 4f2db64) | ~¥150-200/月 |
 | 2026-06-02 | SNO ROS 模板 + cluster_topology 开关 (commit d45f16a) | ~¥150/月 dev 集群 |
 | 2026-06-02 | 月报脚本 + 预算告警文档（task #37）| 防失控 |
+| 2026-06-04 | snapshot 去重 + image cascade 删除 (#38) | ~¥30/月 |
+| 2026-06-04 | mirror_instance_type 按 flow 自适应 g7.large (#39) | ~¥135-194/月 |
+| 2026-06-05 | snapshot fast-path marker→vdb 真生效 (#40 #45) | ~25 min/install |
+| 2026-06-05 | 99-teardown post-cleanup sanity asserts (#44) | 防泄漏 |
+| 2026-06-05 | teardown orphan sweep PageSize + 源锁定快照补清 (#47) | ~¥38/月 |
+| 2026-06-05 | 手工清 18 个历史孤儿快照 + 1 个 image backing 孤儿 | -¥40/月 一次性 |
