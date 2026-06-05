@@ -703,10 +703,17 @@
         # false-positive.  Observed 2026-06-05: teardown_target=cluster left
         # openshift-aliocp1-iso image + its backing snapshot (correctly
         # preserved), but the assert flagged it as an orphan.
+        # NOTE: must mirror the EXACT gate of the "Delete Assisted cluster +
+        # infra-env + ECS image" block.  preserves_ai=true KEEPS the ISO image
+        # (and its backing SnapshotForImage), so for mirror/both teardowns the
+        # image is deleted ONLY when NOT preserving AI.  Omitting preserves_ai
+        # here false-positives the orphan assert on a snapshot-restore teardown
+        # (observed 2026-06-06: target=both preserves_ai=true delete_snapshots=
+        # false correctly kept openshift-aliocp1-iso + its snapshot).
         - name: Audit — derive whether ECS images were deleted this teardown
           ansible.builtin.set_fact:
             _images_deleted: >-
-              {{ (teardown_target in ['mirror', 'both'])
+              {{ (teardown_target in ['mirror', 'both'] and not (teardown_preserves_ai | default(false) | bool))
                  or (teardown_target == 'cluster' and (cluster_includes_ai | default(false) | bool)) }}
 
         - name: Audit — derive expected counts per target / flags
