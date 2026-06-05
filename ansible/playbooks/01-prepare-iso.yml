@@ -104,11 +104,80 @@
         - _ai_stale_install | default(false) | bool
         - infra_env_id is defined and infra_env_id | length > 0
 
-    - name: Clear stale cluster_id + infra_env_id facts after reset
+    # P3-FIX.8: a NEW infra-env will be created below, which bakes a NEW
+    # --infra-env-id into the discovery ISO ignition.  The ECS custom image
+    # (openshift-<cluster>-iso) is ImportImage'd FROM that ISO, so it carries
+    # the OLD infra-env-id and must be rebuilt too.  Clearing ecs_image_id +
+    # iso_path forces 02-import-image to re-import a fresh image; otherwise
+    # 02 reuses the same-named stale image, the SNO master boots from it, and
+    # its agent.service registers against the deleted infra-env → AI shows
+    # hosts=0 and 07 polls forever.  Observed 2026-06-05.
+    - name: Delete stale ECS custom image before clearing its id (cascade backing snap)
+      when:
+        - _ai_stale_install | default(false) | bool
+        - ecs_image_id is defined and ecs_image_id | length > 0
+      block:
+        - name: Look up stale ECS image backing snapshot
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DescribeImages
+              - --RegionId
+              - "{{ region }}"
+              - --ImageId
+              - "{{ ecs_image_id }}"
+              - --profile
+              - "{{ aliyun_profile }}"
+          register: _stale_img_desc
+          changed_when: false
+          failed_when: false
+
+        - name: Delete stale ECS image
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DeleteImage
+              - --RegionId
+              - "{{ region }}"
+              - --ImageId
+              - "{{ ecs_image_id }}"
+              - --Force
+              - "true"
+              - --profile
+              - "{{ aliyun_profile }}"
+          failed_when: false
+          changed_when: true
+
+        - name: Cascade-delete the stale image's backing snapshot
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DeleteSnapshot
+              - --RegionId
+              - "{{ region }}"
+              - --SnapshotId
+              - "{{ item }}"
+              - --profile
+              - "{{ aliyun_profile }}"
+          loop: >-
+            {{ (_stale_img_desc.stdout | default('{}') | from_json).Images.Image | default([])
+               | map(attribute='DiskDeviceMappings') | map(attribute='DiskDeviceMapping')
+               | flatten | map(attribute='SnapshotId') | list }}
+          loop_control:
+            label: "{{ item }} (backing stale {{ ecs_image_id }})"
+          failed_when: false
+          changed_when: true
+
+    - name: Clear stale cluster_id + infra_env_id + ecs_image_id facts after reset
       ansible.builtin.set_fact:
         cluster_id: ''
         infra_env_id: ''
         dynamic_manifest_file: ''
+        ecs_image_id: ''
+        iso_path: ''
       when: _ai_stale_install | default(false) | bool
 
     # ── Adopt existing cluster by name to avoid duplicates ─────────────────
@@ -585,6 +654,60 @@
         path: "{{ iso_path }}"
       register: iso_stat
       when: _stale_iso_deleted is changed
+
+    # P3-FIX.8: a stale ISO means any ECS image ImportImage'd from it is also
+    # stale (carries the wrong baked infra-env-id).  02 adopts by image NAME
+    # regardless of ecs_image_id, so we must DELETE the same-named cloud image
+    # here — otherwise 02 re-adopts the stale one and the SNO master's agent
+    # registers against the wrong infra-env (AI hosts=0, 07 polls forever).
+    - name: Delete same-named stale ECS image when ISO was stale
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeImages
+          - --RegionId
+          - "{{ region }}"
+          - --ImageName
+          - "openshift-{{ cluster_name }}-iso"
+          - --ImageOwnerAlias
+          - self
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _stale_iso_img_lookup
+      when: _stale_iso_deleted is changed
+      changed_when: false
+      failed_when: false
+
+    - name: Delete stale ECS image(s) + clear id (force 02 re-import)
+      when:
+        - _stale_iso_deleted is changed
+        - _stale_iso_img_lookup is defined
+        - (_stale_iso_img_lookup.stdout | default('{}') | from_json).Images.Image | default([]) | length > 0
+      block:
+        - name: DeleteImage for each stale same-named image
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DeleteImage
+              - --RegionId
+              - "{{ region }}"
+              - --ImageId
+              - "{{ item.ImageId }}"
+              - --Force
+              - "true"
+              - --profile
+              - "{{ aliyun_profile }}"
+          loop: "{{ (_stale_iso_img_lookup.stdout | from_json).Images.Image | default([]) }}"
+          loop_control:
+            label: "{{ item.ImageId }}"
+          failed_when: false
+          changed_when: true
+
+        - name: Clear ecs_image_id fact after stale-image deletion
+          ansible.builtin.set_fact:
+            ecs_image_id: ''
 
     - name: Download Discovery ISO
       ansible.builtin.get_url:
