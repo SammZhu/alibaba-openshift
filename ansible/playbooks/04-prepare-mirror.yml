@@ -939,6 +939,15 @@
       register: _capa_on_mirror
       changed_when: false
 
+    # Same docker-archive overwrite hazard as the CSI pull below: clear any
+    # stale /tmp/capa-*.tar from a prior aborted run before skopeo writes it.
+    - name: Remove stale local CAPA tar before skopeo (docker-archive can't overwrite)
+      ansible.builtin.file:
+        path: /tmp/capa-v0.1.2.tar
+        state: absent
+      delegate_to: localhost
+      when: "'MISSING' in _capa_on_mirror.stdout"
+
     - name: Pull CAPA image to operator-local docker-archive (skopeo)
       # quay.io's edge CDN intermittently returns 502 mid-blob; retry a
       # few times before giving up.  Observed 2026-06-01 P1-CAPA.b — 14
@@ -1038,6 +1047,20 @@
       loop: "{{ _csi_images }}"
       loop_control:
         label: "{{ item.repo }}:{{ item.tag }}"
+
+    # skopeo's docker-archive transport REFUSES to write to an existing tar
+    # ("docker-archive doesn't support modifying existing images").  A leftover
+    # /tmp/<tarname>.tar from a previous aborted run makes the copy fail in
+    # ~20 ms, exhausting all retries.  Delete any stale local tar first.
+    - name: Remove stale local CSI tar before skopeo (docker-archive can't overwrite)
+      ansible.builtin.file:
+        path: "/tmp/{{ item.item.tarname }}.tar"
+        state: absent
+      delegate_to: localhost
+      loop: "{{ _csi_on_mirror.results }}"
+      loop_control:
+        label: "{{ item.item.repo }}:{{ item.item.tag }}"
+      when: "'MISSING' in (item.stdout | default(''))"
 
     - name: Pull missing CSI images to operator-local docker-archive (skopeo)
       ansible.builtin.command:
