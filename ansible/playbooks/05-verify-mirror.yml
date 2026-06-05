@@ -553,7 +553,12 @@
                     for i in $(seq 1 30); do [ -b /dev/vdc ] && break; sleep 2; done;
                     [ -b /dev/vdc ] || { echo "FATAL: /dev/vdc not appearing"; lsblk; exit 1; };
                     mkdir -p /mnt/snap-verify;
-                    mount -o ro /dev/vdc /mnt/snap-verify;
+                    # The snapshot was taken of a live, mounted, RW XFS (Quay
+                    # containers were still writing), so its log is dirty.  XFS
+                    # refuses a plain read-only mount of a dirty log; norecovery
+                    # gives a crash-consistent read-only view, which is all the
+                    # content check below needs.
+                    mount -o ro,norecovery /dev/vdc /mnt/snap-verify;
                     trap 'umount /mnt/snap-verify 2>/dev/null || true' EXIT;
                     M=/mnt/snap-verify;
                     ERRCT=0;
