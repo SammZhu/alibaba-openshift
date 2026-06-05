@@ -889,22 +889,53 @@
     # within ~30 s and turns Available; AI cluster status moves to
     # `installed`.  Typical Phase B duration: 5-15 min.  Skip the wait if
     # already installed (e.g., re-run after a successful install).
-    - name: Phase B — poll until cluster status = installed
-      block:
-        - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
-        - name: Get cluster status (Phase B)
-          ansible.builtin.uri:
-            url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
-            headers: { Authorization: "Bearer {{ ai_access_token }}" }
-            return_content: true
-          register: install_poll_b
-          retries: 30   # ~30 min — operators converging after DNS fix
-          delay: 60
-          until: install_poll_b.json.status | default('') == 'installed'
-          failed_when:
-            - install_poll_b.json.status | default('') != ''
-            - install_poll_b.json.status in ['error', 'cancelled', 'pending-for-input', 'installing-pending-user-action']
+    # P3-FIX.10: ground truth = OCP clusterversion history[0].state == "Completed".
+    # The Assisted Installer SaaS cluster.status lags (sometimes indefinitely)
+    # for external-platform / SNO even after OCP is fully up — observed
+    # 2026-06-06: clusterversion Available=True + ALL ClusterOperators Available,
+    # yet AI stayed short of `installed`, hanging the old AI-status-only poll.
+    # Poll the cluster itself via the jumphost; only fall back to the AI status
+    # when there is no jumphost.
+    - name: Phase B — poll until cluster is fully installed
       when: install_poll.json.status | default('') != 'installed'
+      block:
+        - name: Get cluster status (Phase B) — OCP clusterversion via jumphost (ground truth)
+          ansible.builtin.command:
+            argv:
+              - ssh
+              - -i
+              - "{{ ssh_priv_key_file }}"
+              - -o
+              - StrictHostKeyChecking=no
+              - -o
+              - UserKnownHostsFile=/dev/null
+              - -o
+              - ConnectTimeout=15
+              - "root@{{ jump_host_ip }}"
+              - "oc --kubeconfig=/root/kubeconfig get clusterversion version -o jsonpath='{.status.history[0].state}'"
+          register: _cv_state
+          retries: 40   # ~20 min — operators converging after DNS fix
+          delay: 30
+          until: (_cv_state.stdout | default('') | trim) == 'Completed'
+          changed_when: false
+          when: jump_host_ip | default('') | length > 0
+
+        - name: Get cluster status (Phase B) — AI status fallback (no jumphost)
+          when: jump_host_ip | default('') | length == 0
+          block:
+            - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+            - name: Get cluster status (Phase B, AI)
+              ansible.builtin.uri:
+                url: "{{ assisted_api }}/clusters/{{ cluster_id }}"
+                headers: { Authorization: "Bearer {{ ai_access_token }}" }
+                return_content: true
+              register: install_poll_b
+              retries: 30   # ~30 min — operators converging after DNS fix
+              delay: 60
+              until: install_poll_b.json.status | default('') == 'installed'
+              failed_when:
+                - install_poll_b.json.status | default('') != ''
+                - install_poll_b.json.status in ['error', 'cancelled', 'pending-for-input', 'installing-pending-user-action']
 
     # (Earlier "Copy kubeconfig to jump host" task moved up to support the
     #  DNS-rewrite block above.  Don't add it again here.)
