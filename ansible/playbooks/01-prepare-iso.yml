@@ -649,11 +649,16 @@
         - _iso_infra_match.rc | default(0) != 0
       register: _stale_iso_deleted
 
+    # Always re-stat (no `when`): a skipped task still OVERWRITES its registered
+    # var with a skipped-result dict that has no `.stat`, which would later make
+    # "Download Discovery ISO"'s `when: iso_stat.stat.exists` blow up with
+    # "'dict object' has no attribute 'stat'".  Re-stat unconditionally so
+    # iso_stat always reflects the real on-disk state after the stale-delete
+    # block above.  Observed 2026-06-06 on the preserves_ai restore path.
     - name: Re-stat ISO after possible stale-deletion
       ansible.builtin.stat:
         path: "{{ iso_path }}"
       register: iso_stat
-      when: _stale_iso_deleted is changed
 
     # P3-FIX.8: a stale ISO means any ECS image ImportImage'd from it is also
     # stale (carries the wrong baked infra-env-id).  02 adopts by image NAME
@@ -716,6 +721,7 @@
         mode: "0644"
         force: true
       when: >-
+        iso_stat.stat is not defined or
         not iso_stat.stat.exists or
         iso_stat.stat.size < (900 * 1024 * 1024) or
         infra_create is not skipped
