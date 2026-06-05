@@ -289,13 +289,13 @@
         # P3-COST.6: snapshot fast-path INVARIANT
         # The whole point of paying ¥29/month for these snapshots is that a
         # future restore can skip Phase 04's ~25 min of work.  That only
-        # happens if /var/lib/mirror-ready is INSIDE the snapshot.  Without
+        # happens if /var/lib/quay-storage/mirror-ready is INSIDE the snapshot.  Without
         # this assert, a partial/buggy Phase 04 that didn't write the marker
         # could still get snapshotted, baking in a "looks fast-pathable but
         # isn't" state forever (until next teardown_target=mirror).
-        - name: Pre-snapshot invariant — /var/lib/mirror-ready exists
+        - name: Pre-snapshot invariant — /var/lib/quay-storage/mirror-ready exists
           ansible.builtin.shell: |
-            {{ _ssh_root_mirror }} test -f /var/lib/mirror-ready
+            {{ _ssh_to_mirror }} test -f /var/lib/quay-storage/mirror-ready
           register: _marker_check
           changed_when: false
           failed_when: false
@@ -304,7 +304,7 @@
           ansible.builtin.assert:
             that: _marker_check.rc == 0
             fail_msg: |
-              Refusing to create mirror snapshots: /var/lib/mirror-ready is
+              Refusing to create mirror snapshots: /var/lib/quay-storage/mirror-ready is
               missing on the mirror ECS.  This means Phase 04 did not finish
               cleanly (probably an exception between import and marker write),
               and snapshotting now would produce a snapshot that LOOKS

@@ -84,23 +84,23 @@
       when: bootstrap_check.rc | default(0) != 0
 
     # ── Step 2: idempotent check — is mirror already ready? ─────────────────
-    # If /var/lib/mirror-ready exists, all heavy work is done.  Skip to the
+    # If /var/lib/quay-storage/mirror-ready exists, all heavy work is done.  Skip to the
     # AI PATCH step (which is also idempotent).
     - name: Check if mirror is already fully prepared
       ansible.builtin.shell: |
-        {{ _ssh_root_mirror }} test -f /var/lib/mirror-ready
+        {{ _ssh_root_mirror }} test -f /var/lib/quay-storage/mirror-ready
       register: already_ready
       changed_when: false
       failed_when: false
 
     - name: Mirror already ready — skipping heavy work
       ansible.builtin.debug:
-        msg: "mirror-registry is already ready (/var/lib/mirror-ready exists). Skipping install + import + PATCH still runs."
+        msg: "mirror-registry is already ready (/var/lib/quay-storage/mirror-ready exists). Skipping install + import + PATCH still runs."
       when: already_ready.rc == 0
 
     # P3-COST.6 watchdog: snapshot fast-path is supposed to save ~25 min by
     # restoring a Quay that's already imported.  This only works if the marker
-    # /var/lib/mirror-ready was inside the snapshot when 05-verify-mirror
+    # /var/lib/quay-storage/mirror-ready was inside the snapshot when 05-verify-mirror
     # took it.  Snapshots created BEFORE commit b72f4a0 (mirror-ready marker
     # written immediately after import, 2026-06-01) don't contain the marker —
     # restore brings up the disk but 04 still runs full prep, wasting ~25 min
@@ -114,7 +114,7 @@
       ansible.builtin.debug:
         msg: |
           ⚠  fast-path degraded: state.yml carries snapshot IDs (system={{ mirror_snapshot_system_id }},
-              data={{ mirror_snapshot_data_id }}) but /var/lib/mirror-ready is MISSING
+              data={{ mirror_snapshot_data_id }}) but /var/lib/quay-storage/mirror-ready is MISSING
               from the restored disk.  This run will do full Phase 04 prep
               (~25 min); 05 will then take a fresh snapshot containing the
               marker, restoring fast-path behavior for the next teardown +
@@ -697,7 +697,7 @@
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
         cp /etc/quay-config/ssl.cert /var/lib/mirror-ca.crt
-        echo "$(date -Iseconds) READY (import done; CCM/CAPA pre-pull + IDMS PATCH still to run)" > /var/lib/mirror-ready
+        echo "$(date -Iseconds) READY (import done; CCM/CAPA pre-pull + IDMS PATCH still to run)" > /var/lib/quay-storage/mirror-ready
         REMOTE
       when: already_ready.rc != 0
       changed_when: true
