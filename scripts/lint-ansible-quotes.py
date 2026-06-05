@@ -50,6 +50,33 @@ def find_imbalanced_shell_blocks(text: str) -> list[tuple[int, str]]:
     return bad
 
 
+def find_jinja_comment_traps(text: str) -> list[tuple[int, str]]:
+    """Return (line, snippet) for shell blocks containing a literal `{#`.
+
+    ansible templates the whole module-arg string through Jinja2, which
+    treats `{#` as the start of a comment block ({# ... #}).  A bash
+    construct like `${#TOKEN}` (string length) or `${#arr[@]}` (array
+    length) therefore aborts playbook load with
+      ERROR! failed at splitting arguments, either an unbalanced jinja2
+      block or quotes
+    Bit us 2026-06-05 (#46 probe) and earlier in 05-verify-mirror.
+    Use `wc -c` / explicit counters instead.  (A `{#` inside a YAML
+    comment line is fine — but it's in the shell body here, so we only
+    scan the captured shell-block body and skip pure-comment lines.)"""
+    bad = []
+    for m in SHELL_BLOCK_RE.finditer(text):
+        body = m.group(2)
+        for i, ln in enumerate(body.splitlines()):
+            stripped = ln.lstrip()
+            if stripped.startswith("#"):       # bash/YAML comment line — benign
+                continue
+            if "{#" in ln:
+                start_line = text[: m.start()].count("\n") + 1 + i
+                bad.append((start_line,
+                            f"literal '{{#' (Jinja comment-block trap):\n{ln.strip()}"))
+    return bad
+
+
 def _expand_args(args: list[str]) -> list[Path]:
     """Each arg is either a file or a directory.  Directories recurse for
     *.yml / *.yaml so callers can pass a single `ansible` arg from the
@@ -84,9 +111,18 @@ def main(args: list[str]) -> int:
                 print(f"    {s}")
             print()
             rc = 1
+        for line, snippet in find_jinja_comment_traps(text):
+            print(f"::error file={p},line={line}:: shell block contains '{{#' "
+                  f"— ansible's Jinja2 templar treats it as a comment block "
+                  f"and refuses to load the playbook")
+            print(f"  {p}:{line}")
+            for s in snippet.splitlines():
+                print(f"    {s}")
+            print()
+            rc = 1
     if rc == 0:
         print(f"OK: scanned {len(paths)} file(s), all shell heredocs "
-              f"have balanced single-quote counts.")
+              f"have balanced single-quote counts + no '{{#' Jinja traps.")
     return rc
 
 

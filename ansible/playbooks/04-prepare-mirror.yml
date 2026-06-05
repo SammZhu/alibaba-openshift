@@ -743,7 +743,12 @@
         CREDS=$(jq -r .auths[].auth /root/.docker/config.json | base64 -d)
         for i in $(seq 1 30); do
           TOKEN=$(curl -ks -u "$CREDS" "https://$REG/v2/auth?service=$REG&scope=repository:probe/readiness:pull,push" | jq -r .token)
-          if [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] && [ ${#TOKEN} -gt 50 ]; then
+          # NOTE: do NOT use the bash string-length form on TOKEN here — the
+          # literal brace-hash sequence is parsed by the ansible Jinja2 templar
+          # as a comment-block start and aborts playbook load with
+          # "unbalanced jinja2 block".  Count bytes with wc instead.
+          TOKEN_LEN=$(printf %s "$TOKEN" | wc -c)
+          if [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] && [ "$TOKEN_LEN" -gt 50 ]; then
             echo "Quay push-scope token OK after $((i*10))s"
             exit 0
           fi
