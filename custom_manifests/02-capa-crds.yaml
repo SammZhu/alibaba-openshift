@@ -197,6 +197,26 @@ spec:
                   - type
                   type: object
                 type: array
+              controlPlaneEndpoint:
+                description: |-
+                  ControlPlaneEndpoint is the endpoint downstream consumers (Machine
+                  controller, control-plane provider) use to reach the API server.
+                  In BYO mode it mirrors Spec.ControlPlaneEndpoint; the CAPI infra-cluster
+                  contract requires this to be populated before status.ready=true.
+                minProperties: 1
+                properties:
+                  host:
+                    description: host is the hostname on which the API server is serving.
+                    maxLength: 512
+                    minLength: 1
+                    type: string
+                  port:
+                    description: port is the port on which the API server is serving.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                type: object
               failureDomains:
                 description: |-
                   FailureDomains is the list of failure domains published to CAPI so it can
