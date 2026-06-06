@@ -281,6 +281,9 @@
             smoke_instance_id: "{{ _iid.stdout | trim }}"
 
         - name: "#27 — delete the ECS out-of-band (aliyun, on operator) to force a terminal error"
+          # A just-booted ECS is briefly Pending/Starting and rejects
+          # DeleteInstance (IncorrectInstanceStatus); retry until it is
+          # deletable (force-delete works once it reaches Running).
           ansible.builtin.command:
             argv:
               - aliyun
@@ -297,6 +300,10 @@
               - --access-key-secret
               - "{{ smoke_sk }}"
           delegate_to: local
+          register: _del27
+          retries: 18
+          delay: 10
+          until: _del27.rc == 0
           no_log: true
           changed_when: true
 
