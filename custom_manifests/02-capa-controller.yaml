@@ -130,3 +130,25 @@ spec:
               port: 9440
             initialDelaySeconds: 5
             periodSeconds: 10
+          # Admission webhook server (defaulting + validation, P3-CAPA.7).
+          # controller-runtime serves it on :9443 and reads its TLS cert from
+          # /tmp/k8s-webhook-server/serving-certs (tls.crt/tls.key). The cert is
+          # minted by the OpenShift service-ca operator into the secret below
+          # (see 02-capa-webhooks.yaml Service annotation) — no cert-manager.
+          ports:
+            - name: webhook-server
+              containerPort: 9443
+              protocol: TCP
+          volumeMounts:
+            - name: cert
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+      volumes:
+        - name: cert
+          secret:
+            secretName: capa-webhook-server-cert
+            # Populated asynchronously by service-ca after the Service in
+            # 02-capa-webhooks.yaml is created; optional=false would deadlock the
+            # very first apply, so allow the pod to start and let the kubelet
+            # project the cert once it lands.
+            optional: true
