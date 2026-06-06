@@ -1,0 +1,214 @@
+# Phase 10 — build an aliyun-platform RHCOS boot image for CAPA workers.
+#
+# Route B (P3-CAPA.17): a CAPA-provisioned worker must boot an RHCOS image whose
+# ignition.platform.id is "aliyun", so RHCOS reads its Ignition from the ECS
+# instance user-data (the worker pointer config supplied by 11-capa-routeb-join).
+# OpenShift stopped publishing an RHCOS aliyun boot image after the alibabacloud
+# platform was removed (~4.15), so we take the generic openstack RHCOS qcow2 from
+# the cluster's own coreos-bootimages stream and re-stamp the platform id.
+#
+# Output: saves `worker_boot_image_id` (m-xxxx) to state.yml. Idempotent — if the
+# image already exists and is Available, every heavy step is skipped.
+#
+# Prereqs: cluster installed (jump host up, kubeconfig at /root/kubeconfig),
+# operator has internet (downloads ~1.4G qcow from rhcos.mirror.openshift.com).
+#
+#   ansible-playbook -i ansible/inventory.yml ansible/playbooks/10-prepare-worker-bootimage.yml
+- name: Build aliyun-platform RHCOS worker boot image
+  hosts: local
+  gather_facts: false
+  vars:
+    work_dir: "{{ lookup('env', 'HOME') }}/work/rhcos-aliyun"
+    qcow_gz: "{{ work_dir }}/rhcos.qcow2.gz"
+    qcow: "{{ work_dir }}/rhcos.qcow2"
+    oss_object: "rhcos-worker-aliyun.qcow2"
+    worker_image_name: "rhcos-worker-aliyun"
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/oss_endpoint.yml
+
+    - name: Assert prerequisites in state
+      ansible.builtin.assert:
+        that:
+          - jump_host_ip | default('') | length > 0
+          - oss_bucket | default('') | length > 0
+        fail_msg: "Need jump_host_ip + oss_bucket in state.yml (run 01-03 first)."
+
+    # ── Idempotency: skip everything if the image already exists ───────────────
+    - name: Probe existing worker boot image
+      ansible.builtin.command:
+        argv: [aliyun, ecs, DescribeImages, --RegionId, "{{ region }}", --ImageId,
+               "{{ worker_boot_image_id }}", --profile, "{{ aliyun_profile }}"]
+      register: _img_probe
+      changed_when: false
+      failed_when: false
+      when: worker_boot_image_id is defined and worker_boot_image_id | length > 0
+
+    - name: Decide whether the image is already usable
+      ansible.builtin.set_fact:
+        _worker_img_ready: >-
+          {{ (worker_boot_image_id is defined and worker_boot_image_id | length > 0
+              and _img_probe is not skipped and _img_probe.rc == 0
+              and ((_img_probe.stdout | from_json).Images.Image | default([]) | length) > 0
+              and (_img_probe.stdout | from_json).Images.Image[0].Status == 'Available') }}
+
+    - name: Report reuse
+      ansible.builtin.debug:
+        msg: "Reusing existing worker boot image {{ worker_boot_image_id }} (Available)."
+      when: _worker_img_ready | bool
+
+    - name: Build the image
+      when: not (_worker_img_ready | bool)
+      block:
+        # ── Resolve the RHCOS openstack qcow2 URL from the cluster stream ───────
+        - name: Add the jump host for oc delegation
+          ansible.builtin.add_host:
+            name: jumphost
+            ansible_host: "{{ jump_host_ip }}"
+            ansible_user: root
+            ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
+            ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+
+        - name: Read RHCOS openstack qcow2 URL from coreos-bootimages
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG=/root/kubeconfig
+            oc -n openshift-machine-config-operator get cm coreos-bootimages \
+              -o jsonpath='{.data.stream}' | python3 -c '
+            import sys, json
+            a = json.load(sys.stdin)["architectures"]["x86_64"]["artifacts"]
+            print(a["openstack"]["formats"]["qcow2.gz"]["disk"]["location"])'
+          delegate_to: jumphost
+          register: _qcow_url
+          changed_when: false
+
+        - name: Ensure work dir
+          ansible.builtin.file:
+            path: "{{ work_dir }}"
+            state: directory
+            mode: "0755"
+
+        - name: Download RHCOS openstack qcow2.gz
+          ansible.builtin.get_url:
+            url: "{{ _qcow_url.stdout | trim }}"
+            dest: "{{ qcow_gz }}"
+            mode: "0644"
+            timeout: 1200
+
+        - name: Decompress qcow2 (idempotent)
+          ansible.builtin.shell: |
+            set -euo pipefail
+            if [ ! -f "{{ qcow }}" ] || [ "{{ qcow_gz }}" -nt "{{ qcow }}" ]; then
+              gunzip -kf "{{ qcow_gz }}"
+            fi
+          args:
+            creates: "{{ qcow }}"
+
+        - name: Install libguestfs tooling
+          become: true
+          ansible.builtin.dnf:
+            name: [libguestfs-tools, libguestfs-tools-c]
+            state: present
+
+        # ── Re-stamp ignition.platform.id -> aliyun on the /boot partition ─────
+        # virt-customize cannot inspect RHCOS's OSTree layout, so edit the
+        # BootLoaderSpec entries directly via guestfish: find the ext4 boot
+        # partition, copy the loader entries + grub.cfg out, sed the karg, and
+        # upload them back. Then re-read from the image to prove it stuck.
+        - name: Re-stamp platform id to aliyun
+          become: true
+          environment:
+            LIBGUESTFS_BACKEND: direct
+          ansible.builtin.shell: |
+            set -euo pipefail
+            Q="{{ qcow }}"
+            BOOTDEV=$(guestfish --ro -a "$Q" run : list-filesystems | awk -F: '/ext4/{gsub(/ /,"",$1); print $1; exit}')
+            test -n "$BOOTDEV"
+            rm -rf /tmp/rhcosboot && mkdir -p /tmp/rhcosboot
+            guestfish --rw -a "$Q" run : mount "$BOOTDEV" / : copy-out /loader/entries /tmp/rhcosboot : copy-out /grub2/grub.cfg /tmp/rhcosboot
+            sed -i 's/ignition\.platform\.id=[a-z]*/ignition.platform.id=aliyun/g' /tmp/rhcosboot/entries/*.conf /tmp/rhcosboot/grub.cfg
+            for f in /tmp/rhcosboot/entries/*.conf; do
+              guestfish --rw -a "$Q" run : mount "$BOOTDEV" / : upload "$f" /loader/entries/"$(basename "$f")"
+            done
+            guestfish --rw -a "$Q" run : mount "$BOOTDEV" / : upload /tmp/rhcosboot/grub.cfg /grub2/grub.cfg
+            rm -rf /tmp/rhcosverify && mkdir -p /tmp/rhcosverify
+            guestfish --ro -a "$Q" run : mount "$BOOTDEV" / : copy-out /loader/entries /tmp/rhcosverify : copy-out /grub2/grub.cfg /tmp/rhcosverify
+            GOT=$(grep -rho 'ignition.platform.id=[a-z]*' /tmp/rhcosverify | sort -u | tr '\n' ' ')
+            echo "platform_after=$GOT"
+            test "$(echo "$GOT" | tr -d ' ')" = "ignition.platform.id=aliyun"
+          register: _restamp
+          changed_when: true
+
+        # ── Upload + import as an ECS custom image ─────────────────────────────
+        - name: Read AK/SK from aliyun profile for OSS
+          ansible.builtin.command:
+            argv: [jq, -r,
+                   '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret',
+                   "{{ lookup('env', 'HOME') }}/.aliyun/config.json"]
+          register: _aksk
+          changed_when: false
+          no_log: true
+
+        - name: Upload qcow2 to OSS
+          ansible.builtin.command:
+            argv: [aliyun, oss, cp, "{{ qcow }}", "oss://{{ oss_bucket }}/{{ oss_object }}",
+                   "--endpoint={{ _oss_endpoint }}",
+                   "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
+                   "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
+          no_log: true
+          changed_when: true
+
+        - name: Ensure AliyunECSImageImportDefaultRole exists
+          ansible.builtin.command:
+            argv: [aliyun, ram, GetRole, --RoleName, AliyunECSImageImportDefaultRole, --profile, "{{ aliyun_profile }}"]
+          register: _import_role
+          changed_when: false
+          failed_when: false
+
+        - name: Create AliyunECSImageImportDefaultRole when missing
+          ansible.builtin.command:
+            argv: [aliyun, ram, CreateRole, --RoleName, AliyunECSImageImportDefaultRole,
+                   --AssumeRolePolicyDocument,
+                   '{"Statement":[{"Action":"sts:AssumeRole","Effect":"Allow","Principal":{"Service":["ecs.aliyuncs.com"]}}],"Version":"1"}',
+                   --profile, "{{ aliyun_profile }}"]
+          when: _import_role.rc != 0
+          changed_when: true
+
+        - name: Submit ImportImage
+          ansible.builtin.command:
+            argv: [aliyun, ecs, ImportImage, --RegionId, "{{ region }}",
+                   --ImageName, "{{ worker_image_name }}",
+                   --OSType, Linux, --Platform, CoreOS, --Architecture, x86_64,
+                   --DiskDeviceMapping.1.Format, QCOW2,
+                   --DiskDeviceMapping.1.OSSBucket, "{{ oss_bucket }}",
+                   --DiskDeviceMapping.1.OSSObject, "{{ oss_object }}",
+                   --BootMode, UEFI, --profile, "{{ aliyun_profile }}"]
+          register: _import
+          changed_when: true
+
+        - name: Capture worker boot image id
+          ansible.builtin.set_fact:
+            worker_boot_image_id: "{{ (_import.stdout | from_json).ImageId }}"
+
+        - name: Wait until the image is Available
+          ansible.builtin.command:
+            argv: [aliyun, ecs, DescribeImages, --RegionId, "{{ region }}",
+                   --ImageId, "{{ worker_boot_image_id }}", --profile, "{{ aliyun_profile }}"]
+          register: _img_wait
+          changed_when: false
+          retries: 40
+          delay: 30
+          until: >-
+            (_img_wait.stdout | from_json).Images.Image | default([]) | length > 0
+            and (_img_wait.stdout | from_json).Images.Image[0].Status == 'Available'
+
+    # ── Persist the image id ───────────────────────────────────────────────────
+    - name: Save worker_boot_image_id to state
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        new_state:
+          worker_boot_image_id: "{{ worker_boot_image_id }}"
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "worker_boot_image_id = {{ worker_boot_image_id }}"

@@ -1,0 +1,303 @@
+# Phase 11 — Route B end-to-end: a CAPA-provisioned ECS joins the cluster as a
+# real OpenShift worker (P3-CAPA.17).
+#
+# Mechanism (upstream-standard, no Assisted day-2): the worker boots the
+# aliyun-platform RHCOS image from Phase 10 (cluster.spec.bootImageID) and is
+# handed the cluster's worker pointer Ignition as ECS user-data. RHCOS (platform
+# id "aliyun") reads the user-data, pulls the full worker config from the
+# in-cluster Machine Config Server, and the kubelet joins. We auto-approve the
+# node CSRs and wait for Ready.
+#
+# Prereqs: Phase 10 produced worker_boot_image_id; cluster installed; mirror has
+# the CAPA image under test (default v0.1.8).
+#
+#   ansible-playbook -i ansible/inventory.yml ansible/playbooks/11-capa-routeb-join.yml \
+#     [-e routeb_capa_image=quay.io/samzhu/openshift-capi-alicloud:v0.1.8]
+- name: Resolve Route B inputs (operator)
+  hosts: local
+  gather_facts: false
+  vars:
+    routeb_capa_image: "quay.io/samzhu/openshift-capi-alicloud:v0.1.8"
+    routeb_instance_type: "ecs.g7.xlarge"
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: Assert prerequisites in state
+      ansible.builtin.assert:
+        that:
+          - jump_host_ip | default('') | length > 0
+          - worker_boot_image_id | default('') | length > 0
+          - mirror_private_vsw_1 | default('') | length > 0
+          - api_lb_endpoint | default('') | length > 0
+        fail_msg: "Need worker_boot_image_id (run Phase 10), jump_host_ip, mirror_private_vsw_1, api_lb_endpoint."
+
+    - name: Discover a security group in the cluster VPC
+      ansible.builtin.command:
+        argv: [aliyun, ecs, DescribeSecurityGroups, --RegionId, "{{ region }}",
+               --VpcId, "{{ mirror_vpc_id }}", --PageSize, "50", --profile, "{{ aliyun_profile }}"]
+      register: _sg_q
+      changed_when: false
+
+    - name: Read AK/SK for alibaba-creds + ECS sweep
+      ansible.builtin.command:
+        argv: [jq, -r,
+               '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret',
+               "{{ lookup('env', 'HOME') }}/.aliyun/config.json"]
+      register: _aksk
+      changed_when: false
+      no_log: true
+
+    - name: Add the jump host (carry Route B inputs)
+      ansible.builtin.add_host:
+        name: jumphost
+        ansible_host: "{{ jump_host_ip }}"
+        ansible_user: root
+        ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+        groups: deploy
+        rb_capa_image: "{{ routeb_capa_image }}"
+        rb_instance_type: "{{ routeb_instance_type }}"
+        rb_region: "{{ region }}"
+        rb_zone: "{{ mirror_zone_id }}"
+        rb_vsw: "{{ mirror_private_vsw_1 }}"
+        rb_sg: "{{ (_sg_q.stdout | from_json).SecurityGroups.SecurityGroup[0].SecurityGroupId }}"
+        rb_ram_role: "{{ mirror_node_ram_role }}"
+        rb_cp_host: "{{ api_lb_endpoint }}"
+        rb_boot_image: "{{ worker_boot_image_id }}"
+        rb_ak: "{{ _aksk.stdout.split(' ')[0] }}"
+        rb_sk: "{{ _aksk.stdout.split(' ')[1] }}"
+      no_log: true
+
+- name: Route B worker join (jump host)
+  hosts: jumphost
+  gather_facts: false
+  vars:
+    kc: "--kubeconfig /root/kubeconfig"
+    ns: default
+    repo: /root/openshift-alibaba/alibaba-openshift
+  tasks:
+    - name: Show Route B parameters
+      ansible.builtin.debug:
+        msg: "image={{ rb_capa_image }} bootImage={{ rb_boot_image }} type={{ rb_instance_type }} sg={{ rb_sg }} vsw={{ rb_vsw }} zone={{ rb_zone }} cp={{ rb_cp_host }}"
+
+    - name: Refresh repo on the jump host
+      ansible.builtin.command:
+        argv: [git, -C, "{{ repo }}", pull, --ff-only]
+      changed_when: false
+      failed_when: false
+
+    # ── Deploy the CAPA build under test (CRDs + webhooks + controller@digest) ──
+    - name: Apply CRDs + webhooks + controller
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG=/root/kubeconfig
+        cd {{ repo }}
+        oc apply --server-side=true --force-conflicts -f custom_manifests/02-capa-crds.yaml
+        oc apply -f custom_manifests/02-capa-webhooks.yaml
+        oc apply -f custom_manifests/02-capa-controller.yaml
+      changed_when: true
+
+    - name: Ensure alibaba-creds secret exists
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG=/root/kubeconfig
+        oc -n capa-system create secret generic alibaba-creds \
+          --from-literal=ALIBABA_CLOUD_ACCESS_KEY_ID='{{ rb_ak }}' \
+          --from-literal=ALIBABA_CLOUD_ACCESS_KEY_SECRET='{{ rb_sk }}' \
+          --dry-run=client -o yaml | oc apply -f -
+      no_log: true
+      changed_when: true
+
+    - name: Resolve the CAPA image digest from the mirror + set it
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG=/root/kubeconfig
+        IMG='{{ rb_capa_image }}'
+        REPO_PART=$(printf '%s' "$IMG" | sed 's/:[^:/]*$//')
+        TAG=$(printf '%s' "$IMG" | sed 's/.*://')
+        MIRROR=$(oc get imagedigestmirrorset -o json \
+          | jq -r --arg r "$REPO_PART" '.items[].spec.imageDigestMirrors[] | select(.source==$r) | .mirrors[0]' | head -1)
+        test -n "$MIRROR"
+        oc -n openshift-config extract secret/pull-secret --to=/root --confirm >/dev/null 2>&1
+        DIG=$(oc image info "$MIRROR:$TAG" --registry-config=/root/.dockerconfigjson --insecure -o json | jq -r .digest)
+        test -n "$DIG"
+        oc -n capa-system set image deploy/capa-controller-manager manager="$REPO_PART@$DIG"
+      changed_when: true
+
+    - name: Wait for controller rollout
+      ansible.builtin.command:
+        argv: [oc, "--kubeconfig", /root/kubeconfig, -n, capa-system, rollout, status,
+               deploy/capa-controller-manager, --timeout=240s]
+      changed_when: false
+
+    # ── CAPI core CRDs (idempotent) ────────────────────────────────────────────
+    - name: Check CAPI core Cluster CRD
+      ansible.builtin.command:
+        argv: [oc, "--kubeconfig", /root/kubeconfig, get, crd, clusters.cluster.x-k8s.io]
+      register: _capi_crd
+      changed_when: false
+      failed_when: false
+
+    - name: Install CAPI core CRDs when missing
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG=/root/kubeconfig
+        cd /root
+        curl -fsSL -o cluster-api-components.yaml \
+          https://github.com/kubernetes-sigs/cluster-api/releases/download/{{ capi_core_version }}/cluster-api-components.yaml
+        awk 'BEGIN{RS="\n---\n"} /(^|\n)kind: CustomResourceDefinition($|\n)/{printf "%s\n---\n", $0}' \
+          cluster-api-components.yaml > capi-crds-only.yaml
+        oc apply --server-side=true --force-conflicts -f capi-crds-only.yaml
+      when: _capi_crd.rc != 0
+      changed_when: true
+
+    # ── Worker pointer Ignition -> bootstrap secret ────────────────────────────
+    - name: Build the worker pointer Ignition secret from worker-user-data
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG=/root/kubeconfig
+        oc -n openshift-machine-api get secret worker-user-data -o jsonpath='{.data.userData}' \
+          | base64 -d > /root/routeb-worker.ign
+        test -s /root/routeb-worker.ign
+        oc create secret generic routeb-bootstrap -n {{ ns }} \
+          --from-file=value=/root/routeb-worker.ign --dry-run=client -o yaml | oc apply -f -
+      changed_when: true
+
+    # ── The Route B chain ──────────────────────────────────────────────────────
+    - name: Stage the Route B chain
+      ansible.builtin.copy:
+        dest: /root/routeb-chain.yaml
+        mode: "0644"
+        content: |
+          apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+          kind: AlibabaCloudCluster
+          metadata: {name: routeb, namespace: {{ ns }}}
+          spec:
+            region: {{ rb_region }}
+            bootImageID: {{ rb_boot_image }}
+            controlPlaneEndpoint: {host: {{ rb_cp_host }}, port: 6443}
+          ---
+          apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+          kind: AlibabaCloudMachine
+          metadata: {name: routeb-worker, namespace: {{ ns }}}
+          spec:
+            instanceType: {{ rb_instance_type }}
+            regionID: {{ rb_region }}
+            zoneID: {{ rb_zone }}
+            vSwitchID: {{ rb_vsw }}
+            securityGroupIDs: ["{{ rb_sg }}"]
+            ramRoleName: {{ rb_ram_role }}
+            systemDisk: {category: cloud_essd, size: 40}
+          ---
+          apiVersion: cluster.x-k8s.io/v1beta2
+          kind: Cluster
+          metadata: {name: routeb-cluster, namespace: {{ ns }}}
+          spec:
+            infrastructureRef: {apiGroup: infrastructure.cluster.x-k8s.io, kind: AlibabaCloudCluster, name: routeb}
+          ---
+          apiVersion: cluster.x-k8s.io/v1beta2
+          kind: Machine
+          metadata:
+            name: routeb-machine
+            namespace: {{ ns }}
+            labels: {cluster.x-k8s.io/cluster-name: routeb-cluster}
+          spec:
+            clusterName: routeb-cluster
+            infrastructureRef: {apiGroup: infrastructure.cluster.x-k8s.io, kind: AlibabaCloudMachine, name: routeb-worker}
+            bootstrap: {dataSecretName: routeb-bootstrap}
+
+    - name: Pre-clean any stale Route B objects
+      ansible.builtin.command:
+        argv: [oc, "--kubeconfig", /root/kubeconfig, delete, -f, /root/routeb-chain.yaml,
+               --ignore-not-found, "--wait=true", "--timeout=180s"]
+      changed_when: true
+      failed_when: false
+
+    - name: Run the Route B join
+      block:
+        - name: Apply the Route B chain
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, apply, -f, /root/routeb-chain.yaml]
+          changed_when: true
+
+        - name: Patch OwnerRefs
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG=/root/kubeconfig
+            CU=$(oc -n {{ ns }} get cluster routeb-cluster -o jsonpath='{.metadata.uid}')
+            MU=$(oc -n {{ ns }} get machine routeb-machine -o jsonpath='{.metadata.uid}')
+            oc -n {{ ns }} patch alibabacloudcluster routeb --type=merge \
+              -p "{\"metadata\":{\"ownerReferences\":[{\"apiVersion\":\"cluster.x-k8s.io/v1beta2\",\"kind\":\"Cluster\",\"name\":\"routeb-cluster\",\"uid\":\"$CU\",\"controller\":true,\"blockOwnerDeletion\":true}]}}"
+            oc -n {{ ns }} patch alibabacloudmachine routeb-worker --type=merge \
+              -p "{\"metadata\":{\"ownerReferences\":[{\"apiVersion\":\"cluster.x-k8s.io/v1beta2\",\"kind\":\"Machine\",\"name\":\"routeb-machine\",\"uid\":\"$MU\",\"controller\":true,\"blockOwnerDeletion\":true}]}}"
+          changed_when: true
+
+        - name: Wait until CAPA boots the ECS
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, -n, "{{ ns }}", get, alibabacloudmachine,
+                   routeb-worker, -o, "jsonpath={.status.instanceID}"]
+          register: _rb_iid
+          retries: 30
+          delay: 10
+          until: _rb_iid.stdout | trim | length > 0
+          changed_when: false
+
+        - name: Record booted instance id
+          ansible.builtin.set_fact:
+            rb_instance_id: "{{ _rb_iid.stdout | trim }}"
+
+        # ── Wait for the node to join: auto-approve CSRs, watch for a NEW Ready node ─
+        - name: Approve CSRs and wait for the new worker to be Ready
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG=/root/kubeconfig
+            oc get nodes -o name | sort > /tmp/rb_before
+            for i in $(seq 1 80); do
+              oc get csr --no-headers 2>/dev/null | awk '/Pending/{print $1}' \
+                | xargs -r oc adm certificate approve >/dev/null 2>&1 || true
+              NEW=$(oc get nodes -o name | sort | comm -13 /tmp/rb_before - | head -1)
+              if [ -n "$NEW" ]; then
+                ST=$(oc get "$NEW" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
+                echo "iter=$i new=$NEW ready=$ST"
+                [ "$ST" = "True" ] && { echo "JOINED $NEW"; exit 0; }
+              else
+                echo "iter=$i waiting for new node"
+              fi
+              sleep 15
+            done
+            echo "TIMEOUT waiting for worker join"; exit 1
+          args:
+            executable: /bin/bash
+          register: _rb_join
+          changed_when: true
+
+        - name: Route B PASS
+          ansible.builtin.debug:
+            msg: "✓ Route B: CAPA worker {{ rb_instance_id }} booted the aliyun RHCOS image and joined as a Ready node. {{ _rb_join.stdout_lines[-1] }}"
+
+      always:
+        - name: Cleanup — delete the Route B chain
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, delete, -f, /root/routeb-chain.yaml,
+                   --ignore-not-found, "--wait=false"]
+          changed_when: true
+          failed_when: false
+
+        - name: Cleanup — sweep the Route B ECS (operator)
+          ansible.builtin.shell: |
+            aliyun ecs DeleteInstance --InstanceId '{{ rb_instance_id | default("") }}' --Force true \
+              --RegionId {{ rb_region }} --access-key-id '{{ rb_ak }}' --access-key-secret '{{ rb_sk }}' || true
+          delegate_to: local
+          when: rb_instance_id is defined and rb_instance_id | length > 0
+          no_log: true
+          changed_when: false
+          failed_when: false
+
+        - name: Cleanup — remove the joined node object if present
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG=/root/kubeconfig
+            N=$(echo "{{ _rb_join.stdout | default('') }}" | awk '/^JOINED/{print $2}')
+            [ -n "$N" ] && oc delete "$N" --ignore-not-found --wait=false || true
+          changed_when: true
+          failed_when: false
