@@ -393,6 +393,32 @@
           until: _iid2.stdout | trim | length > 0
           changed_when: false
 
+        # Wait until the ECS is Running BEFORE deleting: the controller's
+        # reconcileDelete force-deletes the ECS, and a still-Pending instance
+        # rejects DeleteInstance (IncorrectInstanceStatus) → the controller
+        # error-backoffs and can blow past the convergence window.
+        - name: (reset) wait until the fresh ECS is Running
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DescribeInstances
+              - --RegionId
+              - "{{ smoke_region }}"
+              - --InstanceIds
+              - '["{{ _iid2.stdout | trim }}"]'
+              - --access-key-id
+              - "{{ smoke_ak }}"
+              - --access-key-secret
+              - "{{ smoke_sk }}"
+          delegate_to: local
+          register: _run2
+          retries: 30
+          delay: 10
+          until: ((_run2.stdout | from_json).Instances.Instance[0].Status | default('')) == 'Running'
+          no_log: true
+          changed_when: false
+
         - name: "#26 — initiate delete (don't block on the finalizer)"
           ansible.builtin.command:
             argv: [oc, "--kubeconfig", /root/kubeconfig, -n, "{{ ns }}", delete, alibabacloudmachine, smoke-test-worker, --wait=false]
@@ -411,8 +437,8 @@
           ansible.builtin.command:
             argv: [oc, "--kubeconfig", /root/kubeconfig, -n, "{{ ns }}", get, alibabacloudmachine, smoke-test-worker]
           register: _gone
-          retries: 30
-          delay: 10
+          retries: 40
+          delay: 15
           until: _gone.rc != 0
           changed_when: false
           failed_when: false
