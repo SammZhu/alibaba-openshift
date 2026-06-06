@@ -100,13 +100,35 @@
     #   makes a half-restored mirror fall through to re-install + re-import
     #   (rebuilding the catalog from the OSS tarball) instead of shipping a dead
     #   mirror.  See docs/SNAPSHOT.md.
-    - name: Check if mirror is already fully prepared (marker present AND Quay healthy)
+    - name: Check mirror-ready marker (fast; a fresh build has none)
       ansible.builtin.shell: |
-        {{ _ssh_root_mirror }} 'test -f /var/lib/quay-storage/mirror-ready \
-          && curl -ksf https://{{ mirror_private_ip }}:8443/health/instance >/dev/null'
-      register: already_ready
+        {{ _ssh_root_mirror }} test -f /var/lib/quay-storage/mirror-ready
+      register: _mirror_marker
       changed_when: false
       failed_when: false
+
+    # P3-FIX.9: on a snapshot-restore the marker is present but Quay's app
+    # container needs ~2-3 min after cloud-init starts the units before
+    # /health/instance answers.  POLL (not single-shot) so a slow-but-fine
+    # restore isn't wastefully downgraded to a full 24 GB re-import.  Observed
+    # 2026-06-06: Quay came up healthy ~3 min post-boot, but the single-curl
+    # gate had already fallen back to the heavy path.  A fresh build (no marker)
+    # skips this and goes straight to heavy work.
+    - name: Wait for Quay health when marker present (restore may still be booting)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} 'curl -ksf https://{{ mirror_private_ip }}:8443/health/instance >/dev/null'
+      register: already_ready
+      retries: 30
+      delay: 10
+      until: already_ready.rc == 0
+      changed_when: false
+      failed_when: false
+      when: _mirror_marker.rc == 0
+
+    - name: Mark not-ready when marker absent (fresh build — no wait)
+      ansible.builtin.set_fact:
+        already_ready: { rc: 1 }
+      when: _mirror_marker.rc != 0
 
     - name: Mirror already ready — skipping heavy work
       ansible.builtin.debug:
@@ -124,16 +146,16 @@
       failed_when: false
       when: already_ready.rc != 0
 
-    - name: Warn — restore landed marker+blobs but Quay catalog was lost (vda sysprep)
+    - name: Warn — marker present but Quay never became healthy within the wait
       ansible.builtin.debug:
         msg: |
-          ⚠  mirror-ready marker is present but Quay is NOT serving on
-             {{ mirror_private_ip }}:8443.  The vdb snapshot preserved the image
-             blobs + marker, but Quay's postgres catalog lived on the root disk
-             and was stripped by CreateImage sysprep on restore — the blobs are
-             orphaned.  This run re-installs Quay and re-imports from the OSS
-             tarball to rebuild the catalog.  Fast-path snapshot restore cannot
-             work until pg data is relocated onto vdb.  See docs/SNAPSHOT.md.
+          ⚠  mirror-ready marker is present and the vdb snapshot carries the full
+             Quay state (blobs + pg catalog + container images + units), but Quay
+             did NOT answer on {{ mirror_private_ip }}:8443 within the boot wait
+             (~5 min).  cloud-init's restore path may have failed to start the
+             quay-* units, or a container crash-looped.  Falling through to a full
+             re-install + re-import to recover.  Investigate the restored mirror:
+             journalctl -u quay-app, podman ps -a.  See docs/mirror-vdb-persistence.md.
       when:
         - already_ready.rc != 0
         - marker_only_check.rc | default(1) == 0
