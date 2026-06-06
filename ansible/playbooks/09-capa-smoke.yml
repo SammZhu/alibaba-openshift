@@ -318,6 +318,37 @@
           no_log: true
           changed_when: true
 
+        - name: "#27 — wait until the ECS is fully gone (so describe → nil)"
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DescribeInstances
+              - --RegionId
+              - "{{ smoke_region }}"
+              - --InstanceIds
+              - '["{{ smoke_instance_id }}"]'
+              - --access-key-id
+              - "{{ smoke_ak }}"
+              - --access-key-secret
+              - "{{ smoke_sk }}"
+          delegate_to: local
+          register: _ecs_gone
+          retries: 24
+          delay: 10
+          until: ((_ecs_gone.stdout | from_json).Instances.Instance | length) == 0
+          no_log: true
+          changed_when: false
+
+        # The controller does not periodically requeue a Ready machine, so the
+        # out-of-band ECS deletion does not trigger a reconcile on its own.
+        # Nudge the object (changing annotation) to force one — the reconcile
+        # then sees describeInstance → nil and records the terminal failure.
+        - name: "#27 — nudge the AlibabaCloudMachine to force a reconcile"
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, -n, "{{ ns }}", annotate, alibabacloudmachine, smoke-test-worker, "smoke.nudge={{ smoke_instance_id }}", --overwrite]
+          changed_when: true
+
         - name: "#27 — assert status.failureReason becomes InstanceDisappeared"
           ansible.builtin.command:
             argv: [oc, "--kubeconfig", /root/kubeconfig, -n, "{{ ns }}", get, alibabacloudmachine, smoke-test-worker, -o, "jsonpath={.status.failureReason}"]
