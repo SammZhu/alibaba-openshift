@@ -75,6 +75,16 @@ spec:
                   - value
                   type: object
                 type: array
+              bootImageID:
+                description: |-
+                  BootImageID is the Alibaba Cloud custom image used to boot worker nodes so
+                  they join THIS cluster. It is the imported OpenShift discovery/RHCOS image
+                  (the same ecs_image_id used to install the cluster, or a day-2 add-hosts
+                  infra-env image) and carries the embedded Ignition / infra-env config.
+                  AlibabaCloudMachines that omit spec.imageID fall back to this value, so a
+                  MachineDeployment template does not have to repeat it. Leaving both empty
+                  makes machine provisioning fail with a terminal NoBootImage error.
+                type: string
               controlPlaneEndpoint:
                 description: |-
                   ControlPlaneEndpoint represents the endpoint used to communicate with the
@@ -344,6 +354,16 @@ spec:
                           - value
                           type: object
                         type: array
+                      bootImageID:
+                        description: |-
+                          BootImageID is the Alibaba Cloud custom image used to boot worker nodes so
+                          they join THIS cluster. It is the imported OpenShift discovery/RHCOS image
+                          (the same ecs_image_id used to install the cluster, or a day-2 add-hosts
+                          infra-env image) and carries the embedded Ignition / infra-env config.
+                          AlibabaCloudMachines that omit spec.imageID fall back to this value, so a
+                          MachineDeployment template does not have to repeat it. Leaving both empty
+                          makes machine provisioning fail with a terminal NoBootImage error.
+                        type: string
                       controlPlaneEndpoint:
                         description: |-
                           ControlPlaneEndpoint represents the endpoint used to communicate with the
@@ -512,8 +532,28 @@ spec:
                       - cloud_essd
                       - cloud_auto
                       type: string
+                    encrypted:
+                      description: Encrypted enables server-side encryption of the
+                        disk.
+                      type: boolean
+                    kmsKeyID:
+                      description: |-
+                        KMSKeyID is the ID of the KMS key used to encrypt the disk. When Encrypted
+                        is true and KMSKeyID is empty, Alibaba Cloud's default EBS service key is
+                        used. Setting KMSKeyID without Encrypted=true is rejected by the webhook.
+                      type: string
                     name:
                       description: Name is an optional identifier for the data disk.
+                      type: string
+                    performanceLevel:
+                      description: |-
+                        PerformanceLevel is the ESSD performance level. Only meaningful for the
+                        cloud_essd category; ignored otherwise.
+                      enum:
+                      - PL0
+                      - PL1
+                      - PL2
+                      - PL3
                       type: string
                     size:
                       description: Size is the disk size in GiB.
@@ -525,7 +565,11 @@ spec:
                   type: object
                 type: array
               imageID:
-                description: ImageID is the ID of the ECS image to use for the instance.
+                description: |-
+                  ImageID is the ID of the ECS image to use for the instance. When empty, the
+                  owning AlibabaCloudCluster's spec.bootImageID is used instead (the cluster
+                  RHCOS/discovery boot image). At least one of the two must be set, otherwise
+                  provisioning fails with a terminal NoBootImage error.
                 type: string
               instanceType:
                 description: InstanceType is the ECS instance type (e.g. ecs.c6.large).
@@ -549,6 +593,24 @@ spec:
                 items:
                   type: string
                 type: array
+              spotPriceLimit:
+                description: |-
+                  SpotPriceLimit is the maximum hourly price (in the region's currency) for a
+                  spot instance. Required when SpotStrategy is SpotWithPriceLimit; ignored
+                  otherwise.
+                type: number
+              spotStrategy:
+                description: |-
+                  SpotStrategy is the spot-instance bidding strategy:
+                    - NoSpot (or empty): regular pay-as-you-go instance.
+                    - SpotWithPriceLimit: spot instance with a user-set hourly price ceiling
+                      (SpotPriceLimit is required).
+                    - SpotAsPriceGo: spot instance priced at the current market rate.
+                enum:
+                - NoSpot
+                - SpotWithPriceLimit
+                - SpotAsPriceGo
+                type: string
               systemDisk:
                 description: SystemDisk describes the system disk configuration.
                 properties:
@@ -560,6 +622,25 @@ spec:
                     - cloud_ssd
                     - cloud_essd
                     - cloud_auto
+                    type: string
+                  encrypted:
+                    description: Encrypted enables server-side encryption of the disk.
+                    type: boolean
+                  kmsKeyID:
+                    description: |-
+                      KMSKeyID is the ID of the KMS key used to encrypt the disk. When Encrypted
+                      is true and KMSKeyID is empty, Alibaba Cloud's default EBS service key is
+                      used. Setting KMSKeyID without Encrypted=true is rejected by the webhook.
+                    type: string
+                  performanceLevel:
+                    description: |-
+                      PerformanceLevel is the ESSD performance level. Only meaningful for the
+                      cloud_essd category; ignored otherwise.
+                    enum:
+                    - PL0
+                    - PL1
+                    - PL2
+                    - PL3
                     type: string
                   size:
                     description: Size is the disk size in GiB.
@@ -611,7 +692,6 @@ spec:
                 description: ZoneID is the availability zone within the region.
                 type: string
             required:
-            - imageID
             - instanceType
             type: object
           status:
@@ -820,9 +900,29 @@ spec:
                               - cloud_essd
                               - cloud_auto
                               type: string
+                            encrypted:
+                              description: Encrypted enables server-side encryption
+                                of the disk.
+                              type: boolean
+                            kmsKeyID:
+                              description: |-
+                                KMSKeyID is the ID of the KMS key used to encrypt the disk. When Encrypted
+                                is true and KMSKeyID is empty, Alibaba Cloud's default EBS service key is
+                                used. Setting KMSKeyID without Encrypted=true is rejected by the webhook.
+                              type: string
                             name:
                               description: Name is an optional identifier for the
                                 data disk.
+                              type: string
+                            performanceLevel:
+                              description: |-
+                                PerformanceLevel is the ESSD performance level. Only meaningful for the
+                                cloud_essd category; ignored otherwise.
+                              enum:
+                              - PL0
+                              - PL1
+                              - PL2
+                              - PL3
                               type: string
                             size:
                               description: Size is the disk size in GiB.
@@ -834,8 +934,11 @@ spec:
                           type: object
                         type: array
                       imageID:
-                        description: ImageID is the ID of the ECS image to use for
-                          the instance.
+                        description: |-
+                          ImageID is the ID of the ECS image to use for the instance. When empty, the
+                          owning AlibabaCloudCluster's spec.bootImageID is used instead (the cluster
+                          RHCOS/discovery boot image). At least one of the two must be set, otherwise
+                          provisioning fails with a terminal NoBootImage error.
                         type: string
                       instanceType:
                         description: InstanceType is the ECS instance type (e.g. ecs.c6.large).
@@ -859,6 +962,24 @@ spec:
                         items:
                           type: string
                         type: array
+                      spotPriceLimit:
+                        description: |-
+                          SpotPriceLimit is the maximum hourly price (in the region's currency) for a
+                          spot instance. Required when SpotStrategy is SpotWithPriceLimit; ignored
+                          otherwise.
+                        type: number
+                      spotStrategy:
+                        description: |-
+                          SpotStrategy is the spot-instance bidding strategy:
+                            - NoSpot (or empty): regular pay-as-you-go instance.
+                            - SpotWithPriceLimit: spot instance with a user-set hourly price ceiling
+                              (SpotPriceLimit is required).
+                            - SpotAsPriceGo: spot instance priced at the current market rate.
+                        enum:
+                        - NoSpot
+                        - SpotWithPriceLimit
+                        - SpotAsPriceGo
+                        type: string
                       systemDisk:
                         description: SystemDisk describes the system disk configuration.
                         properties:
@@ -870,6 +991,26 @@ spec:
                             - cloud_ssd
                             - cloud_essd
                             - cloud_auto
+                            type: string
+                          encrypted:
+                            description: Encrypted enables server-side encryption
+                              of the disk.
+                            type: boolean
+                          kmsKeyID:
+                            description: |-
+                              KMSKeyID is the ID of the KMS key used to encrypt the disk. When Encrypted
+                              is true and KMSKeyID is empty, Alibaba Cloud's default EBS service key is
+                              used. Setting KMSKeyID without Encrypted=true is rejected by the webhook.
+                            type: string
+                          performanceLevel:
+                            description: |-
+                              PerformanceLevel is the ESSD performance level. Only meaningful for the
+                              cloud_essd category; ignored otherwise.
+                            enum:
+                            - PL0
+                            - PL1
+                            - PL2
+                            - PL3
                             type: string
                           size:
                             description: Size is the disk size in GiB.
@@ -922,7 +1063,6 @@ spec:
                         description: ZoneID is the availability zone within the region.
                         type: string
                     required:
-                    - imageID
                     - instanceType
                     type: object
                 required:
