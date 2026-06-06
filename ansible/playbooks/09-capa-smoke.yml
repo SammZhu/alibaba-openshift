@@ -255,9 +255,24 @@
         # a terminating AlibabaCloudMachine makes the controller run
         # reconcileDelete instead of a fresh reconcile (observed 2026-06-06:
         # #27 saw the object already mid-delete).  Wait for finalizers here.
+        - name: (setup) sweep any leftover smoke ECS first (frees stuck finalizers fast)
+          ansible.builtin.shell: |
+            IDS=$(aliyun ecs DescribeInstances --RegionId {{ smoke_region }} \
+              --InstanceName 'smoke-*' --PageSize 50 \
+              --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' 2>/dev/null \
+              | jq -r '.Instances.Instance[]?.InstanceId')
+            for i in $IDS; do
+              aliyun ecs DeleteInstance --InstanceId "$i" --Force true --RegionId {{ smoke_region }} \
+                --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' || true
+            done
+          delegate_to: local
+          no_log: true
+          changed_when: false
+          failed_when: false
+
         - name: (setup) pre-clean any stale smoke objects (wait for finalizers)
           ansible.builtin.command:
-            argv: [oc, "--kubeconfig", /root/kubeconfig, delete, -f, /root/capa-smoke-chain.yaml, --ignore-not-found, "--wait=true", "--timeout=200s"]
+            argv: [oc, "--kubeconfig", /root/kubeconfig, delete, -f, /root/capa-smoke-chain.yaml, --ignore-not-found, "--wait=true", "--timeout=240s"]
           changed_when: true
           failed_when: false
 
