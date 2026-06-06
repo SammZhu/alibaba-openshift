@@ -26,7 +26,27 @@
           jump_host_ip is not in state.yml — bring up the mirror-stack
           (Phase 03) first; Phase 08 deploys via the jump host.
 
-    - name: Add the jump host to the inventory
+    # The CAPA controller Deployment consumes AK/SK via `envFrom: secretRef:
+    # alibaba-creds` (see custom_manifests/02-capa-controller.yaml).  Read them
+    # from the operator's aliyun profile here so play 2 can create that secret —
+    # without it the controller pod is stuck in CreateContainerConfigError.
+    - name: Read Alibaba AK/SK from the operator's aliyun profile
+      ansible.builtin.command:
+        argv:
+          - jq
+          - -r
+          - '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret'
+          - "{{ lookup('env', 'HOME') }}/.aliyun/config.json"
+      register: _aksk
+      changed_when: false
+      no_log: true
+
+    - name: Assert AK/SK resolved for CAPA creds
+      ansible.builtin.assert:
+        that: (_aksk.stdout | trim | length) > 0 and (_aksk.stdout.split(' ') | length) == 2
+        fail_msg: "Could not read AK/SK for profile '{{ aliyun_profile }}' from ~/.aliyun/config.json"
+
+    - name: Add the jump host to the inventory (carry creds as host vars)
       ansible.builtin.add_host:
         name: jumphost
         ansible_host: "{{ jump_host_ip }}"
@@ -34,6 +54,9 @@
         ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
         groups: deploy
+        capa_ak: "{{ _aksk.stdout.split(' ')[0] }}"
+        capa_sk: "{{ _aksk.stdout.split(' ')[1] }}"
+      no_log: true
 
 - name: Deploy post-install components (executed on the jump host)
   hosts: jumphost
@@ -84,6 +107,26 @@
           - "{{ jump_repo_root }}/openshift-capi-alicloud/config/crd/bases/"
       register: capi_crd
       changed_when: "'unchanged' not in capi_crd.stdout"
+
+    - name: Ensure capa-system namespace exists (before the creds secret)
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", create, namespace, capa-system]
+      register: _capa_ns
+      changed_when: "'created' in (_capa_ns.stdout | default(''))"
+      failed_when:
+        - _capa_ns.rc != 0
+        - "'AlreadyExists' not in (_capa_ns.stderr | default(''))"
+
+    - name: Create/update alibaba-creds secret for the CAPA controller (envFrom)
+      ansible.builtin.shell: |
+        oc --kubeconfig {{ kubeconfig_file }} create secret generic alibaba-creds \
+          -n capa-system \
+          --from-literal=ALIBABA_CLOUD_ACCESS_KEY_ID='{{ capa_ak }}' \
+          --from-literal=ALIBABA_CLOUD_ACCESS_KEY_SECRET='{{ capa_sk }}' \
+          --dry-run=client -o yaml | oc --kubeconfig {{ kubeconfig_file }} apply -f -
+      register: _capa_secret
+      changed_when: "'configured' in _capa_secret.stdout or 'created' in _capa_secret.stdout"
+      no_log: true
 
     - name: Render CAPA controller manifest with image override
       ansible.builtin.shell: >
