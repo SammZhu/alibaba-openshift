@@ -126,10 +126,61 @@
           image={{ capa_smoke_image }} sg={{ smoke_sg }} img={{ smoke_image }}
           vsw={{ smoke_vsw }} zone={{ smoke_zone }} cp_host={{ smoke_cp_host }}
 
-    # ── Point the controller at the image under test ───────────────────────
-    - name: Set CAPA controller image to the version under test
+    # ── Resolve the image under test to a digest, then point the controller ─
+    # at it.  This cluster is air-gapped and its ImageDigestMirrorSet mirrors
+    # ONLY @sha256 digest pulls (registries.conf: pull-from-mirror =
+    # "digest-only").  A tag reference (…:vX) is therefore fetched from the
+    # unreachable upstream registry and the pod hangs forever in
+    # ContainerCreating ("Pulling image …" with no progress).  So we resolve the
+    # tag to its digest *via the mirror* (which holds the pushed tag) and deploy
+    # by digest, exercising the node's digest-only mirror path.  Reusable for any
+    # version — derive everything from capa_smoke_image + the cluster's IDMS.
+    - name: Split capa_smoke_image into repo + tag
+      ansible.builtin.set_fact:
+        _capa_repo: "{{ capa_smoke_image.split(':')[:-1] | join(':') }}"
+        _capa_tag: "{{ capa_smoke_image.split(':') | last }}"
+
+    - name: Read the ImageDigestMirrorSet map
       ansible.builtin.command:
-        argv: [oc, "--kubeconfig", /root/kubeconfig, set, image, deployment/capa-controller-manager, "manager={{ capa_smoke_image }}", -n, capa-system]
+        argv: [oc, "--kubeconfig", /root/kubeconfig, get, imagedigestmirrorset, -o, json]
+      register: _idms_json
+      changed_when: false
+
+    - name: Resolve the mirror for the controller image repo (from IDMS)
+      ansible.builtin.set_fact:
+        _capa_mirror: >-
+          {{ ((_idms_json.stdout | from_json).items
+              | map(attribute='spec.imageDigestMirrors') | list | flatten
+              | selectattr('source', 'equalto', _capa_repo) | list
+              | first).mirrors | first }}
+
+    - name: Assert a mirror exists for the controller image repo
+      ansible.builtin.assert:
+        that: _capa_mirror | default('') | trim | length > 0
+        fail_msg: "No IDMS mirror found for {{ _capa_repo }} — push the image into the mirror first."
+
+    - name: Extract the cluster pull secret (mirror auth for oc image info)
+      ansible.builtin.command:
+        argv: [oc, "--kubeconfig", /root/kubeconfig, -n, openshift-config, extract, secret/pull-secret, --to=/root, --confirm]
+      changed_when: false
+
+    - name: Resolve the image digest from the mirror
+      ansible.builtin.command:
+        argv: [oc, image, info, "{{ _capa_mirror | trim }}:{{ _capa_tag }}", "--registry-config=/root/.dockerconfigjson", --insecure, -o, json]
+      register: _capa_imginfo
+      changed_when: false
+
+    - name: Compose the digest-pinned controller image (IDMS-resolved)
+      ansible.builtin.set_fact:
+        _capa_image_digest: "{{ _capa_repo }}@{{ (_capa_imginfo.stdout | from_json).digest }}"
+
+    - name: Show the resolved digest reference
+      ansible.builtin.debug:
+        msg: "{{ capa_smoke_image }} -> {{ _capa_image_digest }}"
+
+    - name: Set CAPA controller image to the version under test (by digest)
+      ansible.builtin.command:
+        argv: [oc, "--kubeconfig", /root/kubeconfig, set, image, deployment/capa-controller-manager, "manager={{ _capa_image_digest }}", -n, capa-system]
       register: _setimg
       changed_when: "'image updated' in _setimg.stdout"
 
