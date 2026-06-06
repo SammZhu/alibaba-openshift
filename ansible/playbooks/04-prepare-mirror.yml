@@ -588,11 +588,21 @@
         - quay_running.rc | default(1) != 0
 
     # ── Step 7: trust the self-signed CA + register docker auth ──────────────
-    - name: Trust mirror's self-signed CA + set up docker auth
+    # MUST run on BOTH paths (P3-FIX.9): /root/.docker/config.json + the CA
+    # trust live on the ROOT disk (vda), which is NOT in the vdb snapshot, so a
+    # fast-path restore (already_ready==0) comes up without them.  The always-run
+    # commit-tag aliases step + IDMS PATCH below need config.json, so writing it
+    # only on the heavy path made the fast-path restore fail with podman 401
+    # (observed 2026-06-06).  This write is idempotent and cheap — always do it.
+    # CA cert source: /etc/quay-config on the heavy path; on fast-path restore
+    # fall back to the copy that rides the vdb snapshot.
+    - name: Trust mirror's self-signed CA + set up docker auth (both paths)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<REMOTE
         set -euxo pipefail
-        cp /etc/quay-config/ssl.cert /etc/pki/ca-trust/source/anchors/quay-mirror.crt
+        CACERT=/etc/quay-config/ssl.cert
+        [ -s "\$CACERT" ] || CACERT=/var/lib/quay-storage/quay-config/ssl.cert
+        cp "\$CACERT" /etc/pki/ca-trust/source/anchors/quay-mirror.crt
         update-ca-trust extract
         mkdir -p /root/.docker
         cat > /root/.docker/config.json <<DOCKEREOF
@@ -600,7 +610,6 @@
         DOCKEREOF
         until curl -ksf "https://{{ mirror_private_ip }}:8443/health/instance"; do sleep 5; done
         REMOTE
-      when: already_ready.rc != 0
       no_log: true
 
     # ── Step 8: import the image tarball via oc-mirror standalone ──────────
