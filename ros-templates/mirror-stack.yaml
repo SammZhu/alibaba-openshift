@@ -639,7 +639,14 @@ Resources:
               echo "$(date -Iseconds) restore path: starting Quay from stashed units"
               cp /var/lib/quay-storage/systemd/quay-*.service /etc/systemd/system/
               systemctl daemon-reload
-              systemctl enable --now quay-pod.service || true
+              # Enable + start ALL units, not just quay-pod: quay-pod only
+              # creates the (empty) pod + publishes 8443; the workload lives in
+              # the member containers (postgres/redis/app).  Starting quay-pod
+              # alone leaves 8443 published but nothing listening → Quay DOWN.
+              # systemd honours the units' After= ordering when starting
+              # several at once.  (P3-FIX.9 fix, observed 2026-06-06.)
+              systemctl enable quay-pod.service quay-postgres.service quay-redis.service quay-app.service || true
+              systemctl start  quay-pod.service quay-postgres.service quay-redis.service quay-app.service || true
             fi
 
             echo "$(date -Iseconds) BOOTSTRAP_READY" > /var/lib/mirror-bootstrap-ready
