@@ -149,10 +149,10 @@
     - name: Resolve the mirror for the controller image repo (from IDMS)
       ansible.builtin.set_fact:
         _capa_mirror: >-
-          {{ ((_idms_json.stdout | from_json).items
-              | map(attribute='spec.imageDigestMirrors') | list | flatten
-              | selectattr('source', 'equalto', _capa_repo) | list
-              | first).mirrors | first }}
+          {{ (_idms_json.stdout | from_json)['items']
+             | map(attribute='spec') | map(attribute='imageDigestMirrors') | flatten
+             | selectattr('source', 'equalto', _capa_repo)
+             | map(attribute='mirrors') | flatten | first }}
 
     - name: Assert a mirror exists for the controller image repo
       ansible.builtin.assert:
