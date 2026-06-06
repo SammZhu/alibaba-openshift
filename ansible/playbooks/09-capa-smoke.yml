@@ -250,6 +250,17 @@
     # The whole test is wrapped so cleanup always runs.
     - name: Run the behavioural smoke
       block:
+        # Start from a clean slate — a previous run's --wait=false cleanup can
+        # leave a smoke object still terminating (finalizer), and applying onto
+        # a terminating AlibabaCloudMachine makes the controller run
+        # reconcileDelete instead of a fresh reconcile (observed 2026-06-06:
+        # #27 saw the object already mid-delete).  Wait for finalizers here.
+        - name: (setup) pre-clean any stale smoke objects (wait for finalizers)
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, delete, -f, /root/capa-smoke-chain.yaml, --ignore-not-found, "--wait=true", "--timeout=200s"]
+          changed_when: true
+          failed_when: false
+
         # ── boot the ECS (shared helper inlined twice: #27 then #26) ────────
         - name: (setup) apply the smoke chain
           ansible.builtin.command:
@@ -385,13 +396,28 @@
             msg: "✓ #26 wait-for-terminated: finalizer held until ECS gone, then object released."
 
       always:
-        - name: cleanup — delete smoke objects
+        - name: cleanup — sweep any leftover smoke ECS first (frees finalizers)
+          ansible.builtin.shell: |
+            IDS=$(aliyun ecs DescribeInstances --RegionId {{ smoke_region }} \
+              --InstanceName 'smoke-*' --PageSize 50 \
+              --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' 2>/dev/null \
+              | jq -r '.Instances.Instance[]?.InstanceId')
+            for i in $IDS; do
+              aliyun ecs DeleteInstance --InstanceId "$i" --Force true --RegionId {{ smoke_region }} \
+                --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' || true
+            done
+          delegate_to: local
+          no_log: true
+          changed_when: false
+          failed_when: false
+
+        - name: cleanup — delete smoke objects (wait for finalizers so next run is clean)
           ansible.builtin.command:
-            argv: [oc, "--kubeconfig", /root/kubeconfig, delete, -f, /root/capa-smoke-chain.yaml, --ignore-not-found, --wait=false]
+            argv: [oc, "--kubeconfig", /root/kubeconfig, delete, -f, /root/capa-smoke-chain.yaml, --ignore-not-found, "--wait=true", "--timeout=200s"]
           changed_when: true
           failed_when: false
 
-        - name: cleanup — sweep any leftover smoke ECS (operator)
+        - name: cleanup — sweep any leftover smoke ECS again (operator)
           ansible.builtin.shell: |
             IDS=$(aliyun ecs DescribeInstances --RegionId {{ smoke_region }} \
               --InstanceName 'smoke-*' --PageSize 50 \
