@@ -208,7 +208,10 @@ It breaks when:
   image.
 
 If you hit `manifest unknown` after `oc set image @sha256:...`,
-revert to tag form by re-applying `02-capa-controller.yaml`.
+the digest you used isn't the one the mirror serves — **don't** revert to tag
+form on a truly air-gapped node (the tag pull then hangs, see §9.3). Instead
+resolve the digest *from the mirror* with `oc image info` and deploy that; §9.3
+shows the exact recipe the smoke now uses.
 
 ### 5.3 master-3 sometimes takes minutes to tag-resolve from quay
 
@@ -329,9 +332,102 @@ oc get crd alibabacloudclusters.infrastructure.cluster.x-k8s.io -o json \
 
 ---
 
-## 9. Version history
+## 9. PR2 — behavioural smoke, automated (`09-capa-smoke.yml`)
+
+PR2 hardens the **delete path** to the CAPI contract and ships a *reusable,
+operator-driven* smoke that drives the jump host over SSH. Run it against any
+controller build by passing the image:
+
+```bash
+# On the operator box (RHEL 8), from the repo root:
+ansible-playbook -i ansible/inventory.yml ansible/playbooks/09-capa-smoke.yml \
+  -e capa_smoke_image=quay.io/samzhu/openshift-capi-alicloud:v0.1.6
+```
+
+The playbook is self-contained: play 1 (`hosts: local`) auto-discovers the
+jump host, a master security group, a Rocky public image, the VSwitch/zone and
+the operator AK/SK from `ansible/state.yml`, then `add_host`s the jump host;
+play 2 (`hosts: jumphost`) sets the controller image, installs the CAPI core
+CRDs if missing, crafts the `Cluster`/`Machine` + `AlibabaCloud*` chain, patches
+the OwnerRefs, and runs the two behavioural cases. It always cleans up (sweeps
+smoke ECS via aliyun, then `oc delete --wait`).
+
+### 9.1 What it asserts
+
+| # | Behaviour | Success criterion |
+|---|---|---|
+| **#27** | terminal failure recording | Delete the ECS out-of-band (aliyun, on the operator) while the Machine is Ready → controller observes the instance is gone → sets `status.failureReason=InstanceDisappeared` (CAPI terminal-failure contract), no requeue storm. |
+| **#26** | wait-for-terminated finalizer | `oc delete --wait=false` the AlibabaCloudMachine → finalizer is **HELD** while the ECS still exists, and the object only disappears **after** the ECS is actually terminated. No orphan billable ECS behind a "deleted" Machine. |
+
+Live result (2026-06-06, `v0.1.6`): both PASS, `failed=0`.
+
+```
+TASK [#27 PASS] ✓ status.failureReason=InstanceDisappeared on i-0jl9bskdaq4mykbck5pb
+TASK [#26 PASS] ✓ finalizer held until ECS gone, then object released
+```
+
+### 9.2 Two controller fixes this smoke flushed out
+
+- **P3-CAPA.11 — delete must not depend on the owner Machine.**
+  `reconcileDelete` ran *after* `GetOwnerMachine`, so a half-torn-down object
+  whose owner `Machine` was already gone never reached the delete logic and the
+  finalizer hung. Fix: move the `DeletionTimestamp` check *ahead* of
+  `GetOwnerMachine`/cluster/paused lookups. (`openshift-capi-alicloud` tag
+  `v0.1.5`.)
+
+- **P3-CAPA.12 — release `Stopped` instances.** `Stopped` is a *stable* resting
+  state on Alibaba Cloud (a force-stopped instance sits there indefinitely and
+  never releases on its own); it is also the canonical deletable state. The
+  delete switch had lumped `Stopped` together with `Stopping`/`Deleted` into the
+  wait-only branch, so the controller polled forever and never re-issued
+  `DeleteInstance` → permanent finalizer deadlock. Fix: only `Stopping`
+  (transient) and `Deleted` (already released) stay wait-only; `Stopped` falls
+  through to `deleteInstance`. (`openshift-capi-alicloud` tag `v0.1.6`,
+  `TestReconcileDelete_Stopped_IssuesDelete`.)
+
+  > Diagnosing tip: the symptom is `oc get alibabacloudmachine` stuck at
+  > `STATE=Stopped` with the finalizer held, and the controller log repeating
+  > `"ECS instance is terminating, waiting" state="Stopped"` forever. Confirm
+  > the instance is genuinely resting (not releasing) before blaming the
+  > controller.
+
+### 9.3 Air-gapped gotcha — deploy the controller by **digest**, not tag (P3-FIX.11)
+
+This bites whenever the smoke runs a *new* tag that isn't already cached on the
+node. The cluster's `ImageDigestMirrorSet` renders
+`pull-from-mirror = "digest-only"` in the node `registries.conf` (see §5.2), so
+**only `@sha256` digest pulls are redirected to the mirror**. A tag reference
+(`oc set image …:vX`) is fetched from the upstream registry directly — which is
+unreachable (or cross-border-slow) from the masters — and the pod hangs in
+`ContainerCreating` until the rollout times out. Older tags only ever "worked"
+because they happened to be in the node image store already.
+
+`09-capa-smoke.yml` therefore resolves the tag to its **mirror-side** digest and
+deploys by digest:
+
+1. Split `capa_smoke_image` into `<repo>` + `<tag>`.
+2. Find the mirror for `<repo>` from the live IDMS
+   (`oc get imagedigestmirrorset -o json`).
+3. `oc image info <mirror>:<tag> --registry-config=<cluster pull-secret> --insecure -o json`
+   → `.digest`. **This is the registry-side digest, read straight from the
+   mirror** — *not* `podman image inspect .Digest` (the local image ID), which
+   was the §5.2 trap. The mirror may serve both a docker-schema2 and an OCI
+   manifest for the same image (different digests); the one `oc image info`
+   returns is the one the node will resolve and is guaranteed present in the
+   mirror.
+4. `oc set image deployment/capa-controller-manager manager=<repo>@<digest>` —
+   IDMS rewrites `quay.io/...@sha256:...` → `mirror/...@sha256:...`, exercising
+   the digest-only mirror path, so the pull is fast and offline-safe.
+
+If you ever deploy the controller manifest by hand on an air-gapped cluster, do
+the same: reference it by digest, not tag.
+
+---
+
+## 10. Version history
 
 | Date | Change |
 |---|---|
 | 2026-06-01 | Initial — P1-CAPA verification run.  CAPA image v0.1.0 panic discovered; rebuilt as v0.1.1 with semver fallback; smoke test reached Cluster-API OwnerRef gate as expected.  All commits: `c7b4b9a` (alibaba-openshift) + `a4dc369` (openshift-capi-alicloud). |
 | 2026-06-05 | PR1 contract-compliance (§8) — CAPA `v0.1.3` smoke-validated on live SNO: providerID slash+region, delete finalizer auto-clear (P2 hang fixed), bootstrap gate, controlPlaneEndpoint mirror, paused.  CRD-regen pruning gotcha documented.  Commits: `a59828e` (02-capa-crds.yaml) + `0239b97`/`0d91747` (openshift-capi-alicloud PR1 + CRD regen, tag `v0.1.3`). |
+| 2026-06-06 | PR2 behavioural smoke (§9) — automated `09-capa-smoke.yml`; CAPA `v0.1.6` validated on live SNO: #27 terminal `FailureReason=InstanceDisappeared`, #26 wait-for-terminated finalizer, plus P3-CAPA.11 (owner-independent delete) and P3-CAPA.12 (release `Stopped` instances).  Air-gapped digest-pin fix (P3-FIX.11).  Commits: `5d9f899`/tag `v0.1.6` (openshift-capi-alicloud) + `c289f2e`/`9c20ec8` (alibaba-openshift). |
