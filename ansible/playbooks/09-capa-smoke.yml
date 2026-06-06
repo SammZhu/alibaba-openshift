@@ -1,0 +1,400 @@
+---
+# Phase 09 — CAPA controller behavioural smoke test (PR2: #26 + #27).
+#
+# Reusable + parametrised by the controller image: point capa_smoke_image at any
+# build (e.g. a fresh quay.io/samzhu/openshift-capi-alicloud:vX.Y.Z) and this
+# playbook (re)deploys it, boots a throwaway ECS through the full CAPI OwnerRef
+# chain, and asserts the two PR2 behaviours, then cleans everything up:
+#
+#   #26  reconcileDelete waits for the ECS to actually terminate before it
+#        removes the finalizer (object must NOT vanish while the ECS lives).
+#   #27  a terminal condition (the ECS vanishing out-of-band) sets
+#        status.failureReason = InstanceDisappeared and stops requeueing.
+#
+# Driven from the operator (RHEL8); all oc/kubectl runs on the jump host, the
+# out-of-band ECS delete runs via aliyun on the operator (delegate_to: local).
+# Standalone + idempotent: derives everything from state.yml; cleans up its own
+# objects on every run (and via a rescue/always).
+#
+#   ansible-playbook -i ansible/inventory.yml ansible/playbooks/09-capa-smoke.yml \
+#     [-e capa_smoke_image=quay.io/samzhu/openshift-capi-alicloud:v0.1.4]
+
+- name: Resolve jump host + smoke inputs from operator
+  hosts: local
+  gather_facts: false
+  vars:
+    capa_smoke_image: quay.io/samzhu/openshift-capi-alicloud:v0.1.4
+    capi_core_version: v1.12.7
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: Assert prerequisites in state
+      ansible.builtin.assert:
+        that:
+          - jump_host_ip | default('') | length > 0
+          - mirror_private_vsw_1 | default('') | length > 0
+          - api_lb_endpoint | default('') | length > 0
+        fail_msg: "Need jump_host_ip + mirror_private_vsw_1 + api_lb_endpoint in state.yml (run 03/06 first)."
+
+    - name: Discover a security group in the cluster VPC
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeSecurityGroups
+          - --RegionId
+          - "{{ region }}"
+          - --VpcId
+          - "{{ mirror_vpc_id }}"
+          - --PageSize
+          - "50"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _sg_q
+      changed_when: false
+
+    - name: Discover latest Rocky x64 public image
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeImages
+          - --RegionId
+          - "{{ region }}"
+          - --ImageOwnerAlias
+          - system
+          - --OSType
+          - linux
+          - --PageSize
+          - "100"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _img_q
+      changed_when: false
+
+    - name: Read AK/SK (for the out-of-band ECS delete in #27)
+      ansible.builtin.command:
+        argv:
+          - jq
+          - -r
+          - '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret'
+          - "{{ lookup('env', 'HOME') }}/.aliyun/config.json"
+      register: _aksk
+      changed_when: false
+      no_log: true
+
+    - name: Compute smoke inputs
+      ansible.builtin.set_fact:
+        _smoke_sg: "{{ smoke_sg | default((_sg_q.stdout | from_json).SecurityGroups.SecurityGroup[0].SecurityGroupId) }}"
+        _smoke_img: >-
+          {{ smoke_image | default(((_img_q.stdout | from_json).Images.Image
+             | selectattr('ImageId','search','rockylinux_9.*x64') | map(attribute='ImageId') | first)) }}
+
+    - name: Add the jump host (carry smoke inputs as host vars)
+      ansible.builtin.add_host:
+        name: jumphost
+        ansible_host: "{{ jump_host_ip }}"
+        ansible_user: root
+        ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+        groups: deploy
+        capa_smoke_image: "{{ capa_smoke_image }}"
+        capi_core_version: "{{ capi_core_version }}"
+        smoke_region: "{{ region }}"
+        smoke_zone: "{{ mirror_zone_id }}"
+        smoke_vsw: "{{ mirror_private_vsw_1 }}"
+        smoke_sg: "{{ _smoke_sg }}"
+        smoke_ram_role: "{{ mirror_node_ram_role }}"
+        smoke_image: "{{ _smoke_img }}"
+        smoke_cp_host: "{{ api_lb_endpoint }}"
+        smoke_ak: "{{ _aksk.stdout.split(' ')[0] }}"
+        smoke_sk: "{{ _aksk.stdout.split(' ')[1] }}"
+      no_log: true
+
+- name: CAPA behavioural smoke (executed on the jump host)
+  hosts: jumphost
+  gather_facts: false
+  vars:
+    kc: "--kubeconfig /root/kubeconfig"
+    ns: default
+  module_defaults:
+    ansible.builtin.command: { }
+  tasks:
+    - name: Show smoke parameters
+      ansible.builtin.debug:
+        msg: >-
+          image={{ capa_smoke_image }} sg={{ smoke_sg }} img={{ smoke_image }}
+          vsw={{ smoke_vsw }} zone={{ smoke_zone }} cp_host={{ smoke_cp_host }}
+
+    # ── Point the controller at the image under test ───────────────────────
+    - name: Set CAPA controller image to the version under test
+      ansible.builtin.command:
+        argv: [oc, "--kubeconfig", /root/kubeconfig, set, image, deployment/capa-controller-manager, "manager={{ capa_smoke_image }}", -n, capa-system]
+      register: _setimg
+      changed_when: "'image updated' in _setimg.stdout"
+
+    - name: Wait for controller rollout
+      ansible.builtin.command:
+        argv: [oc, "--kubeconfig", /root/kubeconfig, rollout, status, deployment/capa-controller-manager, -n, capa-system, --timeout=180s]
+      changed_when: false
+
+    # ── CAPI core CRDs (idempotent: skip if already installed) ─────────────
+    - name: Check whether CAPI core Cluster CRD exists
+      ansible.builtin.command:
+        argv: [oc, "--kubeconfig", /root/kubeconfig, get, crd, clusters.cluster.x-k8s.io]
+      register: _capi_crd
+      changed_when: false
+      failed_when: false
+
+    - name: Install CAPI core CRDs when missing
+      when: _capi_crd.rc != 0
+      block:
+        - name: Download cluster-api components + extract CRDs
+          ansible.builtin.shell: |
+            set -euo pipefail
+            cd /root
+            curl -fsSL -o cluster-api-components.yaml \
+              https://github.com/kubernetes-sigs/cluster-api/releases/download/{{ capi_core_version }}/cluster-api-components.yaml
+            awk '/^---$/{p=0} /^kind: CustomResourceDefinition$/{p=1; print "---"} p==1{print}' \
+              cluster-api-components.yaml > capi-crds-only.yaml
+            grep -c '^kind: CustomResourceDefinition' capi-crds-only.yaml
+          changed_when: true
+
+        - name: Apply CAPI core CRDs (server-side, force-conflicts)
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, apply, --server-side=true, --force-conflicts, -f, /root/capi-crds-only.yaml]
+          changed_when: true
+
+        - name: Restart CAPA controller so it picks up the new CRD watch
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, rollout, restart, deployment/capa-controller-manager, -n, capa-system]
+          changed_when: true
+        - name: Wait for controller rollout after CRD install
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, rollout, status, deployment/capa-controller-manager, -n, capa-system, --timeout=180s]
+          changed_when: false
+
+    # ── helper: render the full smoke chain ────────────────────────────────
+    - name: Stage the smoke manifest on the jump host
+      ansible.builtin.copy:
+        dest: /root/capa-smoke-chain.yaml
+        content: |
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: smoke-bootstrap-data
+            namespace: {{ ns }}
+          stringData:
+            value: "{}"
+          ---
+          apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+          kind: AlibabaCloudCluster
+          metadata:
+            name: smoke-test
+            namespace: {{ ns }}
+          spec:
+            region: {{ smoke_region }}
+            controlPlaneEndpoint:
+              host: {{ smoke_cp_host }}
+              port: 6443
+          ---
+          apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+          kind: AlibabaCloudMachine
+          metadata:
+            name: smoke-test-worker
+            namespace: {{ ns }}
+          spec:
+            instanceType: ecs.t6-c1m1.large
+            imageID: {{ smoke_image }}
+            regionID: {{ smoke_region }}
+            zoneID: {{ smoke_zone }}
+            vSwitchID: {{ smoke_vsw }}
+            securityGroupIDs: ["{{ smoke_sg }}"]
+            ramRoleName: {{ smoke_ram_role }}
+            systemDisk:
+              category: cloud_essd
+              size: 40
+          ---
+          apiVersion: cluster.x-k8s.io/v1beta2
+          kind: Cluster
+          metadata:
+            name: smoke-cluster
+            namespace: {{ ns }}
+          spec:
+            infrastructureRef:
+              apiGroup: infrastructure.cluster.x-k8s.io
+              kind: AlibabaCloudCluster
+              name: smoke-test
+          ---
+          apiVersion: cluster.x-k8s.io/v1beta2
+          kind: Machine
+          metadata:
+            name: smoke-machine
+            namespace: {{ ns }}
+            labels:
+              cluster.x-k8s.io/cluster-name: smoke-cluster
+          spec:
+            clusterName: smoke-cluster
+            infrastructureRef:
+              apiGroup: infrastructure.cluster.x-k8s.io
+              kind: AlibabaCloudMachine
+              name: smoke-test-worker
+            bootstrap:
+              dataSecretName: smoke-bootstrap-data
+        mode: "0644"
+
+    # The whole test is wrapped so cleanup always runs.
+    - name: Run the behavioural smoke
+      block:
+        # ── boot the ECS (shared helper inlined twice: #27 then #26) ────────
+        - name: (setup) apply the smoke chain
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, apply, -f, /root/capa-smoke-chain.yaml]
+          changed_when: true
+
+        - name: (setup) patch OwnerRefs onto the AlibabaCloud* objects
+          ansible.builtin.shell: |
+            set -euo pipefail
+            CU=$(oc {{ kc }} -n {{ ns }} get cluster smoke-cluster -o jsonpath='{.metadata.uid}')
+            MU=$(oc {{ kc }} -n {{ ns }} get machine smoke-machine -o jsonpath='{.metadata.uid}')
+            oc {{ kc }} -n {{ ns }} patch alibabacloudcluster smoke-test --type=merge \
+              -p "{\"metadata\":{\"ownerReferences\":[{\"apiVersion\":\"cluster.x-k8s.io/v1beta2\",\"kind\":\"Cluster\",\"name\":\"smoke-cluster\",\"uid\":\"$CU\",\"controller\":true,\"blockOwnerDeletion\":true}]}}"
+            oc {{ kc }} -n {{ ns }} patch alibabacloudmachine smoke-test-worker --type=merge \
+              -p "{\"metadata\":{\"ownerReferences\":[{\"apiVersion\":\"cluster.x-k8s.io/v1beta2\",\"kind\":\"Machine\",\"name\":\"smoke-machine\",\"uid\":\"$MU\",\"controller\":true,\"blockOwnerDeletion\":true}]}}"
+          changed_when: true
+
+        - name: (setup) wait until CAPA boots the ECS (status.instanceID set)
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, -n, "{{ ns }}", get, alibabacloudmachine, smoke-test-worker, -o, "jsonpath={.status.instanceID}"]
+          register: _iid
+          retries: 30
+          delay: 10
+          until: _iid.stdout | trim | length > 0
+          changed_when: false
+
+        - name: Record the booted instance id
+          ansible.builtin.set_fact:
+            smoke_instance_id: "{{ _iid.stdout | trim }}"
+
+        - name: "#27 — delete the ECS out-of-band (aliyun, on operator) to force a terminal error"
+          ansible.builtin.command:
+            argv:
+              - aliyun
+              - ecs
+              - DeleteInstance
+              - --InstanceId
+              - "{{ smoke_instance_id }}"
+              - --Force
+              - "true"
+              - --RegionId
+              - "{{ smoke_region }}"
+              - --access-key-id
+              - "{{ smoke_ak }}"
+              - --access-key-secret
+              - "{{ smoke_sk }}"
+          delegate_to: local
+          no_log: true
+          changed_when: true
+
+        - name: "#27 — assert status.failureReason becomes InstanceDisappeared"
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, -n, "{{ ns }}", get, alibabacloudmachine, smoke-test-worker, -o, "jsonpath={.status.failureReason}"]
+          register: _fr
+          retries: 24
+          delay: 10
+          until: _fr.stdout | trim == 'InstanceDisappeared'
+          changed_when: false
+
+        - name: "#27 PASS"
+          ansible.builtin.debug:
+            msg: "✓ #27 terminal-failure: status.failureReason=InstanceDisappeared on {{ smoke_instance_id }}"
+
+        # ── reset for #26 ──────────────────────────────────────────────────
+        - name: (reset) delete the smoke chain before #26
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, delete, -f, /root/capa-smoke-chain.yaml, --ignore-not-found, --wait=true, --timeout=180s]
+          changed_when: true
+
+        - name: (reset) re-apply the smoke chain
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, apply, -f, /root/capa-smoke-chain.yaml]
+          changed_when: true
+
+        - name: (reset) re-patch OwnerRefs
+          ansible.builtin.shell: |
+            set -euo pipefail
+            CU=$(oc {{ kc }} -n {{ ns }} get cluster smoke-cluster -o jsonpath='{.metadata.uid}')
+            MU=$(oc {{ kc }} -n {{ ns }} get machine smoke-machine -o jsonpath='{.metadata.uid}')
+            oc {{ kc }} -n {{ ns }} patch alibabacloudcluster smoke-test --type=merge \
+              -p "{\"metadata\":{\"ownerReferences\":[{\"apiVersion\":\"cluster.x-k8s.io/v1beta2\",\"kind\":\"Cluster\",\"name\":\"smoke-cluster\",\"uid\":\"$CU\",\"controller\":true,\"blockOwnerDeletion\":true}]}}"
+            oc {{ kc }} -n {{ ns }} patch alibabacloudmachine smoke-test-worker --type=merge \
+              -p "{\"metadata\":{\"ownerReferences\":[{\"apiVersion\":\"cluster.x-k8s.io/v1beta2\",\"kind\":\"Machine\",\"name\":\"smoke-machine\",\"uid\":\"$MU\",\"controller\":true,\"blockOwnerDeletion\":true}]}}"
+          changed_when: true
+
+        - name: (reset) wait for a fresh ECS
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, -n, "{{ ns }}", get, alibabacloudmachine, smoke-test-worker, -o, "jsonpath={.status.instanceID}"]
+          register: _iid2
+          retries: 30
+          delay: 10
+          until: _iid2.stdout | trim | length > 0
+          changed_when: false
+
+        - name: "#26 — initiate delete (don't block on the finalizer)"
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, -n, "{{ ns }}", delete, alibabacloudmachine, smoke-test-worker, --wait=false]
+          changed_when: true
+
+        - name: "#26 — finalizer must be HELD while the ECS still exists"
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, -n, "{{ ns }}", get, alibabacloudmachine, smoke-test-worker, -o, "jsonpath={.metadata.deletionTimestamp}|{.metadata.finalizers}"]
+          register: _held
+          changed_when: false
+          failed_when:
+            - _held.rc == 0
+            - "'alibabacloudmachine.infrastructure.cluster.x-k8s.io' not in _held.stdout"
+
+        - name: "#26 — now it must converge to gone (finalizer released after ECS terminated)"
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, -n, "{{ ns }}", get, alibabacloudmachine, smoke-test-worker]
+          register: _gone
+          retries: 30
+          delay: 10
+          until: _gone.rc != 0
+          changed_when: false
+          failed_when: false
+
+        - name: "#26 — assert the object is actually gone"
+          ansible.builtin.assert:
+            that: _gone.rc != 0
+            fail_msg: "AlibabaCloudMachine never released its finalizer — #26 wait-for-terminated failed."
+
+        - name: "#26 PASS"
+          ansible.builtin.debug:
+            msg: "✓ #26 wait-for-terminated: finalizer held until ECS gone, then object released."
+
+      always:
+        - name: cleanup — delete smoke objects
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, delete, -f, /root/capa-smoke-chain.yaml, --ignore-not-found, --wait=false]
+          changed_when: true
+          failed_when: false
+
+        - name: cleanup — sweep any leftover smoke ECS (operator)
+          ansible.builtin.shell: |
+            IDS=$(aliyun ecs DescribeInstances --RegionId {{ smoke_region }} \
+              --InstanceName 'smoke-*' --PageSize 50 \
+              --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' 2>/dev/null \
+              | jq -r '.Instances.Instance[]?.InstanceId')
+            for i in $IDS; do
+              aliyun ecs DeleteInstance --InstanceId "$i" --Force true --RegionId {{ smoke_region }} \
+                --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' || true
+            done
+          delegate_to: local
+          no_log: true
+          changed_when: false
+          failed_when: false
+
+    - name: Phase 09 smoke summary
+      ansible.builtin.debug:
+        msg: "✓ CAPA {{ capa_smoke_image }} passed PR2 behavioural smoke (#26 wait-for-terminated, #27 terminal FailureReason)."
