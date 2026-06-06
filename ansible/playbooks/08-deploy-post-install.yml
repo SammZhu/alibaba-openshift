@@ -1,17 +1,63 @@
 ---
-# Phase 08 — deploy CAPI + CSI Operator + CSI driver CR onto the cluster.
-# Runs on the jump host (or anywhere with KUBECONFIG and network access to
-# the API NLB).  See docs/POST-INSTALL.md for the full picture (incl. OADP,
-# which is manual-apply rather than driven from here).
-- name: Deploy post-install components
+# Phase 08 — deploy CAPI provider + CSI operator + CSI driver CR onto the cluster.
+#
+# Driven from the OPERATOR host (RHEL8); executed ON the jump host.  The jump
+# host lives inside the VPC (can reach the private cluster API), and carries the
+# repos + oc + kustomize + /root/kubeconfig — the operator box cannot reach the
+# cluster API directly, so all kubectl/oc work happens on the jump host over SSH.
+#
+# Standalone + idempotent: play 1 derives the jump host from state.yml and adds
+# it to the inventory (does NOT rely on Phase 03's in-run add_host), so Phase 08
+# can be run on its own at any time.  Every apply is `oc apply` (idempotent) with
+# changed_when gated on the "unchanged" marker.
+#
+# See docs/POST-INSTALL.md (OADP is manual-apply, not driven here).
+
+- name: Resolve jump host from state (Phase 08 runs standalone)
   hosts: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: Assert the jump host IP is known
+      ansible.builtin.assert:
+        that: jump_host_ip | default('') | length > 0
+        fail_msg: >-
+          jump_host_ip is not in state.yml — bring up the mirror-stack
+          (Phase 03) first; Phase 08 deploys via the jump host.
+
+    - name: Add the jump host to the inventory
+      ansible.builtin.add_host:
+        name: jumphost
+        ansible_host: "{{ jump_host_ip }}"
+        ansible_user: root
+        ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+        groups: deploy
+
+- name: Deploy post-install components (executed on the jump host)
+  hosts: jumphost
   gather_facts: false
   vars:
     csi_operator_img: quay.io/samzhu/alibaba-cloud-csi-operator:v1.35.3
     capi_provider_img: quay.io/samzhu/openshift-capi-alicloud:v0.1.2
-    kubeconfig_file: "{{ ansible_env.KUBECONFIG | default('/root/kubeconfig') }}"
+    kubeconfig_file: /root/kubeconfig
+    # Repos live here on the jump host (NOT {{ playbook_dir }} — that resolves to
+    # the operator's path; these commands run on the jump host).
+    jump_repo_root: /root/openshift-alibaba
   tasks:
-    - name: Assert kubeconfig is present
+    - name: Best-effort refresh of the jump host's repos (idempotent; never fatal)
+      ansible.builtin.command:
+        argv: [git, -C, "{{ jump_repo_root }}/{{ item }}", pull, --ff-only]
+      loop:
+        - alibaba-openshift
+        - openshift-capi-alicloud
+        - alibaba-cloud-csi-operator
+      register: _git_pull
+      changed_when: "'Already up to date' not in (_git_pull.stdout | default(''))"
+      failed_when: false
+
+    - name: Assert kubeconfig is present on the jump host
       ansible.builtin.stat:
         path: "{{ kubeconfig_file }}"
       register: kc_stat
@@ -35,18 +81,18 @@
           - "{{ kubeconfig_file }}"
           - apply
           - -f
-          - "{{ playbook_dir }}/../../openshift-capi-alicloud/config/crd/bases/"
+          - "{{ jump_repo_root }}/openshift-capi-alicloud/config/crd/bases/"
       register: capi_crd
       changed_when: "'unchanged' not in capi_crd.stdout"
 
-    - name: Render CAPI controller manifest with image override
+    - name: Render CAPA controller manifest with image override
       ansible.builtin.shell: >
         sed 's|image: quay.io/samzhu/openshift-capi-alicloud:.*|image: {{ capi_provider_img }}|'
-        '{{ playbook_dir }}/../../alibaba-openshift/custom_manifests/02-capa-controller.yaml'
+        '{{ jump_repo_root }}/alibaba-openshift/custom_manifests/02-capa-controller.yaml'
       register: capi_rendered
       changed_when: false
 
-    - name: Apply CAPI controller
+    - name: Apply CAPA controller
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
       args:
@@ -57,18 +103,13 @@
     # ── CSI operator ──────────────────────────────────────────────────────
     - name: Set CSI operator image in kustomize
       ansible.builtin.command:
-        argv:
-          - kustomize
-          - edit
-          - set
-          - image
-          - "controller={{ csi_operator_img }}"
-        chdir: "{{ playbook_dir }}/../../alibaba-cloud-csi-operator/config/manager"
+        argv: [kustomize, edit, set, image, "controller={{ csi_operator_img }}"]
+        chdir: "{{ jump_repo_root }}/alibaba-cloud-csi-operator/config/manager"
       changed_when: false
 
     - name: Render CSI operator kustomize
       ansible.builtin.command:
-        argv: [kustomize, build, "{{ playbook_dir }}/../../alibaba-cloud-csi-operator/config/default"]
+        argv: [kustomize, build, "{{ jump_repo_root }}/alibaba-cloud-csi-operator/config/default"]
       register: csi_rendered
       changed_when: false
 
@@ -100,17 +141,19 @@
           - "{{ kubeconfig_file }}"
           - apply
           - -f
-          - "{{ playbook_dir }}/../../alibaba-openshift/custom_manifests/04-csi-driver-cr.yaml"
+          - "{{ jump_repo_root }}/alibaba-openshift/custom_manifests/04-csi-driver-cr.yaml"
       register: csi_cr
       changed_when: "'unchanged' not in csi_cr.stdout"
 
-    - name: Phase 05 done
+    - name: Phase 08 done
       ansible.builtin.debug:
         msg: |
-          ✓ CAPI provider, CSI operator, CSI driver CR all applied.
+          ✓ CAPI provider, CSI operator, CSI driver CR all applied
+            (driven from operator → executed on jump host {{ ansible_host }}).
 
-          Verify:
-            oc get pods -n capa-system
-            oc get pods -n alibaba-cloud-csi-operator-system
-            oc get alibabacloudcsidriver cluster -o yaml
-            oc get storageclass | grep alicloud
+          Verify on the jump host:
+            ssh root@{{ ansible_host }}
+            oc --kubeconfig=/root/kubeconfig get pods -n capa-system
+            oc --kubeconfig=/root/kubeconfig get pods -n alibaba-cloud-csi-operator-system
+            oc --kubeconfig=/root/kubeconfig get alibabacloudcsidriver cluster -o yaml
+            oc --kubeconfig=/root/kubeconfig get storageclass | grep alicloud
