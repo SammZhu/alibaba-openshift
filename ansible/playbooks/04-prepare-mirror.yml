@@ -767,14 +767,22 @@
     # there meant any failure between here and there lost the marker AND
     # the CA exposure.  Observed 2026-06-01 P1-CAPA.b: CAPA pre-pull
     # failed → marker never written → rerun re-downloaded 25 GB tarball.
-    - name: Stage CA cert + write mirror-ready marker (early, right after import)
+    # P3-FIX.9: stage the CA cert on BOTH paths.  /var/lib/mirror-ca.crt is a
+    # root-disk (vda) file consumed by the always-run "Fetch mirror CA cert to
+    # ansible host" + IDMS PATCH steps; it is NOT in the vdb snapshot, so a
+    # fast-path restore comes up without it and the fetch scp 404s (observed
+    # 2026-06-06).  Always re-stage it (vdb fallback for the source); only write
+    # the marker when it is missing so the snapshot's marker is preserved.
+    - name: Stage CA cert (both paths) + write mirror-ready marker if missing
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
-        cp /etc/quay-config/ssl.cert /var/lib/mirror-ca.crt
-        echo "$(date -Iseconds) READY (import done; CCM/CAPA pre-pull + IDMS PATCH still to run)" > /var/lib/quay-storage/mirror-ready
+        CACERT=/etc/quay-config/ssl.cert
+        [ -s "$CACERT" ] || CACERT=/var/lib/quay-storage/quay-config/ssl.cert
+        cp "$CACERT" /var/lib/mirror-ca.crt
+        [ -f /var/lib/quay-storage/mirror-ready ] || \
+          echo "$(date -Iseconds) READY (import done; CCM/CAPA pre-pull + IDMS PATCH still to run)" > /var/lib/quay-storage/mirror-ready
         REMOTE
-      when: already_ready.rc != 0
       changed_when: true
 
     # ── P3-FIX.9: stash Quay systemd units onto vdb for snapshot-restore ─────
