@@ -149,15 +149,19 @@
     - name: Install CAPI core CRDs when missing
       when: _capi_crd.rc != 0
       block:
-        - name: Download cluster-api components + extract CRDs
+        - name: Download cluster-api components + extract CRDs (whole docs, keeps apiVersion)
           ansible.builtin.shell: |
             set -euo pipefail
             cd /root
             curl -fsSL -o cluster-api-components.yaml \
               https://github.com/kubernetes-sigs/cluster-api/releases/download/{{ capi_core_version }}/cluster-api-components.yaml
-            awk '/^---$/{p=0} /^kind: CustomResourceDefinition$/{p=1; print "---"} p==1{print}' \
+            # Split on document separators and keep ENTIRE docs whose kind is
+            # CustomResourceDefinition (the earlier "start at the kind: line" awk
+            # dropped the apiVersion: line above it → oc apply "no matches for
+            # kind ... in version ''").  RS=doc-separator captures the full doc.
+            awk 'BEGIN{RS="\n---\n"} /(^|\n)kind: CustomResourceDefinition($|\n)/{printf "%s\n---\n", $0}' \
               cluster-api-components.yaml > capi-crds-only.yaml
-            grep -c '^kind: CustomResourceDefinition' capi-crds-only.yaml
+            echo "CRDs extracted: $(grep -c '^kind: CustomResourceDefinition' capi-crds-only.yaml)"
           changed_when: true
 
         - name: Apply CAPI core CRDs (server-side, force-conflicts)
