@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 
 INSTALLER_RHCOS = ("https://raw.githubusercontent.com/openshift/installer/"
@@ -38,11 +39,38 @@ def minor(version):
     return f"{m.group(1)}.{m.group(2)}"
 
 
+def fetch_stream_for_minor(branch):
+    """Fetch the installer rhcos.json for a release-X.Y branch; None on 404."""
+    url = INSTALLER_RHCOS.format(branch=branch)
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+
+
 def fetch_stream_for_version(version):
-    url = INSTALLER_RHCOS.format(branch=minor(version))
-    sys.stderr.write(f"[detect] resolving RHCOS for OCP {version} from {url}\n")
-    with urllib.request.urlopen(url, timeout=30) as r:
-        return json.loads(r.read().decode())
+    b = minor(version)
+    sys.stderr.write(f"[detect] resolving RHCOS for OCP {version} from release-{b}\n")
+    s = fetch_stream_for_minor(b)
+    if s is None:
+        raise ValueError(f"no installer rhcos.json for release-{b}")
+    return s
+
+
+def enumerate_minors(floor_minor, cap=40):
+    """Yield (branch, stream) for release-<floor>.. up to the first 404."""
+    major, mn = floor_minor.split(".")
+    m = int(mn)
+    while m <= int(mn) + cap:
+        branch = f"{major}.{m}"
+        stream = fetch_stream_for_minor(branch)
+        if stream is None:
+            break
+        yield branch, stream
+        m += 1
 
 
 def _grep1(path, key):
@@ -93,9 +121,34 @@ def main(argv=None):
     ap.add_argument("--group-vars", help="operator-local group_vars override (reads openshift_version)")
     ap.add_argument("--version-file", default="bootimage/version",
                     help="committed authoritative version file (default source)")
+    ap.add_argument("--all-from", action="store_true",
+                    help="MATRIX: enumerate every OCP minor from the floor (version "
+                         "source) up to the latest; emit TSV lines for the ones not "
+                         "yet in provenance (rhcos<TAB>ocp_minor<TAB>url<TAB>sha256)")
     ap.add_argument("--provenance-dir", required=True)
     args = ap.parse_args(argv)
 
+    # ── MATRIX mode: floor minor .. latest, skip already-baked, emit a list ──────
+    if args.all_from:
+        floor = args.openshift_version or version_from_file(args.version_file)
+        fminor = minor(floor)
+        have = known_versions(args.provenance_dir)
+        seen = set(have)   # also dedups minors that pin the same RHCOS build
+        to_bake, scanned = [], []
+        for branch, stream in enumerate_minors(fminor):
+            scanned.append(branch)
+            info = extract(stream)
+            if info["rhcosVersion"] not in seen:
+                to_bake.append((info, branch))
+                seen.add(info["rhcosVersion"])
+        for info, branch in to_bake:
+            print(f"{info['rhcosVersion']}\t{branch}\t{info['url']}\t{info['sha256']}")
+        sys.stderr.write(
+            f"[detect] floor={fminor} scanned={scanned} already_baked={sorted(have)} "
+            f"to_bake={[i['rhcosVersion'] for i, _ in to_bake]}\n")
+        return 0
+
+    # ── SINGLE mode (default): one version, GITHUB_OUTPUT key=value ──────────────
     if args.stream:
         raw = sys.stdin.read() if args.stream == "-" else open(args.stream).read()
         stream = json.loads(raw)
