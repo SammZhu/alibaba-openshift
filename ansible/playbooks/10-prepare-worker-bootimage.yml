@@ -138,11 +138,26 @@
             creates: "{{ qcow }}"
           when: (rhcos_qcow | default('') | length) == 0
 
-        - name: Install libguestfs tooling
+        # Escalate only when passwordless sudo is available. On a CI runner
+        # without sudo we run guestfish ROOTLESS (LIBGUESTFS_BACKEND=direct, TCG)
+        # and assume libguestfs is already installed. Override with
+        # -e bootimage_become=true|false.
+        - name: Detect passwordless sudo
+          ansible.builtin.command: sudo -n true
+          register: _sudo_check
+          changed_when: false
+          failed_when: false
+
+        - name: Decide whether to escalate
+          ansible.builtin.set_fact:
+            bootimage_become: "{{ bootimage_become | default(_sudo_check.rc == 0) }}"
+
+        - name: Install libguestfs tooling (only when we can escalate)
           become: true
           ansible.builtin.dnf:
             name: [libguestfs-tools, libguestfs-tools-c]
             state: present
+          when: bootimage_become | bool
 
         # ── Re-stamp ignition.platform.id -> aliyun on the /boot partition ─────
         # virt-customize cannot inspect RHCOS's OSTree layout, so edit the
@@ -150,7 +165,7 @@
         # partition, copy the loader entries + grub.cfg out, sed the karg, and
         # upload them back. Then re-read from the image to prove it stuck.
         - name: Re-stamp platform id to aliyun
-          become: true
+          become: "{{ bootimage_become | bool }}"
           environment:
             LIBGUESTFS_BACKEND: direct
           ansible.builtin.shell: |
