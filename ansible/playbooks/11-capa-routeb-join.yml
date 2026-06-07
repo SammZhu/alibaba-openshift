@@ -268,25 +268,32 @@
             rb_instance_id: "{{ _rb_iid.stdout | trim }}"
 
         # ── Wait for the node to join: auto-approve CSRs, watch for a NEW Ready node ─
+        # NOTE: deliberately NOT `set -e`/`pipefail`. Over an 80-iteration poll a
+        # single transient oc non-zero (or a SIGPIPE from `comm | head`) would
+        # otherwise abort the whole wait. Each oc call is wrapped in `timeout` so
+        # one hung request can't stall the loop forever (the original cause of a
+        # loop that never terminated even after the node was Ready).
         - name: Approve CSRs and wait for the new worker to be Ready
           ansible.builtin.shell: |
-            set -euo pipefail
             export KUBECONFIG=/root/kubeconfig
-            oc get nodes -o name | sort > /tmp/rb_before
+            timeout 30 oc get nodes -o name 2>/dev/null | sort > /tmp/rb_before
+            rc=1
             for i in $(seq 1 80); do
-              oc get csr --no-headers 2>/dev/null | awk '/Pending/{print $1}' \
-                | xargs -r oc adm certificate approve >/dev/null 2>&1 || true
-              NEW=$(oc get nodes -o name | sort | comm -13 /tmp/rb_before - | head -1)
-              if [ -n "$NEW" ]; then
-                ST=$(oc get "$NEW" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
-                echo "iter=$i new=$NEW ready=$ST"
-                [ "$ST" = "True" ] && { echo "JOINED $NEW"; exit 0; }
+              for c in $(timeout 30 oc get csr --no-headers 2>/dev/null | awk '$0 ~ /Pending/ {print $1}'); do
+                timeout 30 oc adm certificate approve "$c" >/dev/null 2>&1 || true
+              done
+              new=$(timeout 30 oc get nodes -o name 2>/dev/null | sort | comm -13 /tmp/rb_before - 2>/dev/null | head -1)
+              if [ -n "$new" ]; then
+                ready=$(timeout 30 oc get "$new" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
+                echo "iter=$i new=$new ready=$ready"
+                if [ "$ready" = "True" ]; then echo "JOINED $new"; rc=0; break; fi
               else
                 echo "iter=$i waiting for new node"
               fi
               sleep 15
             done
-            echo "TIMEOUT waiting for worker join"; exit 1
+            [ "$rc" -eq 0 ] || echo "TIMEOUT waiting for worker join"
+            exit $rc
           args:
             executable: /bin/bash
           register: _rb_join
