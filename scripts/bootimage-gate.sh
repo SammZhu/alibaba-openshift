@@ -42,6 +42,9 @@ guestfish --ro -a "$QCOW" run \
 echo "== [gate] karg assertions =="
 ARGS=("$WORK")
 [ -n "$BASELINE" ] && [ -f "$BASELINE" ] && ARGS+=(--baseline-keys "$BASELINE")
+# BOOTIMAGE_EMIT_BASELINE: where to record this image's karg KEY set, for the
+# provenance write-back (becomes the next version's diff-guard baseline).
+[ -n "${BOOTIMAGE_EMIT_BASELINE:-}" ] && ARGS+=(--emit-baseline "$BOOTIMAGE_EMIT_BASELINE")
 python3 "$HERE/verify_kargs.py" "${ARGS[@]}"
 
 echo "== [gate] PASS — image is structurally sound and fully re-stamped to aliyun =="

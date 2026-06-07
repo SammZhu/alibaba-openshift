@@ -102,6 +102,8 @@ def main(argv=None):
                     help="comma-separated pre-stamp ids that must NOT survive")
     ap.add_argument("--baseline-keys",
                     help="path to a newline-separated list of expected karg KEYS (diff guard)")
+    ap.add_argument("--emit-baseline",
+                    help="write THIS image's observed karg KEY set here (for provenance)")
     args = ap.parse_args(argv)
 
     baseline = None
@@ -110,6 +112,12 @@ def main(argv=None):
 
     ok, problems, info = verify(
         args.directory, args.expect, [f for f in args.forbid.split(",") if f], baseline)
+
+    # Record the observed karg KEY set so the provenance write-back can pin it as
+    # the next version's diff-guard baseline.
+    if args.emit_baseline and info.get("karg_keys"):
+        with open(args.emit_baseline, "w") as f:
+            f.write("\n".join(info["karg_keys"]) + "\n")
 
     if info:
         print(f"[gate] platform ids: {info['platform_ids']}")
