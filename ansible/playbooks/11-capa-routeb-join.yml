@@ -136,6 +136,21 @@
                deploy/capa-controller-manager, --timeout=240s]
       changed_when: false
 
+    # The validating/mutating webhooks have failurePolicy=Fail, so the very first
+    # AlibabaCloud* apply will be rejected with "no endpoints available" until the
+    # controller pod is Ready and backing the webhook Service. The pod also
+    # crash-restarts a couple of times while service-ca mints the serving cert, so
+    # rollout-complete alone isn't enough — wait for real Service endpoints.
+    - name: Wait for the webhook service to have endpoints
+      ansible.builtin.command:
+        argv: [oc, "--kubeconfig", /root/kubeconfig, -n, capa-system, get, endpoints,
+               capa-webhook-service, -o, "jsonpath={.subsets[*].addresses[*].ip}"]
+      register: _wh_ep
+      retries: 40
+      delay: 5
+      until: _wh_ep.stdout | trim | length > 0
+      changed_when: false
+
     # ── CAPI core CRDs (idempotent) ────────────────────────────────────────────
     - name: Check CAPI core Cluster CRD
       ansible.builtin.command:
