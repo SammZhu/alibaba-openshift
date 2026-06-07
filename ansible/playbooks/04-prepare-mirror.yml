@@ -135,6 +135,18 @@
         msg: "mirror-registry is already ready (marker present and Quay healthy on :8443). Skipping install + import + PATCH still runs."
       when: already_ready.rc == 0
 
+    # P3-COST.7: record whether this run actually (re)built the mirror content.
+    # already_ready.rc == 0  → fast-path restore, no import  → mirror_imported=false
+    # already_ready.rc != 0  → fresh build or restore-then-rebuild (did import)
+    #                          → mirror_imported=true
+    # 05-verify-mirror reads this fact (same host 'local', later play) to skip a
+    # redundant re-snapshot when vdb is unchanged from the seed it was restored
+    # from.  Defaults to true everywhere it is unknown, so we never silently skip
+    # a needed snapshot.
+    - name: Record whether this run rebuilt the mirror content (gates 05 re-snapshot)
+      ansible.builtin.set_fact:
+        mirror_imported: "{{ already_ready.rc != 0 }}"
+
     # Diagnostic: distinguish "never prepared" from "restored but Quay dead".
     # When the marker IS present yet readiness failed, the snapshot landed the
     # blobs but not a working Quay (catalog lost to vda sysprep, see above).

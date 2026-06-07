@@ -151,8 +151,27 @@
     # Skip:    -e mirror_snapshot_enabled=false
     # Rebuild: see docs/SNAPSHOT.md (lifecycle, fast-path, mutex rules,
     #          recovery scenarios)
+    # P3-COST.7: only (re)snapshot when this run actually rebuilt the mirror
+    # content. On a pure fast-path restore (03 snapshot-restore + 04 marker hit,
+    # no import) vdb is unchanged from the seed snapshot it was restored from, so
+    # re-snapshotting just yields a redundant same-named snapshot — and the old
+    # in-use seed can't be deleted (P3-FIX.7), leaving two ~200 G snapshots. 04
+    # sets mirror_imported=false on the fast-path. Unknown (e.g. 05 run
+    # standalone) defaults to true so we never silently skip a needed snapshot;
+    # mirror_snapshot_data_id keeps pointing at the still-valid seed.
+    - name: Skip re-snapshot on fast-path restore (mirror unchanged — P3-COST.7)
+      ansible.builtin.debug:
+        msg: >-
+          mirror_imported=false (fast-path restore) — vdb is unchanged from seed
+          snapshot {{ mirror_snapshot_data_id | default('?') }}; skipping re-snapshot.
+      when:
+        - mirror_snapshot_enabled | default(true) | bool
+        - not (mirror_imported | default(true) | bool)
+
     - name: Snapshot the mirror ECS's data disk (vdb only — P3-FIX.9)
-      when: mirror_snapshot_enabled | default(true) | bool
+      when:
+        - mirror_snapshot_enabled | default(true) | bool
+        - mirror_imported | default(true) | bool
       vars:
         _snap_data_name:   "{{ cluster_name }}-mirror-data"
         _ssh_to_mirror: >-
