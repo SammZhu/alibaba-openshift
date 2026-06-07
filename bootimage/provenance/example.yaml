@@ -1,0 +1,55 @@
+# RHCOS aliyun boot-image provenance (P3-IMG.1) — THE recipe.
+#
+# This few-KB file is the ONLY durable artifact of the boot-image supply chain:
+# the qcow2 is never stored (NAS-less, OSS is transit-only, the ECS image is
+# materialized on demand). Any version can be re-derived deterministically from
+# this record + the bake scripts. One file per RHCOS version, written back to git
+# by the `provenance` job after the bake passes the offline gate.
+#
+# Filename convention: bootimage/provenance/<rhcos_version>.yaml
+schemaVersion: 1
+
+# What this image is for.
+ocpVersion: "4.20.22"
+rhcosVersion: "420.96.202xxxxxxx-0"      # = coreos-bootimages architectures.x86_64.artifacts.openstack.release
+
+# The verified Red Hat source (the trust anchor — re-bake verifies this sha).
+source:
+  format: openstack-qcow2.gz
+  # architectures.x86_64.artifacts.openstack.formats["qcow2.gz"].disk.location
+  url: "https://rhcos.mirror.openshift.com/.../rhcos-openstack.x86_64.qcow2.gz"
+  sha256: "REPLACE_WITH_disk.sha256_FROM_STREAM"   # disk.sha256 if published, else computed+pinned
+
+# The deterministic transform applied to the decompressed qcow2.
+transform:
+  target: ignition.platform.id=aliyun
+  # Applied to /boot (ext4) BLS entries + grub2/grub.cfg via guestfish:
+  sed: 's/ignition\.platform\.id=[a-z0-9]*/ignition.platform.id=aliyun/g'
+  files: ["/loader/entries/*.conf", "/grub2/grub.cfg"]
+
+# Tooling pinned for reproducibility (recorded at bake time).
+tooling:
+  guestfish: "1.48.x"
+  qemu-img: "6.2.x"
+  libguestfsBackend: direct
+
+# Offline-gate baseline: the kernel-argument KEY set of THIS version (minus
+# ignition.platform.id). The next version's bake diffs against this to catch an
+# upstream karg-scheme change early. Populated from the gate's observed keys.
+kargsBaseline:
+  - ignition.platform.id
+  - console
+  - root
+  - rw
+  - ostree
+  - rd.luks.options
+
+# Output of a successful bake (informational; the image itself is ephemeral).
+result:
+  ossObject: "rhcos-worker-aliyun.qcow2"   # transit only — deleted / atime-expired
+  imageName: "rhcos-worker-aliyun"
+  # ECS image id is per-materialization and NOT pinned here (on-demand).
+  gate: passed
+  bootSmoke: pending                       # set "passed" after the low-frequency ECS boot test
+  bakedAt: "2026-06-07T00:00:00Z"
+  bakedBy: "github-actions/rhcos-aliyun-bootimage"
