@@ -87,14 +87,18 @@
       failed_when: false
 
     # ── Deploy the CAPA build under test (CRDs + webhooks + controller@digest) ──
-    - name: Apply CRDs + webhooks + controller
+    - name: Apply CRDs + controller + webhooks
+      # Order matters: 02-capa-controller.yaml creates the capa-system namespace
+      # (+ SA/RBAC/Deployment); 02-capa-webhooks.yaml puts a Service in it, so it
+      # must come AFTER. On a fresh cluster (08-deploy not run) the namespace
+      # doesn't exist yet.
       ansible.builtin.shell: |
         set -euo pipefail
         export KUBECONFIG=/root/kubeconfig
         cd {{ repo }}
         oc apply --server-side=true --force-conflicts -f custom_manifests/02-capa-crds.yaml
-        oc apply -f custom_manifests/02-capa-webhooks.yaml
         oc apply -f custom_manifests/02-capa-controller.yaml
+        oc apply -f custom_manifests/02-capa-webhooks.yaml
       changed_when: true
 
     - name: Ensure alibaba-creds secret exists
