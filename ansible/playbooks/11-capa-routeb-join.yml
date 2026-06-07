@@ -17,7 +17,7 @@
   hosts: local
   gather_facts: false
   vars:
-    routeb_capa_image: "quay.io/samzhu/openshift-capi-alicloud:v0.1.10"
+    routeb_capa_image: "quay.io/samzhu/openshift-capi-alicloud:v0.1.11"
     routeb_instance_type: "ecs.g7.xlarge"
     capi_core_version: "v1.12.7"
   tasks:
