@@ -170,3 +170,29 @@ keep — reusable across reinstalls of the same OCP version. The validation work
 ECS + node are ephemeral and swept by Phase 11's `always` cleanup. Delete the
 image + its OSS object (`rhcos-worker-aliyun.qcow2`) if you no longer need worker
 provisioning for that version.
+
+---
+
+## 8. Self-service worker join — controller-side CSR approval (B1)
+
+Route B nodes have no machine-api Machine, so OpenShift's cluster-machine-approver
+never approves their kubelet CSRs — they would hang NotReady until someone ran
+`oc adm certificate approve`. The CAPA controller (>= v0.1.9) ships a
+`CertificateSigningRequestReconciler` that approves them, bound to a CAPA machine:
+
+- **bootstrap** (`kube-apiserver-client-kubelet`): approved only for the
+  node-bootstrapper SA when a provisioned `AlibabaCloudMachine` is awaiting its node.
+- **serving** (`kubelet-serving`): approved only when the node exists, is backed
+  by a CAPA machine (providerID match), and every SAN is one of that node's addresses.
+
+Validated live 2026-06-07: a worker joined Ready with **no manual approval** —
+both CSRs auto-approved (`reason=CAPAApprove`). 11-capa-routeb-join.yml therefore
+just waits for Ready by default (`-e routeb_manual_csr=true` restores playbook-side
+approval for older controller images).
+
+Two bugs this surfaced (both fixed):
+
+| Bug | Cause / fix |
+|---|---|
+| serving CSR rejected | node providerID (Alibaba CCM, **dot**: `alicloud://<region>.<id>`) vs machine providerID (CAPA, **slash**: `alicloud://<region>/<id>`) differ — compare by normalised instance id (`providerInstanceID`). v0.1.10. |
+| two ECS created, one orphaned | `findOrCreateInstance` created unconditionally when `Status.InstanceID==nil`; a lost status write → a duplicate. `CreateECSInstance` now adopts an existing instance found by the `k8s.io/cluster-api-machine=<name>` tag before RunInstances. v0.1.11 (P3-CAPA.21). |
