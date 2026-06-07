@@ -1,35 +1,66 @@
 #!/usr/bin/env python3
 """Detect whether a new RHCOS version needs an aliyun boot image (P3-IMG.1).
 
-Reads the cluster's coreos-bootimages stream JSON (the openstack artifact) and
-compares the RHCOS release against the provenance files already in git. Prints a
-small result the GitHub Actions `detect` job consumes; exits 0 always (the job
-decides via the printed `needs_bake`).
+Cluster-independent: the OCP version comes from `openshift_version` in
+ansible/group_vars/all.yml (the operator's source of truth), and the RHCOS
+openstack qcow2 is resolved from the openshift/installer `release-X.Y` stream
+metadata — no running cluster / `oc` needed. Compares the resolved RHCOS release
+to the provenance files in git and prints a small result the workflow consumes.
 
-Usage:
-  bootimage_detect.py --stream stream.json --provenance-dir bootimage/provenance
-  oc -n openshift-machine-config-operator get cm coreos-bootimages \
-     -o jsonpath='{.data.stream}' | bootimage_detect.py --stream - --provenance-dir ...
+Resolution order:
+  --stream <file|->        explicit stream JSON (manual override)
+  --openshift-version X.Y  explicit version -> installer rhcos.json
+  --group-vars <file>      read openshift_version from group_vars (default;
+                           falls back to <file>.example when the file is absent,
+                           e.g. on a fresh runner checkout)
 
-The stream JSON is the value of the coreos-bootimages cm `stream` key, i.e.
-{"architectures": {"x86_64": {"artifacts": {"openstack": {"release": "...",
- "formats": {"qcow2.gz": {"disk": {"location": "...", "sha256": "..."}}}}}}}}
+Exits 0 always; the workflow branches on the printed needs_bake.
 """
 import argparse
 import glob
 import json
 import os
+import re
 import sys
+import urllib.request
+
+import yaml
+
+INSTALLER_RHCOS = ("https://raw.githubusercontent.com/openshift/installer/"
+                   "release-{branch}/data/data/coreos/rhcos.json")
 
 
 def extract(stream):
     ostk = stream["architectures"]["x86_64"]["artifacts"]["openstack"]
     disk = ostk["formats"]["qcow2.gz"]["disk"]
-    return {
-        "rhcosVersion": ostk["release"],
-        "url": disk["location"],
-        "sha256": disk.get("sha256", ""),
-    }
+    return {"rhcosVersion": ostk["release"], "url": disk["location"],
+            "sha256": disk.get("sha256", "")}
+
+
+def minor(version):
+    m = re.match(r"^(\d+)\.(\d+)", version.strip().strip('"'))
+    if not m:
+        raise ValueError(f"cannot parse OCP minor from {version!r}")
+    return f"{m.group(1)}.{m.group(2)}"
+
+
+def fetch_stream_for_version(version):
+    url = INSTALLER_RHCOS.format(branch=minor(version))
+    sys.stderr.write(f"[detect] resolving RHCOS for OCP {version} from {url}\n")
+    with urllib.request.urlopen(url, timeout=30) as r:
+        return json.loads(r.read().decode())
+
+
+def version_from_group_vars(path):
+    if not os.path.exists(path):
+        alt = path + ".example"
+        sys.stderr.write(f"[detect] {path} absent, falling back to {alt}\n")
+        path = alt
+    data = yaml.safe_load(open(path)) or {}
+    v = data.get("openshift_version")
+    if not v:
+        raise ValueError(f"openshift_version not found in {path}")
+    return str(v)
 
 
 def known_versions(provenance_dir):
@@ -37,27 +68,32 @@ def known_versions(provenance_dir):
     for p in glob.glob(os.path.join(provenance_dir, "*.yaml")):
         if os.path.basename(p) == "example.yaml":
             continue
-        # cheap parse: look for "rhcosVersion:" without a yaml dep
-        for line in open(p):
-            s = line.strip()
-            if s.startswith("rhcosVersion:"):
-                out.add(s.split(":", 1)[1].strip().strip('"'))
-                break
+        d = yaml.safe_load(open(p)) or {}
+        if d.get("rhcosVersion"):
+            out.add(str(d["rhcosVersion"]))
     return out
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stream", required=True, help="stream JSON file, or - for stdin")
+    ap.add_argument("--stream", help="explicit stream JSON file, or - for stdin")
+    ap.add_argument("--openshift-version", help="explicit OCP version, e.g. 4.20.22")
+    ap.add_argument("--group-vars", default="ansible/group_vars/all.yml",
+                    help="read openshift_version from here (default; .example fallback)")
     ap.add_argument("--provenance-dir", required=True)
     args = ap.parse_args(argv)
 
-    raw = sys.stdin.read() if args.stream == "-" else open(args.stream).read()
-    info = extract(json.loads(raw))
+    if args.stream:
+        raw = sys.stdin.read() if args.stream == "-" else open(args.stream).read()
+        stream = json.loads(raw)
+    else:
+        version = args.openshift_version or version_from_group_vars(args.group_vars)
+        stream = fetch_stream_for_version(version)
+
+    info = extract(stream)
     have = known_versions(args.provenance_dir)
     needs = info["rhcosVersion"] not in have
 
-    # GitHub Actions output form (caller appends to $GITHUB_OUTPUT).
     print(f"needs_bake={'true' if needs else 'false'}")
     print(f"rhcos_version={info['rhcosVersion']}")
     print(f"source_url={info['url']}")
