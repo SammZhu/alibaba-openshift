@@ -77,6 +77,11 @@
     kc: "--kubeconfig /root/kubeconfig"
     ns: default
     repo: /root/openshift-alibaba/alibaba-openshift
+    # By default the CAPA controller (>= v0.1.9) auto-approves the worker's
+    # kubelet CSRs (B1) — so this playbook only WAITS for Ready, which actually
+    # exercises B1. Set -e routeb_manual_csr=true to fall back to approving the
+    # CSRs from the playbook (e.g. when testing an older controller image).
+    routeb_manual_csr: false
   tasks:
     - name: Show Route B parameters
       ansible.builtin.debug:
@@ -273,15 +278,18 @@
         # otherwise abort the whole wait. Each oc call is wrapped in `timeout` so
         # one hung request can't stall the loop forever (the original cause of a
         # loop that never terminated even after the node was Ready).
-        - name: Approve CSRs and wait for the new worker to be Ready
+        - name: Wait for the new worker to be Ready (controller auto-approves CSRs)
           ansible.builtin.shell: |
             export KUBECONFIG=/root/kubeconfig
+            MANUAL='{{ routeb_manual_csr | default(false) }}'
             timeout 30 oc get nodes -o name 2>/dev/null | sort > /tmp/rb_before
             rc=1
             for i in $(seq 1 80); do
-              for c in $(timeout 30 oc get csr --no-headers 2>/dev/null | awk '$0 ~ /Pending/ {print $1}'); do
-                timeout 30 oc adm certificate approve "$c" >/dev/null 2>&1 || true
-              done
+              if [ "$MANUAL" = "True" ] || [ "$MANUAL" = "true" ]; then
+                for c in $(timeout 30 oc get csr --no-headers 2>/dev/null | awk '$0 ~ /Pending/ {print $1}'); do
+                  timeout 30 oc adm certificate approve "$c" >/dev/null 2>&1 || true
+                done
+              fi
               new=$(timeout 30 oc get nodes -o name 2>/dev/null | sort | comm -13 /tmp/rb_before - 2>/dev/null | head -1)
               if [ -n "$new" ]; then
                 ready=$(timeout 30 oc get "$new" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
