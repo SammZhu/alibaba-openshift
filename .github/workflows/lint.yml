@@ -35,3 +35,13 @@ jobs:
         # See scripts/lint-ansible-quotes.py for the rationale.
         run: |
           python3 scripts/lint-ansible-quotes.py ansible
+
+      - name: Boot-image gate logic unit test (P3-IMG.1)
+        # The offline format gate's pure karg-assertion logic — the cheap check
+        # that turns a silently-broken RHCOS re-stamp into a loud CI failure.
+        run: |
+          cd scripts && python3 verify_kargs_test.py
+
+      - name: Bash syntax check (boot-image scripts)
+        run: |
+          bash -n scripts/bootimage-gate.sh
