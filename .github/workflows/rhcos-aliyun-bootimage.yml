@@ -1,115 +1,38 @@
-# RHCOS aliyun boot-image supply chain (P3-IMG.1)
-#
-# Zero standing storage: provenance (this repo) is the only durable artifact; the
-# qcow2 is re-baked on demand, OSS is transit-only, the ECS image is materialized
-# when needed. The bake runs on an INTERNAL self-hosted runner that reaches GitHub
-# OUTBOUND only (pull, not push) — no inbound firewall hole.
-#
-# detect (hosted)  ->  bake (self-hosted, VPC)  ->  provenance (hosted, writes back)
+# RHCOS aliyun boot-image supply chain — version matrix (P3-IMG.1)
 name: rhcos-aliyun-bootimage
 
 on:
   schedule:
-    - cron: "17 6 * * *"        # daily poll for a new RHCOS release
-  workflow_dispatch:
-    inputs:
-      stream_json:
-        description: "Optional: paste coreos-bootimages stream JSON (else the self-hosted runner reads it from the cluster)"
-        required: false
+    - cron: "17 6 * * *"        # daily: poll for new RHCOS across the support window
+  workflow_dispatch: {}
 
 permissions:
-  contents: write               # provenance job commits back
+  contents: write               # provenance write-back
 
 jobs:
-  detect:
-    runs-on: ubuntu-latest
-    outputs:
-      needs_bake: ${{ steps.d.outputs.needs_bake }}
-      rhcos_version: ${{ steps.d.outputs.rhcos_version }}
-      source_url: ${{ steps.d.outputs.source_url }}
-      source_sha256: ${{ steps.d.outputs.source_sha256 }}
-    steps:
-      - uses: actions/checkout@v4
-      # Stream JSON either comes from workflow_dispatch input, or the self-hosted
-      # runner fetches it from the cluster in the bake job. For the scheduled path
-      # we expect the input; otherwise detect defers (needs_bake derived in bake).
-      - id: d
-        if: ${{ github.event.inputs.stream_json != '' }}
-        run: |
-          echo '${{ github.event.inputs.stream_json }}' > /tmp/stream.json
-          python3 scripts/bootimage_detect.py --stream /tmp/stream.json \
-            --provenance-dir bootimage/provenance >> "$GITHUB_OUTPUT"
-      - if: ${{ github.event.inputs.stream_json == '' }}
-        run: echo "no stream input; bake job will read the cluster stream + decide"
-
-  bake:
-    needs: detect
-    # The internal RHEL runner picks this up over its OUTBOUND connection.
+  bake-matrix:
     runs-on: [self-hosted, Linux, X64, rhel8, alibaba-vpc]
-    # RAM role on the runner ECS provides cloud creds — no AK/SK secrets here.
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve stream + decide (cluster-independent, from openshift_version)
-        id: r
+      - name: Bake every RHCOS from the floor up (skip already baked)
         run: |
-          set -euo pipefail
-          if [ -n "${{ github.event.inputs.stream_json }}" ]; then
-            echo '${{ github.event.inputs.stream_json }}' > /tmp/stream.json
-            python3 scripts/bootimage_detect.py --stream /tmp/stream.json \
-              --provenance-dir bootimage/provenance >> "$GITHUB_OUTPUT"
-          else
-            python3 scripts/bootimage_detect.py \
-              --group-vars ansible/group_vars/all.yml \
-              --provenance-dir bootimage/provenance >> "$GITHUB_OUTPUT"
+          set -uo pipefail
+          LIST="$(python3 scripts/bootimage_detect.py --all-from --provenance-dir bootimage/provenance)"
+          if [ -z "$LIST" ]; then
+            echo "✓ all versions up to date — nothing to bake"
+            exit 0
           fi
-
-      - name: Bake + offline gate (skip if already baked)
-        if: ${{ steps.r.outputs.needs_bake == 'true' }}
-        env:
-          RHCOS_VERSION: ${{ steps.r.outputs.rhcos_version }}
-          SOURCE_URL: ${{ steps.r.outputs.source_url }}
-          SOURCE_SHA256: ${{ steps.r.outputs.source_sha256 }}
-        run: |
-          set -euo pipefail
-          WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
-          curl -fSL "$SOURCE_URL" -o "$WORK/rhcos.qcow2.gz"
-          echo "${SOURCE_SHA256}  $WORK/rhcos.qcow2.gz" | sha256sum -c -
-          gunzip -f "$WORK/rhcos.qcow2.gz"
-          PREV="$(ls -1 bootimage/provenance/*.yaml 2>/dev/null | grep -v example | sort | tail -1 || true)"
-          BASELINE=""
-          if [ -n "$PREV" ]; then
-            python3 scripts/print_baseline.py "$PREV" > "$WORK/baseline.keys"
-            BASELINE="$WORK/baseline.keys"
-          fi
-          ansible-playbook -i ansible/inventory.yml ansible/playbooks/10-prepare-worker-bootimage.yml \
-            -e "rhcos_qcow=$WORK/rhcos.qcow2" -e "skip_upload_until_gate=true"
-          # gate + 记录本版 kargs baseline
-          export BOOTIMAGE_EMIT_BASELINE="$WORK/kargs.baseline"
-          scripts/bootimage-gate.sh "$WORK/rhcos.qcow2" $BASELINE
-          # 写回 provenance 并提交(让"跳过已烤"生效)
-          python3 scripts/write_provenance.py \
-            --rhcos "$RHCOS_VERSION" \
-            --ocp "$(grep -v '^#' bootimage/version | head -1)" \
-            --url "$SOURCE_URL" --sha256 "$SOURCE_SHA256" \
-            --baseline "$WORK/kargs.baseline" \
-            --provenance-dir bootimage/provenance \
-            --guestfish "$(guestfish --version | awk '{print $2}')" \
-            --qemu-img "$(qemu-img --version | head -1 | awk '{print $3}')" \
-            --commit
-
-      - name: Boot smoke (low-frequency, before blessing)
-        if: ${{ steps.r.outputs.needs_bake == 'true' }}
-        run: |
-          echo "TODO boot smoke: launch one ECS from the new image; assert ignition runs as aliyun + kubelet joins; then mark provenance bootSmoke=passed"
-
-  provenance:
-    needs: [detect, bake]
-    if: ${{ always() && needs.bake.result == 'success' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Commit provenance for the new version (bot)
-        run: |
-          echo "TODO: assemble bootimage/provenance/<rhcos>.yaml from the bake outputs,"
-          echo "cosign-sign it, and open a bot PR. (write-back closes the loop)"
+          echo "to bake:"; printf '%s\n' "$LIST" | cut -f1,2
+          rc=0
+          while IFS=$'\t' read -r RHCOS OCP URL SHA; do
+            [ -z "$RHCOS" ] && continue
+            echo "::group::bake $RHCOS (OCP $OCP)"
+            if bash scripts/bake-one.sh "$RHCOS" "$OCP" "$URL" "$SHA"; then
+              echo "✓ $RHCOS baked + provenance recorded"
+            else
+              echo "::error::bake failed for $RHCOS (OCP $OCP)"; rc=1
+            fi
+            echo "::endgroup::"
+          done <<< "$LIST"
+          exit $rc
