@@ -272,44 +272,36 @@
           ansible.builtin.set_fact:
             rb_instance_id: "{{ _rb_iid.stdout | trim }}"
 
-        # ── Wait for the node to join: auto-approve CSRs, watch for a NEW Ready node ─
-        # NOTE: deliberately NOT `set -e`/`pipefail`. Over an 80-iteration poll a
-        # single transient oc non-zero (or a SIGPIPE from `comm | head`) would
-        # otherwise abort the whole wait. Each oc call is wrapped in `timeout` so
-        # one hung request can't stall the loop forever (the original cause of a
-        # loop that never terminated even after the node was Ready).
-        - name: Wait for the new worker to be Ready (controller auto-approves CSRs)
+        # Wait for the CAPA worker to be Ready. The CAPA controller (>= v0.1.9)
+        # auto-approves its kubelet CSRs (B1), so we just poll. Use Ansible's own
+        # until-retry (one short command per try) rather than a long-lived shell
+        # for-loop — the latter wedged unpredictably over ssh even after the node
+        # was Ready. The `!master` label selects only the CAPA worker (the SNO
+        # master carries the master role).
+        - name: (manual fallback) approve pending node CSRs
           ansible.builtin.shell: |
             export KUBECONFIG=/root/kubeconfig
-            MANUAL='{{ routeb_manual_csr | default(false) }}'
-            timeout 30 oc get nodes -o name 2>/dev/null | sort > /tmp/rb_before
-            rc=1
-            for i in $(seq 1 80); do
-              if [ "$MANUAL" = "True" ] || [ "$MANUAL" = "true" ]; then
-                for c in $(timeout 30 oc get csr --no-headers 2>/dev/null | awk '$0 ~ /Pending/ {print $1}'); do
-                  timeout 30 oc adm certificate approve "$c" >/dev/null 2>&1 || true
-                done
-              fi
-              new=$(timeout 30 oc get nodes -o name 2>/dev/null | sort | comm -13 /tmp/rb_before - 2>/dev/null | head -1)
-              if [ -n "$new" ]; then
-                ready=$(timeout 30 oc get "$new" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
-                echo "iter=$i new=$new ready=$ready"
-                if [ "$ready" = "True" ]; then echo "JOINED $new"; rc=0; break; fi
-              else
-                echo "iter=$i waiting for new node"
-              fi
-              sleep 15
+            for c in $(timeout 30 oc get csr --no-headers 2>/dev/null | awk '$0 ~ /Pending/ {print $1}'); do
+              timeout 30 oc adm certificate approve "$c" >/dev/null 2>&1 || true
             done
-            [ "$rc" -eq 0 ] || echo "TIMEOUT waiting for worker join"
-            exit $rc
-          args:
-            executable: /bin/bash
-          register: _rb_join
-          changed_when: true
+          when: routeb_manual_csr | default(false) | bool
+          changed_when: false
+          failed_when: false
+
+        - name: Wait for the new CAPA worker node to be Ready (controller auto-approves CSRs)
+          ansible.builtin.shell: |
+            export KUBECONFIG=/root/kubeconfig
+            timeout 30 oc get nodes -l '!node-role.kubernetes.io/master' --no-headers 2>/dev/null \
+              | awk '$2 ~ /Ready/ {print $1}' | head -1
+          register: _rb_worker
+          retries: 80
+          delay: 15
+          until: _rb_worker.stdout | trim | length > 0
+          changed_when: false
 
         - name: Route B PASS
           ansible.builtin.debug:
-            msg: "✓ Route B: CAPA worker {{ rb_instance_id }} booted the aliyun RHCOS image and joined as a Ready node. {{ _rb_join.stdout_lines[-1] }}"
+            msg: "✓ Route B: CAPA worker {{ rb_instance_id }} booted the aliyun RHCOS image and joined as Ready node {{ _rb_worker.stdout | trim }} (CSRs auto-approved by the controller)."
 
       always:
         - name: Cleanup — delete the Route B chain
@@ -331,9 +323,8 @@
 
         - name: Cleanup — remove the joined node object if present
           ansible.builtin.shell: |
-            set -euo pipefail
             export KUBECONFIG=/root/kubeconfig
-            N=$(echo "{{ _rb_join.stdout | default('') }}" | awk '/^JOINED/{print $2}')
-            [ -n "$N" ] && oc delete "$N" --ignore-not-found --wait=false || true
+            N='{{ _rb_worker.stdout | default("") | trim }}'
+            [ -n "$N" ] && oc delete node "$N" --ignore-not-found --wait=false || true
           changed_when: true
           failed_when: false
