@@ -131,6 +131,42 @@ spec:
                   - zoneID
                   type: object
                 type: array
+              ignitionStorage:
+                description: |-
+                  IgnitionStorage configures an OSS bucket used to offload worker Ignition
+                  (ECS user-data) that exceeds the RunInstances UserData size limit. When the
+                  rendered Ignition is too large, the controller uploads it to OSS and passes
+                  the instance a tiny pointer Ignition that fetches the full config from a
+                  presigned URL. Leave nil to disable offload (oversized user-data then fails
+                  provisioning with a terminal UserDataTooLarge error).
+                properties:
+                  expirySeconds:
+                    description: |-
+                      ExpirySeconds is how long the presigned fetch URL stays valid. The node
+                      fetches Ignition once at first boot, so this only needs to outlast
+                      provisioning. Defaults to 3600 (1h).
+                    minimum: 60
+                    type: integer
+                  maxUserDataBytes:
+                    description: |-
+                      MaxUserDataBytes is the size threshold (measured on the base64 user-data)
+                      above which offload kicks in. Defaults to 16384, the ECS UserData limit.
+                    minimum: 1024
+                    type: integer
+                  ossBucket:
+                    description: |-
+                      OSSBucket is the bucket that holds offloaded Ignition objects. Required to
+                      enable offload.
+                    type: string
+                  ossEndpoint:
+                    description: |-
+                      OSSEndpoint overrides the OSS endpoint. Defaults to the region's internal
+                      endpoint (oss-<region>-internal.aliyuncs.com), reachable from within the
+                      VPC without internet egress — keeping Ignition fetch on the private network.
+                    type: string
+                required:
+                - ossBucket
+                type: object
               region:
                 description: Region is the Alibaba Cloud region where the cluster
                   is deployed.
@@ -412,6 +448,42 @@ spec:
                           - zoneID
                           type: object
                         type: array
+                      ignitionStorage:
+                        description: |-
+                          IgnitionStorage configures an OSS bucket used to offload worker Ignition
+                          (ECS user-data) that exceeds the RunInstances UserData size limit. When the
+                          rendered Ignition is too large, the controller uploads it to OSS and passes
+                          the instance a tiny pointer Ignition that fetches the full config from a
+                          presigned URL. Leave nil to disable offload (oversized user-data then fails
+                          provisioning with a terminal UserDataTooLarge error).
+                        properties:
+                          expirySeconds:
+                            description: |-
+                              ExpirySeconds is how long the presigned fetch URL stays valid. The node
+                              fetches Ignition once at first boot, so this only needs to outlast
+                              provisioning. Defaults to 3600 (1h).
+                            minimum: 60
+                            type: integer
+                          maxUserDataBytes:
+                            description: |-
+                              MaxUserDataBytes is the size threshold (measured on the base64 user-data)
+                              above which offload kicks in. Defaults to 16384, the ECS UserData limit.
+                            minimum: 1024
+                            type: integer
+                          ossBucket:
+                            description: |-
+                              OSSBucket is the bucket that holds offloaded Ignition objects. Required to
+                              enable offload.
+                            type: string
+                          ossEndpoint:
+                            description: |-
+                              OSSEndpoint overrides the OSS endpoint. Defaults to the region's internal
+                              endpoint (oss-<region>-internal.aliyuncs.com), reachable from within the
+                              VPC without internet egress — keeping Ignition fetch on the private network.
+                            type: string
+                        required:
+                        - ossBucket
+                        type: object
                       region:
                         description: Region is the Alibaba Cloud region where the
                           cluster is deployed.
@@ -574,6 +646,38 @@ spec:
               instanceType:
                 description: InstanceType is the ECS instance type (e.g. ecs.c6.large).
                 type: string
+              metadataOptions:
+                description: |-
+                  MetadataOptions configures the instance metadata service (IMDS). When
+                  omitted, the controller applies a secure baseline: the metadata endpoint is
+                  enabled and a session token is required (IMDSv2-equivalent,
+                  httpTokens=required), which mitigates SSRF. Set explicitly to relax this.
+                properties:
+                  httpEndpoint:
+                    description: |-
+                      HttpEndpoint enables or disables the metadata endpoint. Defaults to
+                      "enabled" when the whole MetadataOptions block is omitted.
+                    enum:
+                    - enabled
+                    - disabled
+                    type: string
+                  httpPutResponseHopLimit:
+                    description: |-
+                      HttpPutResponseHopLimit is the maximum number of network hops the metadata
+                      token may travel (1-64). 0 leaves the Alibaba Cloud API default.
+                    maximum: 64
+                    minimum: 0
+                    type: integer
+                  httpTokens:
+                    description: |-
+                      HttpTokens controls whether a session token is required to read metadata.
+                      "required" enforces IMDSv2-style token auth (the secure default);
+                      "optional" allows tokenless access.
+                    enum:
+                    - optional
+                    - required
+                    type: string
+                type: object
               providerID:
                 description: |-
                   ProviderID is the unique identifier as specified by the cloud provider.
@@ -792,6 +896,22 @@ spec:
                   reconciling the Machine and will contain a succinct value suitable for
                   machine interpretation.
                 type: string
+              ignitionOSS:
+                description: |-
+                  IgnitionOSS records the OSS object holding this machine's offloaded
+                  Ignition (set only when user-data exceeded the ECS limit and was offloaded),
+                  so the controller can delete it when the machine is removed.
+                properties:
+                  bucket:
+                    type: string
+                  endpoint:
+                    type: string
+                  key:
+                    type: string
+                required:
+                - bucket
+                - key
+                type: object
               instanceID:
                 description: InstanceID is the ECS instance ID of the provisioned
                   machine.
@@ -943,6 +1063,38 @@ spec:
                       instanceType:
                         description: InstanceType is the ECS instance type (e.g. ecs.c6.large).
                         type: string
+                      metadataOptions:
+                        description: |-
+                          MetadataOptions configures the instance metadata service (IMDS). When
+                          omitted, the controller applies a secure baseline: the metadata endpoint is
+                          enabled and a session token is required (IMDSv2-equivalent,
+                          httpTokens=required), which mitigates SSRF. Set explicitly to relax this.
+                        properties:
+                          httpEndpoint:
+                            description: |-
+                              HttpEndpoint enables or disables the metadata endpoint. Defaults to
+                              "enabled" when the whole MetadataOptions block is omitted.
+                            enum:
+                            - enabled
+                            - disabled
+                            type: string
+                          httpPutResponseHopLimit:
+                            description: |-
+                              HttpPutResponseHopLimit is the maximum number of network hops the metadata
+                              token may travel (1-64). 0 leaves the Alibaba Cloud API default.
+                            maximum: 64
+                            minimum: 0
+                            type: integer
+                          httpTokens:
+                            description: |-
+                              HttpTokens controls whether a session token is required to read metadata.
+                              "required" enforces IMDSv2-style token auth (the secure default);
+                              "optional" allows tokenless access.
+                            enum:
+                            - optional
+                            - required
+                            type: string
+                        type: object
                       providerID:
                         description: |-
                           ProviderID is the unique identifier as specified by the cloud provider.
