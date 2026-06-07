@@ -72,13 +72,10 @@ jobs:
           SOURCE_SHA256: ${{ steps.r.outputs.source_sha256 }}
         run: |
           set -euo pipefail
-          WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT     # RHEL keeps nothing
+          WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
           curl -fSL "$SOURCE_URL" -o "$WORK/rhcos.qcow2.gz"
-          echo "${SOURCE_SHA256}  $WORK/rhcos.qcow2.gz" | sha256sum -c -   # trust anchor
+          echo "${SOURCE_SHA256}  $WORK/rhcos.qcow2.gz" | sha256sum -c -
           gunzip -f "$WORK/rhcos.qcow2.gz"
-          # Phase 10 does the guestfish re-stamp + OSS + ImportImage; here we run
-          # the bake then the GATE before any upload (Phase 10 to be refactored to
-          # call bootimage-gate.sh between re-stamp and upload).
           PREV="$(ls -1 bootimage/provenance/*.yaml 2>/dev/null | grep -v example | sort | tail -1 || true)"
           BASELINE=""
           if [ -n "$PREV" ]; then
@@ -87,8 +84,19 @@ jobs:
           fi
           ansible-playbook -i ansible/inventory.yml ansible/playbooks/10-prepare-worker-bootimage.yml \
             -e "rhcos_qcow=$WORK/rhcos.qcow2" -e "skip_upload_until_gate=true"
-          # Hard gate BEFORE upload/import:
+          # gate + 记录本版 kargs baseline
+          export BOOTIMAGE_EMIT_BASELINE="$WORK/kargs.baseline"
           scripts/bootimage-gate.sh "$WORK/rhcos.qcow2" $BASELINE
+          # 写回 provenance 并提交(让"跳过已烤"生效)
+          python3 scripts/write_provenance.py \
+            --rhcos "$RHCOS_VERSION" \
+            --ocp "$(grep -v '^#' bootimage/version | head -1)" \
+            --url "$SOURCE_URL" --sha256 "$SOURCE_SHA256" \
+            --baseline "$WORK/kargs.baseline" \
+            --provenance-dir bootimage/provenance \
+            --guestfish "$(guestfish --version | awk '{print $2}')" \
+            --qemu-img "$(qemu-img --version | head -1 | awk '{print $3}')" \
+            --commit
 
       - name: Boot smoke (low-frequency, before blessing)
         if: ${{ steps.r.outputs.needs_bake == 'true' }}
