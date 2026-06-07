@@ -45,7 +45,7 @@ jobs:
   bake:
     needs: detect
     # The internal RHEL runner picks this up over its OUTBOUND connection.
-    runs-on: [self-hosted, rhel8, alibaba-vpc, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, rhel8, alibaba-vpc]
     # RAM role on the runner ECS provides cloud creds — no AK/SK secrets here.
     steps:
       - uses: actions/checkout@v4
