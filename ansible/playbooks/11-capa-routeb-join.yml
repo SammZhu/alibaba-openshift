@@ -55,6 +55,7 @@
         ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
         groups: deploy
+        capi_core_version: "{{ capi_core_version }}"
         rb_capa_image: "{{ routeb_capa_image }}"
         rb_instance_type: "{{ routeb_instance_type }}"
         rb_region: "{{ region }}"
