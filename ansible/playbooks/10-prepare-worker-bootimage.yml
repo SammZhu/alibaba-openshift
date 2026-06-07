@@ -10,8 +10,14 @@
 # Output: saves `worker_boot_image_id` (m-xxxx) to state.yml. Idempotent — if the
 # image already exists and is Available, every heavy step is skipped.
 #
-# Prereqs: cluster installed (jump host up, kubeconfig at /root/kubeconfig),
-# operator has internet (downloads ~1.4G qcow from rhcos.mirror.openshift.com).
+# Two modes:
+#   * Standalone (default): resolve the qcow URL from the cluster, download,
+#     re-stamp, upload to OSS, ImportImage, save state. Needs jump host + creds.
+#   * CI bake (P3-IMG.1): the supply-chain workflow has ALREADY downloaded the
+#     qcow and runs the offline gate itself, so it calls this with:
+#       -e rhcos_qcow=/path/to/rhcos.qcow2   (use it; skip URL-resolve+download)
+#       -e skip_upload_until_gate=true        (re-stamp only; no OSS/import/state)
+#     The image is materialized to ECS on demand, separately.
 #
 #   ansible-playbook -i ansible/inventory.yml ansible/playbooks/10-prepare-worker-bootimage.yml
 - name: Build aliyun-platform RHCOS worker boot image
@@ -20,12 +26,20 @@
   vars:
     work_dir: "{{ lookup('env', 'HOME') }}/work/rhcos-aliyun"
     qcow_gz: "{{ work_dir }}/rhcos.qcow2.gz"
-    qcow: "{{ work_dir }}/rhcos.qcow2"
+    # Use a pre-supplied qcow (CI bake) when given, else the one we download.
+    qcow: "{{ rhcos_qcow if (rhcos_qcow | default('') | length > 0) else (work_dir + '/rhcos.qcow2') }}"
     oss_object: "rhcos-worker-aliyun.qcow2"
     worker_image_name: "rhcos-worker-aliyun"
+    # CI-bake knobs (defaults preserve the standalone behaviour).
+    rhcos_qcow: ""
+    skip_upload_until_gate: false
   tasks:
+    # State + OSS endpoint + cloud prereqs are only needed for the upload/import
+    # half — the CI bake (re-stamp only) runs cluster-less on the runner.
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
+      when: not (skip_upload_until_gate | bool)
     - ansible.builtin.include_tasks: ../tasks/oss_endpoint.yml
+      when: not (skip_upload_until_gate | bool)
 
     - name: Assert prerequisites in state
       ansible.builtin.assert:
@@ -33,6 +47,13 @@
           - jump_host_ip | default('') | length > 0
           - oss_bucket | default('') | length > 0
         fail_msg: "Need jump_host_ip + oss_bucket in state.yml (run 01-03 first)."
+      when: not (skip_upload_until_gate | bool)
+
+    - name: Assert a qcow was supplied for the re-stamp-only bake
+      ansible.builtin.assert:
+        that: [rhcos_qcow | length > 0]
+        fail_msg: "skip_upload_until_gate=true requires -e rhcos_qcow=/path/to/rhcos.qcow2"
+      when: skip_upload_until_gate | bool
 
     # ── Idempotency: skip everything if the image already exists ───────────────
     - name: Probe existing worker boot image
@@ -42,7 +63,9 @@
       register: _img_probe
       changed_when: false
       failed_when: false
-      when: worker_boot_image_id is defined and worker_boot_image_id | length > 0
+      when:
+        - not (skip_upload_until_gate | bool)
+        - worker_boot_image_id is defined and worker_boot_image_id | length > 0
 
     - name: Decide whether the image is already usable
       ansible.builtin.set_fact:
@@ -51,6 +74,12 @@
               and _img_probe is not skipped and _img_probe.rc == 0
               and ((_img_probe.stdout | from_json).Images.Image | default([]) | length) > 0
               and (_img_probe.stdout | from_json).Images.Image[0].Status == 'Available') }}
+      when: not (skip_upload_until_gate | bool)
+
+    - name: Re-stamp-only bake always builds (no reuse short-circuit)
+      ansible.builtin.set_fact:
+        _worker_img_ready: false
+      when: skip_upload_until_gate | bool
 
     - name: Report reuse
       ansible.builtin.debug:
@@ -60,7 +89,7 @@
     - name: Build the image
       when: not (_worker_img_ready | bool)
       block:
-        # ── Resolve the RHCOS openstack qcow2 URL from the cluster stream ───────
+        # ── Resolve + download the RHCOS qcow (skipped when one is supplied) ────
         - name: Add the jump host for oc delegation
           ansible.builtin.add_host:
             name: jumphost
@@ -68,6 +97,7 @@
             ansible_user: root
             ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
             ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+          when: (rhcos_qcow | default('') | length) == 0
 
         - name: Read RHCOS openstack qcow2 URL from coreos-bootimages
           ansible.builtin.shell: |
@@ -81,12 +111,14 @@
           delegate_to: jumphost
           register: _qcow_url
           changed_when: false
+          when: (rhcos_qcow | default('') | length) == 0
 
         - name: Ensure work dir
           ansible.builtin.file:
             path: "{{ work_dir }}"
             state: directory
             mode: "0755"
+          when: (rhcos_qcow | default('') | length) == 0
 
         - name: Download RHCOS openstack qcow2.gz
           ansible.builtin.get_url:
@@ -94,6 +126,7 @@
             dest: "{{ qcow_gz }}"
             mode: "0644"
             timeout: 1200
+          when: (rhcos_qcow | default('') | length) == 0
 
         - name: Decompress qcow2 (idempotent)
           ansible.builtin.shell: |
@@ -103,6 +136,7 @@
             fi
           args:
             creates: "{{ qcow }}"
+          when: (rhcos_qcow | default('') | length) == 0
 
         - name: Install libguestfs tooling
           become: true
@@ -139,7 +173,14 @@
           register: _restamp
           changed_when: true
 
-        # ── Upload + import as an ECS custom image ─────────────────────────────
+        # ── CI bake stops here: the workflow runs the offline gate next, and the
+        #    image is materialized to ECS on demand (separately). ──────────────
+        - name: Re-stamp-only bake — stop before upload/import
+          ansible.builtin.debug:
+            msg: "Re-stamped {{ qcow }} to ignition.platform.id=aliyun. Skipping OSS/ImportImage (skip_upload_until_gate)."
+          when: skip_upload_until_gate | bool
+
+        # ── Upload + import as an ECS custom image (standalone only) ────────────
         - name: Read AK/SK from aliyun profile for OSS
           ansible.builtin.command:
             argv: [jq, -r,
@@ -148,6 +189,7 @@
           register: _aksk
           changed_when: false
           no_log: true
+          when: not (skip_upload_until_gate | bool)
 
         - name: Upload qcow2 to OSS
           ansible.builtin.command:
@@ -157,6 +199,7 @@
                    "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
           no_log: true
           changed_when: true
+          when: not (skip_upload_until_gate | bool)
 
         - name: Ensure AliyunECSImageImportDefaultRole exists
           ansible.builtin.command:
@@ -164,6 +207,7 @@
           register: _import_role
           changed_when: false
           failed_when: false
+          when: not (skip_upload_until_gate | bool)
 
         - name: Create AliyunECSImageImportDefaultRole when missing
           ansible.builtin.command:
@@ -171,7 +215,9 @@
                    --AssumeRolePolicyDocument,
                    '{"Statement":[{"Action":"sts:AssumeRole","Effect":"Allow","Principal":{"Service":["ecs.aliyuncs.com"]}}],"Version":"1"}',
                    --profile, "{{ aliyun_profile }}"]
-          when: _import_role.rc != 0
+          when:
+            - not (skip_upload_until_gate | bool)
+            - _import_role.rc != 0
           changed_when: true
 
         - name: Submit ImportImage
@@ -185,10 +231,12 @@
                    --BootMode, UEFI, --profile, "{{ aliyun_profile }}"]
           register: _import
           changed_when: true
+          when: not (skip_upload_until_gate | bool)
 
         - name: Capture worker boot image id
           ansible.builtin.set_fact:
             worker_boot_image_id: "{{ (_import.stdout | from_json).ImageId }}"
+          when: not (skip_upload_until_gate | bool)
 
         - name: Wait until the image is Available
           ansible.builtin.command:
@@ -201,14 +249,19 @@
           until: >-
             (_img_wait.stdout | from_json).Images.Image | default([]) | length > 0
             and (_img_wait.stdout | from_json).Images.Image[0].Status == 'Available'
+          when: not (skip_upload_until_gate | bool)
 
-    # ── Persist the image id ───────────────────────────────────────────────────
+    # ── Persist the image id (standalone only) ─────────────────────────────────
     - name: Save worker_boot_image_id to state
       ansible.builtin.include_tasks: ../tasks/save_state.yml
       vars:
         new_state:
           worker_boot_image_id: "{{ worker_boot_image_id }}"
+      when: not (skip_upload_until_gate | bool)
 
     - name: Done
       ansible.builtin.debug:
-        msg: "worker_boot_image_id = {{ worker_boot_image_id }}"
+        msg: >-
+          {{ 're-stamp complete (gate runs next; image materialized on demand)'
+             if (skip_upload_until_gate | bool)
+             else 'worker_boot_image_id = ' + (worker_boot_image_id | default('?')) }}
