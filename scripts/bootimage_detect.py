@@ -6,10 +6,11 @@ The OCP version comes from `openshift_version` in ansible/group_vars/all.yml
 (the operator's source of truth); the RHCOS openstack qcow2 is resolved from the
 openshift/installer release-X.Y stream metadata — no running cluster / oc.
 
-Resolution order:
+Resolution order (first that applies):
   --stream <file|->        explicit stream JSON (manual override)
   --openshift-version X.Y  explicit version -> installer rhcos.json
-  --group-vars <file>      read openshift_version (default; .example fallback)
+  --group-vars <file>      read openshift_version from group_vars (operator-local)
+  --version-file <file>    committed authoritative version (default: bootimage/version)
 """
 import argparse
 import glob
@@ -65,6 +66,15 @@ def version_from_group_vars(path):
     return v
 
 
+def version_from_file(path):
+    """First non-comment, non-blank line of the committed version file."""
+    for line in open(path, encoding="utf-8", errors="replace"):
+        s = line.strip()
+        if s and not s.startswith("#"):
+            return s
+    raise ValueError(f"no version line in {path}")
+
+
 def known_versions(provenance_dir):
     out = set()
     for p in glob.glob(os.path.join(provenance_dir, "*.yaml")):
@@ -80,8 +90,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--stream", help="explicit stream JSON file, or - for stdin")
     ap.add_argument("--openshift-version", help="explicit OCP version, e.g. 4.20.22")
-    ap.add_argument("--group-vars", default="ansible/group_vars/all.yml",
-                    help="read openshift_version from here (default; .example fallback)")
+    ap.add_argument("--group-vars", help="operator-local group_vars override (reads openshift_version)")
+    ap.add_argument("--version-file", default="bootimage/version",
+                    help="committed authoritative version file (default source)")
     ap.add_argument("--provenance-dir", required=True)
     args = ap.parse_args(argv)
 
@@ -89,7 +100,12 @@ def main(argv=None):
         raw = sys.stdin.read() if args.stream == "-" else open(args.stream).read()
         stream = json.loads(raw)
     else:
-        version = args.openshift_version or version_from_group_vars(args.group_vars)
+        if args.openshift_version:
+            version = args.openshift_version
+        elif args.group_vars:
+            version = version_from_group_vars(args.group_vars)
+        else:
+            version = version_from_file(args.version_file)
         stream = fetch_stream_for_version(version)
 
     info = extract(stream)

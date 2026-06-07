@@ -24,7 +24,8 @@ git (provenance + scripts)                     ← only durable thing; ~0 storag
 
 | File | Role | Runs where | Offline-testable |
 |---|---|---|---|
-| `scripts/bootimage_detect.py` | resolve RHCOS from `openshift_version` (group_vars) via the installer `release-X.Y` stream — **no cluster/oc needed** — compare to provenance, decide `needs_bake` | hosted / runner | ✅ |
+| `bootimage/version` | the **authoritative committed OCP version** for CI (the runner has no local `all.yml`); single-version now, the matrix FLOOR later | git | ✅ |
+| `scripts/bootimage_detect.py` | resolve RHCOS from `bootimage/version` via the installer `release-X.Y` stream — **no cluster/oc needed** — compare to provenance, decide `needs_bake` (overridable with `--openshift-version` / `--stream`) | hosted / runner | ✅ |
 | `ansible/playbooks/10-prepare-worker-bootimage.yml` | the bake (guestfish re-stamp + OSS + ImportImage) | runner (VPC) | — |
 | `scripts/bootimage-gate.sh` | **offline format gate**: qemu-img check + partition layout + extract + karg assertions, BEFORE any upload | runner | partial (needs an image) |
 | `scripts/verify_kargs.py` (+ `_test.py`) | pure karg-assertion logic: all `ignition.platform.id=aliyun`, no residual, completeness, cross-version diff guard | anywhere | ✅ (unit-tested) |

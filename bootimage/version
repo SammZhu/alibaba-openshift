@@ -1,0 +1,10 @@
+# Authoritative OCP version for the RHCOS aliyun boot-image supply chain (P3-IMG.1).
+# This file is committed, so the CI runner (which has NO ansible/group_vars/all.yml)
+# has an explicit, auditable version source — decoupled from the operator's local
+# all.yml.
+#
+# Single-version mode: the version to bake for.
+# Version-matrix mode (future): the FLOOR — bake this OCP minor and every newer one.
+#
+# detect reads the first non-comment, non-blank line below.
+4.20.22
