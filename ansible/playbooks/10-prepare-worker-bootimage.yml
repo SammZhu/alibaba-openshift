@@ -173,16 +173,18 @@
             Q="{{ qcow }}"
             BOOTDEV=$(guestfish --ro -a "$Q" run : list-filesystems | awk -F: '/ext4/{gsub(/ /,"",$1); print $1; exit}')
             test -n "$BOOTDEV"
-            rm -rf /tmp/rhcosboot && mkdir -p /tmp/rhcosboot
-            guestfish --rw -a "$Q" run : mount "$BOOTDEV" / : copy-out /loader/entries /tmp/rhcosboot : copy-out /grub2/grub.cfg /tmp/rhcosboot
-            sed -i 's/ignition\.platform\.id=[a-z]*/ignition.platform.id=aliyun/g' /tmp/rhcosboot/entries/*.conf /tmp/rhcosboot/grub.cfg
-            for f in /tmp/rhcosboot/entries/*.conf; do
+            # Per-run scratch dirs (NOT fixed /tmp paths): a previous root run can
+            # leave root-owned leftovers a later rootless run cannot clean.
+            BOOT=$(mktemp -d); VERIFY=$(mktemp -d)
+            trap 'rm -rf "$BOOT" "$VERIFY"' EXIT
+            guestfish --rw -a "$Q" run : mount "$BOOTDEV" / : copy-out /loader/entries "$BOOT" : copy-out /grub2/grub.cfg "$BOOT"
+            sed -i 's/ignition\.platform\.id=[a-z]*/ignition.platform.id=aliyun/g' "$BOOT"/entries/*.conf "$BOOT"/grub.cfg
+            for f in "$BOOT"/entries/*.conf; do
               guestfish --rw -a "$Q" run : mount "$BOOTDEV" / : upload "$f" /loader/entries/"$(basename "$f")"
             done
-            guestfish --rw -a "$Q" run : mount "$BOOTDEV" / : upload /tmp/rhcosboot/grub.cfg /grub2/grub.cfg
-            rm -rf /tmp/rhcosverify && mkdir -p /tmp/rhcosverify
-            guestfish --ro -a "$Q" run : mount "$BOOTDEV" / : copy-out /loader/entries /tmp/rhcosverify : copy-out /grub2/grub.cfg /tmp/rhcosverify
-            GOT=$(grep -rho 'ignition.platform.id=[a-z]*' /tmp/rhcosverify | sort -u | tr '\n' ' ')
+            guestfish --rw -a "$Q" run : mount "$BOOTDEV" / : upload "$BOOT"/grub.cfg /grub2/grub.cfg
+            guestfish --ro -a "$Q" run : mount "$BOOTDEV" / : copy-out /loader/entries "$VERIFY" : copy-out /grub2/grub.cfg "$VERIFY"
+            GOT=$(grep -rho 'ignition.platform.id=[a-z]*' "$VERIFY" | sort -u | tr '\n' ' ')
             echo "platform_after=$GOT"
             test "$(echo "$GOT" | tr -d ' ')" = "ignition.platform.id=aliyun"
           register: _restamp

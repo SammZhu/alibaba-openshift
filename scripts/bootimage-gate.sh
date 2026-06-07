@@ -19,8 +19,8 @@ echo "== [gate] qcow2 integrity =="
 qemu-img info --output=json "$QCOW" | python3 -c '
 import json,sys
 i=json.load(sys.stdin)
-assert i["format"]=="qcow2", f"format={i[\"format\"]}, want qcow2"
-print(f"  format=qcow2 virtual-size={i[\"virtual-size\"]}")'
+assert i["format"]=="qcow2", "format=%s, want qcow2" % i["format"]
+print("  format=qcow2 virtual-size=%s" % i["virtual-size"])'
 qemu-img check "$QCOW"
 
 echo "== [gate] partition layout =="
