@@ -50,18 +50,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve stream + decide (from cluster if not provided)
+      - name: Resolve stream + decide (cluster-independent, from openshift_version)
         id: r
         run: |
           set -euo pipefail
           if [ -n "${{ github.event.inputs.stream_json }}" ]; then
             echo '${{ github.event.inputs.stream_json }}' > /tmp/stream.json
+            python3 scripts/bootimage_detect.py --stream /tmp/stream.json \
+              --provenance-dir bootimage/provenance >> "$GITHUB_OUTPUT"
           else
-            oc -n openshift-machine-config-operator get cm coreos-bootimages \
-              -o jsonpath='{.data.stream}' > /tmp/stream.json
+            python3 scripts/bootimage_detect.py \
+              --group-vars ansible/group_vars/all.yml \
+              --provenance-dir bootimage/provenance >> "$GITHUB_OUTPUT"
           fi
-          python3 scripts/bootimage_detect.py --stream /tmp/stream.json \
-            --provenance-dir bootimage/provenance >> "$GITHUB_OUTPUT"
 
       - name: Bake + offline gate (skip if already baked)
         if: ${{ steps.r.outputs.needs_bake == 'true' }}
