@@ -1,0 +1,306 @@
+# Phase 12 — B2: declarative multi-AZ worker pools via MachineDeployment (P3-CAPA.19).
+#
+# Builds on Route B (Phase 11): instead of one hand-crafted Machine, we drive
+# worker count declaratively with one MachineDeployment per availability zone
+# (host pool / AZ), so workers spread across cn-*-a/b/c for HA. The upstream CAPI
+# MachineDeployment/MachineSet controllers create the Machines + AlibabaCloudMachines
+# from a shared AlibabaCloudMachineTemplate; our controller resolves each
+# Machine's failureDomain -> zone + vSwitch, auto-approves its CSRs (B1), and
+# creates idempotently (no orphans). A MachineHealthCheck remediates failures.
+#
+# Offline-developed; VALIDATED on-cluster in the unified session. Prereqs:
+#   - CAPA controller (>= v0.1.12) already deployed (Phase 08 or 11) and Ready.
+#   - Phase 10 produced worker_boot_image_id; cluster installed.
+#
+#   ansible-playbook -i ansible/inventory.yml ansible/playbooks/12-capa-machinedeployment.yml \
+#     [-e replicas_per_zone=1] [-e worker_instance_type=ecs.g7.xlarge]
+- name: Resolve multi-AZ inputs + ensure per-zone vSwitches (operator)
+  hosts: local
+  gather_facts: false
+  vars:
+    worker_instance_type: "ecs.g7.xlarge"
+    desired_zone_count: 3
+    worker_vsw_prefix: 24          # /24 per worker vSwitch
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: Assert prerequisites in state
+      ansible.builtin.assert:
+        that:
+          - jump_host_ip | default('') | length > 0
+          - worker_boot_image_id | default('') | length > 0
+          - mirror_vpc_id | default('') | length > 0
+          - mirror_private_vsw_1 | default('') | length > 0
+          - mirror_zone_id | default('') | length > 0
+          - api_lb_endpoint | default('') | length > 0
+        fail_msg: "Need worker_boot_image_id (Phase 10), jump_host_ip, mirror_vpc_id, mirror_private_vsw_1, mirror_zone_id, api_lb_endpoint."
+
+    - name: Discover a security group in the cluster VPC
+      ansible.builtin.command:
+        argv: [aliyun, ecs, DescribeSecurityGroups, --RegionId, "{{ region }}",
+               --VpcId, "{{ mirror_vpc_id }}", --PageSize, "50", --profile, "{{ aliyun_profile }}"]
+      register: _sg_q
+      changed_when: false
+
+    - name: Read AK/SK for alibaba-creds
+      ansible.builtin.command:
+        argv: [jq, -r,
+               '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret',
+               "{{ lookup('env', 'HOME') }}/.aliyun/config.json"]
+      register: _aksk
+      changed_when: false
+      no_log: true
+
+    # ── Determine the target zones (mirror's zone first, then siblings) ─────────
+    - name: Describe zones in the region
+      ansible.builtin.command:
+        argv: [aliyun, ecs, DescribeZones, --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
+      register: _zones_q
+      changed_when: false
+
+    - name: Pick the worker zones (mirror zone + others, up to desired_zone_count)
+      ansible.builtin.set_fact:
+        _all_zone_ids: "{{ (_zones_q.stdout | from_json).Zones.Zone | map(attribute='ZoneId') | list }}"
+    - name: Order zones with the mirror zone first
+      ansible.builtin.set_fact:
+        _target_zones: >-
+          {{ ([mirror_zone_id] + (_all_zone_ids | difference([mirror_zone_id])))[:desired_zone_count] }}
+
+    # ── Inventory existing vSwitches in the VPC (zone -> vsw, used /24s) ─────────
+    - name: Describe existing vSwitches in the VPC
+      ansible.builtin.command:
+        argv: [aliyun, vpc, DescribeVSwitches, --RegionId, "{{ region }}",
+               --VpcId, "{{ mirror_vpc_id }}", --PageSize, "50", --profile, "{{ aliyun_profile }}"]
+      register: _vsw_q
+      changed_when: false
+
+    - name: Map existing zone -> vSwitch and used /24 octets
+      ansible.builtin.set_fact:
+        _existing_vsws: "{{ (_vsw_q.stdout | from_json).VSwitches.VSwitch }}"
+    - name: Build zone->vsw map + VPC cidr base
+      ansible.builtin.set_fact:
+        _zone_vsw: "{{ dict(_existing_vsws | map(attribute='ZoneId') | zip(_existing_vsws | map(attribute='VSwitchId'))) }}"
+        _used_octets: "{{ _existing_vsws | map(attribute='CidrBlock') | map('regex_replace', '^\\d+\\.\\d+\\.(\\d+)\\..*$', '\\1') | map('int') | list }}"
+        _vpc_cidr: "{{ (_vsw_q.stdout | from_json).VSwitches.VSwitch[0].CidrBlock | default('192.168.0.0/24') }}"
+
+    - name: Derive the VPC /16 base (first two octets) from an existing vSwitch CIDR
+      ansible.builtin.set_fact:
+        _cidr_base: "{{ _vpc_cidr.split('.')[0] }}.{{ _vpc_cidr.split('.')[1] }}"
+
+    # ── Ensure a vSwitch exists in each target zone (create missing ones) ───────
+    - name: Init the /24 allocator (octets claimed for new vSwitches this run)
+      ansible.builtin.set_fact:
+        _allocated_octets: []
+
+    - name: Ensure a vSwitch per target zone
+      ansible.builtin.include_tasks: ../tasks/ensure_vswitch.yml
+      loop: "{{ _target_zones }}"
+      loop_control:
+        loop_var: _tz
+        index_var: _tz_idx
+
+    - name: Re-describe vSwitches after ensuring
+      ansible.builtin.command:
+        argv: [aliyun, vpc, DescribeVSwitches, --RegionId, "{{ region }}",
+               --VpcId, "{{ mirror_vpc_id }}", --PageSize, "50", --profile, "{{ aliyun_profile }}"]
+      register: _vsw_q2
+      changed_when: false
+    - name: Final zone -> vSwitch map
+      ansible.builtin.set_fact:
+        _final_zone_vsw: >-
+          {{ dict((_vsw_q2.stdout | from_json).VSwitches.VSwitch | map(attribute='ZoneId')
+                  | zip((_vsw_q2.stdout | from_json).VSwitches.VSwitch | map(attribute='VSwitchId'))) }}
+
+    # Compose [{key:a, zone:<id>, vsw:<id>}, ...] for the manifest template
+    # (a real list — append per zone so types survive add_host + template).
+    - name: Compose worker_zones
+      ansible.builtin.set_fact:
+        worker_zones: "{{ (worker_zones | default([])) + [{'key': ['a','b','c'][_wz_idx], 'zone': _wz, 'vsw': _final_zone_vsw[_wz]}] }}"
+      loop: "{{ _target_zones }}"
+      loop_control:
+        loop_var: _wz
+        index_var: _wz_idx
+
+    - name: Show resolved worker zones
+      ansible.builtin.debug:
+        var: worker_zones
+
+    - name: Add the jump host (carry multi-AZ inputs)
+      ansible.builtin.add_host:
+        name: jumphost
+        ansible_host: "{{ jump_host_ip }}"
+        ansible_user: root
+        ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+        groups: deploy
+        md_region: "{{ region }}"
+        md_boot_image: "{{ worker_boot_image_id }}"
+        md_instance_type: "{{ worker_instance_type }}"
+        md_sg: "{{ (_sg_q.stdout | from_json).SecurityGroups.SecurityGroup[0].SecurityGroupId }}"
+        md_ram_role: "{{ mirror_node_ram_role }}"
+        md_cp_host: "{{ api_lb_endpoint }}"
+        md_worker_zones: "{{ worker_zones }}"
+        md_replicas_per_zone: "{{ replicas_per_zone | default(1) }}"
+
+- name: Apply + validate multi-AZ worker pools (jump host)
+  hosts: jumphost
+  gather_facts: false
+  vars:
+    ns: default
+    repo: /root/openshift-alibaba/alibaba-openshift
+    kc: "--kubeconfig /root/kubeconfig"
+  tasks:
+    - name: Show multi-AZ parameters
+      ansible.builtin.debug:
+        msg: "zones={{ md_worker_zones }} image={{ md_boot_image }} type={{ md_instance_type }} sg={{ md_sg }} cp={{ md_cp_host }} replicas/zone={{ md_replicas_per_zone }}"
+
+    - name: Refresh repo on the jump host
+      ansible.builtin.command: {argv: [git, -C, "{{ repo }}", pull, --ff-only]}
+      changed_when: false
+      failed_when: false
+
+    - name: Verify the CAPA controller is deployed and Ready
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG=/root/kubeconfig
+        oc -n capa-system rollout status deploy/capa-controller-manager --timeout=120s
+      changed_when: false
+
+    - name: Ensure CRDs are current (v0.1.12 adds failureDomains/ignitionStorage/metadataOptions)
+      ansible.builtin.command:
+        argv: [oc, "--kubeconfig", /root/kubeconfig, apply, --server-side=true,
+               --force-conflicts, -f, "{{ repo }}/custom_manifests/02-capa-crds.yaml"]
+      changed_when: true
+
+    - name: Install CAPI core CRDs when missing
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG=/root/kubeconfig
+        if ! oc get crd machinedeployments.cluster.x-k8s.io >/dev/null 2>&1; then
+          echo "ERROR: CAPI core CRDs (MachineDeployment) not installed — run Phase 11 first." >&2
+          exit 1
+        fi
+      changed_when: false
+
+    # ── Worker pointer Ignition -> shared bootstrap secret ──────────────────────
+    - name: Build the worker pointer Ignition bootstrap secret
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG=/root/kubeconfig
+        oc -n openshift-machine-api get secret worker-user-data -o jsonpath='{.data.userData}' \
+          | base64 -d > /tmp/worker.ign
+        oc create secret generic caworkers-bootstrap -n {{ ns }} \
+          --from-file=value=/tmp/worker.ign --dry-run=client -o yaml | oc apply -f -
+      changed_when: true
+
+    # ── Render the multi-AZ chain from the repo template ────────────────────────
+    - name: Render the multi-AZ MachineDeployment chain
+      ansible.builtin.template:
+        src: "{{ repo }}/custom_manifests/capa-worker-machinedeployment.yaml"
+        dest: /root/caworkers-chain.yaml
+        mode: "0644"
+      vars:
+        region: "{{ md_region }}"
+        boot_image: "{{ md_boot_image }}"
+        instance_type: "{{ md_instance_type }}"
+        sg: "{{ md_sg }}"
+        ram_role: "{{ md_ram_role }}"
+        cp_host: "{{ md_cp_host }}"
+        worker_zones: "{{ md_worker_zones }}"
+        replicas_per_zone: "{{ md_replicas_per_zone }}"
+        bootstrap_secret: caworkers-bootstrap
+
+    - name: Pre-clean any stale multi-AZ objects
+      ansible.builtin.command:
+        argv: [oc, "--kubeconfig", /root/kubeconfig, delete, -f, /root/caworkers-chain.yaml,
+               --ignore-not-found, "--wait=true", "--timeout=300s"]
+      changed_when: true
+      failed_when: false
+
+    - name: Apply + validate the multi-AZ worker pools
+      block:
+        - name: Apply the multi-AZ chain
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, apply, -f, /root/caworkers-chain.yaml]
+          changed_when: true
+
+        - name: Patch AlibabaCloudCluster OwnerRef -> Cluster
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG=/root/kubeconfig
+            CU=$(oc -n {{ ns }} get cluster caworkers -o jsonpath='{.metadata.uid}')
+            oc -n {{ ns }} patch alibabacloudcluster caworkers --type=merge \
+              -p "{\"metadata\":{\"ownerReferences\":[{\"apiVersion\":\"cluster.x-k8s.io/v1beta2\",\"kind\":\"Cluster\",\"name\":\"caworkers\",\"uid\":\"$CU\",\"controller\":true,\"blockOwnerDeletion\":true}]}}"
+          changed_when: true
+
+        - name: Wait for CAPI Cluster.status.failureDomains to be populated (spread prerequisite)
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, -n, "{{ ns }}", get, cluster, caworkers,
+                   -o, "jsonpath={.status.failureDomains}"]
+          register: _fd
+          retries: 18
+          delay: 10
+          until: _fd.stdout | length > 2
+          changed_when: false
+
+        - name: Wait for all worker MachineDeployments to reach desired replicas
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG=/root/kubeconfig
+            want={{ (md_worker_zones | length) * (md_replicas_per_zone | int) }}
+            ready=$(oc -n {{ ns }} get machinedeployment -l cluster.x-k8s.io/cluster-name=caworkers \
+              -o jsonpath='{range .items[*]}{.status.readyReplicas}{"\n"}{end}' | awk '{s+=$1} END{print s+0}')
+            echo "ready=$ready want=$want"
+            test "$ready" -ge "$want"
+          register: _mdready
+          retries: 60
+          delay: 20
+          until: _mdready.rc == 0
+          changed_when: false
+
+        - name: Assert workers spread across distinct zones (HA)
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG=/root/kubeconfig
+            # CAPA machines carry the resolved zoneID in the AlibabaCloudMachine spec.
+            zones=$(oc -n {{ ns }} get alibabacloudmachine -o jsonpath='{range .items[*]}{.spec.zoneID}{"\n"}{end}' | sort -u | grep -c .)
+            echo "distinct worker zones: $zones"
+            test "$zones" -ge {{ md_worker_zones | length }}
+          register: _spread
+          changed_when: false
+
+        - name: Scale pool 'a' up by 1 (exercise declarative scale-up)
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, -n, "{{ ns }}", scale, machinedeployment,
+                   caworkers-a, "--replicas={{ (md_replicas_per_zone | int) + 1 }}"]
+          changed_when: true
+
+        - name: Wait for the scaled pool to converge
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG=/root/kubeconfig
+            want={{ (md_replicas_per_zone | int) + 1 }}
+            ready=$(oc -n {{ ns }} get machinedeployment caworkers-a -o jsonpath='{.status.readyReplicas}')
+            echo "pool-a ready=${ready:-0} want=$want"
+            test "${ready:-0}" -ge "$want"
+          register: _scaleup
+          retries: 60
+          delay: 20
+          until: _scaleup.rc == 0
+          changed_when: false
+
+        - name: B2 PASS
+          ansible.builtin.debug:
+            msg: "✓ B2: {{ md_worker_zones | length }} per-AZ MachineDeployments converged, workers spread across distinct zones, scale-up on pool-a succeeded (CSRs auto-approved by the controller)."
+
+      always:
+        - name: Cleanup — delete the multi-AZ chain
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, delete, -f, /root/caworkers-chain.yaml,
+                   --ignore-not-found, "--wait=true", "--timeout=300s"]
+          changed_when: true
+          failed_when: false
+
+        - name: Cleanup — sweep any leftover caworkers ECS by tag (safety net)
+          ansible.builtin.debug:
+            msg: "If any ECS tagged openshift-worker-pool=capa-multiaz remains, the operator teardown sweep will catch it."

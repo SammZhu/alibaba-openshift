@@ -1,0 +1,48 @@
+# Ensure a vSwitch exists in zone _tz within the cluster VPC, creating one with a
+# free /24 if absent. Used by Phase 12 (B2 multi-AZ) to provision worker subnets
+# in cn-*-a/b/c. Inputs: _tz (zone id), _zone_vsw (existing zone->vsw map),
+# _used_octets (third octets already used), _allocated_octets (claimed this run),
+# _cidr_base (first two octets of the VPC), mirror_vpc_id, region, aliyun_profile.
+# Assumes a /16 VPC carved into /24 vSwitches (the cluster's layout).
+---
+- name: "[{{ _tz }}] vSwitch already present?"
+  ansible.builtin.set_fact:
+    _tz_has_vsw: "{{ _tz in (_zone_vsw.keys() | list) }}"
+
+- name: "[{{ _tz }}] reuse existing vSwitch"
+  ansible.builtin.debug:
+    msg: "zone {{ _tz }} already has vSwitch {{ _zone_vsw[_tz] | default('?') }} — reusing"
+  when: _tz_has_vsw
+
+- name: "[{{ _tz }}] allocate a free /24 octet"
+  when: not _tz_has_vsw
+  ansible.builtin.set_fact:
+    _new_octet: >-
+      {{ (range(0, 256) | difference(_used_octets | map('int') | list)
+          | difference(_allocated_octets | map('int') | list) | list | first) }}
+
+- name: "[{{ _tz }}] create vSwitch {{ _cidr_base }}.{{ _new_octet | default('?') }}.0/24"
+  when: not _tz_has_vsw
+  ansible.builtin.command:
+    argv: [aliyun, vpc, CreateVSwitch, --RegionId, "{{ region }}",
+           --VpcId, "{{ mirror_vpc_id }}", --ZoneId, "{{ _tz }}",
+           --CidrBlock, "{{ _cidr_base }}.{{ _new_octet }}.0/24",
+           --VSwitchName, "capa-worker-{{ _tz }}", --profile, "{{ aliyun_profile }}"]
+  register: _vsw_create
+  changed_when: true
+
+- name: "[{{ _tz }}] claim the octet so siblings don't reuse it"
+  when: not _tz_has_vsw
+  ansible.builtin.set_fact:
+    _allocated_octets: "{{ _allocated_octets + [_new_octet | int] }}"
+
+- name: "[{{ _tz }}] wait for the new vSwitch to be Available"
+  when: not _tz_has_vsw
+  ansible.builtin.command:
+    argv: [aliyun, vpc, DescribeVSwitchAttributes, --RegionId, "{{ region }}",
+           --VSwitchId, "{{ (_vsw_create.stdout | from_json).VSwitchId }}", --profile, "{{ aliyun_profile }}"]
+  register: _vsw_attr
+  retries: 12
+  delay: 5
+  until: (_vsw_attr.stdout | from_json).Status | default('') == 'Available'
+  changed_when: false

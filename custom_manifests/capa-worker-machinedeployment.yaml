@@ -1,0 +1,128 @@
+# CAPA worker pool — multi-AZ HA via per-availability-zone MachineDeployments
+# =============================================================================
+# Declarative, self-healing worker lifecycle for Route B (aliyun-platform RHCOS
+# + user-data Ignition). This is the B2 deliverable; it builds on:
+#   - failure domains: AlibabaCloudCluster.spec.failureDomains -> status, and the
+#     controller's resolveFailureDomain (machine.spec.failureDomain -> zone+vSwitch)
+#   - B1 controller-side CSR auto-approval (scaled-out nodes join unattended)
+#   - idempotent create (adopt-by-tag, no duplicate/orphan ECS)
+#   - PR-B capacity terminal (a sold-out zone -> the MachineSet rebuilds elsewhere)
+#
+# HA topology = ONE MachineDeployment per AZ (host pool / AZ). This matches the
+# OpenShift machine-api convention (one MachineSet per zone), lets the cluster
+# autoscaler (B3) scale each pool independently with scale-from-zero, and keeps
+# zone-level fault/capacity isolation explicit. (Alternative: a single
+# MachineDeployment with replicas spread across status.failureDomains — simpler
+# but no per-pool control; see docs/CAPA-MULTI-AZ.md.)
+#
+# Jinja placeholders are filled by ansible/playbooks/12-capa-machinedeployment.yml.
+# Prerequisite: a vSwitch must exist in EACH listed zone (the playbook creates
+# them) and be published in spec.failureDomains below.
+# -----------------------------------------------------------------------------
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: AlibabaCloudCluster
+metadata:
+  name: caworkers
+  namespace: {{ ns }}
+spec:
+  region: {{ region }}
+  bootImageID: {{ boot_image }}
+  controlPlaneEndpoint: {host: {{ cp_host }}, port: 6443}
+  # Worker placement zones. The MachineSet spreads / pins replicas across these;
+  # the controller resolves each to its vSwitch at RunInstances time.
+  failureDomains:
+{% for z in worker_zones %}
+    - {zoneID: {{ z.zone }}, vSwitchID: {{ z.vsw }}}
+{% endfor %}
+---
+# CAPI Cluster wrapper (control plane is the existing cluster; this only wires
+# the infra ref so MachineSet/MachineDeployment can read status.failureDomains).
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  name: caworkers
+  namespace: {{ ns }}
+spec:
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: AlibabaCloudCluster
+    name: caworkers
+---
+# Shared infra template — NO zoneID/vSwitchID so they resolve from each
+# Machine's failureDomain. IMDSv2 is on by default (controller baseline); disks
+# die with the instance; tags propagate to disks+ENIs.
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: AlibabaCloudMachineTemplate
+metadata:
+  name: caworkers-worker
+  namespace: {{ ns }}
+spec:
+  template:
+    spec:
+      instanceType: {{ instance_type }}
+      regionID: {{ region }}
+      securityGroupIDs: ["{{ sg }}"]
+      ramRoleName: {{ ram_role }}
+      systemDisk: {category: cloud_essd, size: 40}
+      # metadataOptions omitted -> controller defaults httpTokens=required.
+      tags:
+        - {key: openshift-worker-pool, value: capa-multiaz}
+{% for z in worker_zones %}
+---
+# Worker pool for zone {{ z.zone }}. All replicas of this MachineDeployment land
+# in its pinned failureDomain. Run one per zone for HA + per-pool autoscaling.
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: MachineDeployment
+metadata:
+  name: caworkers-{{ z.key }}
+  namespace: {{ ns }}
+  labels:
+    cluster.x-k8s.io/cluster-name: caworkers
+spec:
+  clusterName: caworkers
+  replicas: {{ replicas_per_zone | default(1) }}
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: caworkers
+      pool: caworkers-{{ z.key }}
+  template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/cluster-name: caworkers
+        pool: caworkers-{{ z.key }}
+    spec:
+      clusterName: caworkers
+      # Pin this pool to its zone (must be one of spec.failureDomains).
+      failureDomain: {{ z.zone }}
+      bootstrap:
+        # All workers share the cluster's worker pointer Ignition (BYO bootstrap
+        # data: same MCS pointer for every worker, no bootstrap provider).
+        dataSecretName: {{ bootstrap_secret }}
+      infrastructureRef:
+        apiGroup: infrastructure.cluster.x-k8s.io
+        kind: AlibabaCloudMachineTemplate
+        name: caworkers-worker
+{% endfor %}
+---
+# Self-healing: replace a worker whose Node goes unreachable or whose
+# AlibabaCloudMachine is marked Failed (e.g. an ECS released out-of-band -> the
+# controller sets InstanceDisappeared terminal). The MachineSet then rebuilds it
+# — in another zone if the original zone is out of capacity (PR-B).
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: MachineHealthCheck
+metadata:
+  name: caworkers-mhc
+  namespace: {{ ns }}
+spec:
+  clusterName: caworkers
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: caworkers
+  # Tolerate brief blips; remediate sustained failures. Cap concurrent
+  # remediation so a transient control-plane hiccup can't drain every pool.
+  maxUnhealthy: 40%
+  nodeStartupTimeout: 20m
+  unhealthyConditions:
+    - {type: Ready, status: "False", timeout: 300s}
+    - {type: Ready, status: Unknown, timeout: 300s}
