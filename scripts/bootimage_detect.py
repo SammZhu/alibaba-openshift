@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """Detect whether a new RHCOS version needs an aliyun boot image (P3-IMG.1).
 
-Cluster-independent: the OCP version comes from `openshift_version` in
-ansible/group_vars/all.yml (the operator's source of truth), and the RHCOS
-openstack qcow2 is resolved from the openshift/installer `release-X.Y` stream
-metadata — no running cluster / `oc` needed. Compares the resolved RHCOS release
-to the provenance files in git and prints a small result the workflow consumes.
+Cluster-independent and stdlib-only (no PyYAML — runner pythons may lack it).
+The OCP version comes from `openshift_version` in ansible/group_vars/all.yml
+(the operator's source of truth); the RHCOS openstack qcow2 is resolved from the
+openshift/installer release-X.Y stream metadata — no running cluster / oc.
 
 Resolution order:
   --stream <file|->        explicit stream JSON (manual override)
   --openshift-version X.Y  explicit version -> installer rhcos.json
-  --group-vars <file>      read openshift_version from group_vars (default;
-                           falls back to <file>.example when the file is absent,
-                           e.g. on a fresh runner checkout)
-
-Exits 0 always; the workflow branches on the printed needs_bake.
+  --group-vars <file>      read openshift_version (default; .example fallback)
 """
 import argparse
 import glob
@@ -23,8 +18,6 @@ import os
 import re
 import sys
 import urllib.request
-
-import yaml
 
 INSTALLER_RHCOS = ("https://raw.githubusercontent.com/openshift/installer/"
                    "release-{branch}/data/data/coreos/rhcos.json")
@@ -51,16 +44,25 @@ def fetch_stream_for_version(version):
         return json.loads(r.read().decode())
 
 
+def _grep1(path, key):
+    """First `key: value` scalar from a simple YAML file (no PyYAML)."""
+    pat = re.compile(r'^\s*' + re.escape(key) + r'\s*:\s*["\']?([^"\'#\s]+)')
+    for line in open(path, encoding="utf-8", errors="replace"):
+        m = pat.match(line)
+        if m:
+            return m.group(1)
+    return None
+
+
 def version_from_group_vars(path):
     if not os.path.exists(path):
         alt = path + ".example"
         sys.stderr.write(f"[detect] {path} absent, falling back to {alt}\n")
         path = alt
-    data = yaml.safe_load(open(path)) or {}
-    v = data.get("openshift_version")
+    v = _grep1(path, "openshift_version")
     if not v:
         raise ValueError(f"openshift_version not found in {path}")
-    return str(v)
+    return v
 
 
 def known_versions(provenance_dir):
@@ -68,9 +70,9 @@ def known_versions(provenance_dir):
     for p in glob.glob(os.path.join(provenance_dir, "*.yaml")):
         if os.path.basename(p) == "example.yaml":
             continue
-        d = yaml.safe_load(open(p)) or {}
-        if d.get("rhcosVersion"):
-            out.add(str(d["rhcosVersion"]))
+        v = _grep1(p, "rhcosVersion")
+        if v:
+            out.add(v)
     return out
 
 
