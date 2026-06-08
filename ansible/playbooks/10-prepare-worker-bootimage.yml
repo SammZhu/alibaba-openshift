@@ -12,7 +12,9 @@
 #
 # Two modes:
 #   * Standalone (default): resolve the qcow URL from the cluster, download,
-#     re-stamp, upload to OSS, ImportImage, save state. Needs jump host + creds.
+#     re-stamp, GATE (scripts/bootimage-gate.sh), upload to OSS, ImportImage, save
+#     state. This IS the install-flow image prep — #83's cloud side reuses it
+#     rather than building a separate OSS/import pipeline. Needs jump host + creds.
 #   * CI bake (P3-IMG.1): the supply-chain workflow has ALREADY downloaded the
 #     qcow and runs the offline gate itself, so it calls this with:
 #       -e rhcos_qcow=/path/to/rhcos.qcow2   (use it; skip URL-resolve+download)
@@ -196,6 +198,20 @@
           ansible.builtin.debug:
             msg: "Re-stamped {{ qcow }} to ignition.platform.id=aliyun. Skipping OSS/ImportImage (skip_upload_until_gate)."
           when: skip_upload_until_gate | bool
+
+        # ── Offline format gate (reuse the supply-chain gate, P3-IMG.1) ─────────
+        # The CI bake runs this externally (bake-one.sh) after the re-stamp; here we
+        # run the SAME gate in the standalone install path too, so an image is never
+        # uploaded/imported unless every BLS entry + grub.cfg carries
+        # ignition.platform.id=aliyun and qemu-img check passes. No new cloud code —
+        # just the same scripts/bootimage-gate.sh the supply chain already validated.
+        - name: Offline format gate before upload
+          environment:
+            LIBGUESTFS_BACKEND: direct
+          ansible.builtin.command:
+            argv: [bash, "{{ playbook_dir }}/../../scripts/bootimage-gate.sh", "{{ qcow }}"]
+          changed_when: false
+          when: not (skip_upload_until_gate | bool)
 
         # ── Upload + import as an ECS custom image (standalone only) ────────────
         - name: Read AK/SK from aliyun profile for OSS

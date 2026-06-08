@@ -6,18 +6,23 @@ that you only discover is broken when a node fails to boot.
 
 **Design principle: store only the recipe, not the product.** The only durable
 artifact is the few-KB provenance in `bootimage/provenance/`. The qcow2 is
-re-derived on demand; OSS is transit-only (auto-expiring); the ECS image is
-materialized when a version is actually deployed and deleted on teardown.
+re-derived on demand; the ECS image is materialized **by the normal install flow**
+when a version is actually deployed, and deleted on teardown.
+
+**Two halves, one re-stamp.** The supply chain is an *offline CI pre-flight*: it
+proves a version's re-stamp is format-correct (gate) and records provenance. The
+*cloud materialization* (OSS upload → ImportImage → ECS image) is **not** a separate
+pipeline — it is exactly what the install flow already does in
+`ansible/playbooks/10-prepare-worker-bootimage.yml` (standalone mode) for Route B
+workers. Both halves run the **same re-stamp task**; they only differ in where they
+stop. So #83 builds no separate cloud code — it reuses the install flow.
 
 ```
-git (provenance + scripts)                     ← only durable thing; ~0 storage
-   │ detect (GitHub-hosted): new RHCOS release?
-   │ ── yes → bake job dispatched to self-hosted ──┐ outbound pull, zero inbound
-   ▼                                                ▼
-   provenance write-back (hosted)        internal RHEL runner (VPC, RAM role):
-   + cosign sign                           re-bake → GATE → OSS(transit) → ImportImage → boot smoke
-                                                │
-                                                ▼ ECS image on-demand, deleted on teardown
+supply chain (offline CI)              install flow (at deploy time, playbook 10)
+detect → re-stamp → GATE               re-stamp (cluster's current RHCOS) → GATE
+       → provenance write-back                → OSS → ImportImage → ECS image → state
+  proves "this version's re-stamp           materializes on demand; deleted on teardown.
+   is format-correct" + records it          cluster == source of truth == your all.yml version
 ```
 
 ## Pieces
@@ -93,7 +98,16 @@ it ships a *new* RHCOS, the matrix bakes a fresh entry and the old one stays pin
 
 ## Status
 
-Offline pieces done + unit-tested (detect, gate logic, provenance schema, workflow
-skeleton). TODO (needs the runner + cloud): wire `10-prepare-worker-bootimage.yml`
-to call `bootimage-gate.sh` between re-stamp and upload; implement OSS atime
-lifecycle + on-demand ECS materialization; boot smoke; provenance write-back + cosign.
+Offline supply chain done + production-validated on the self-hosted runner: detect
+(matrix ∩ AI), re-stamp, gate, provenance write-back + auto-refresh, scheduled
+workflow. The gate is now wired into the install path too
+(`10-prepare-worker-bootimage.yml` standalone runs `bootimage-gate.sh` before
+upload).
+
+**Cloud materialization = the install flow, not a separate pipeline.** OSS upload +
+ImportImage + ECS image are already done by `10-prepare-worker-bootimage.yml`
+standalone at deploy time (and torn down with the cluster) — #83 reuses it, so the
+earlier "OSS atime lifecycle + on-demand materialization" pipeline is dropped.
+
+Remaining (optional): boot smoke write-back (a real Route B worker join flips
+provenance `bootSmoke: pending → passed`); cosign-sign provenance.
