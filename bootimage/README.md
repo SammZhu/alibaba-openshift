@@ -24,10 +24,9 @@ git (provenance + scripts)                     ← only durable thing; ~0 storag
 
 | File | Role | Runs where | Offline-testable |
 |---|---|---|---|
-| `bootimage/version` | the **authoritative committed OCP version** for CI (the runner has no local `all.yml`); single-version now, the matrix FLOOR later | git | ✅ |
-| `bootimage/supported-versions` | (optional) the env's **mirrored / installable** OCP versions — the air-gap-authoritative AND source. When present, the matrix is intersected with it (only bake versions a cluster can really be here). GA-only by default (`-ec/-rc/-fc` ignored). Copy from `.example`. | git | ✅ |
-| `scripts/ai_versions.py` | (connected) fetch AI-supported versions from assisted-service `/openshift-versions` (offline token from `all.yml`) — a broader AND source than the mirrored set | runner | ✅ |
-| `scripts/bootimage_detect.py` | resolve RHCOS from `bootimage/version` via the installer `release-X.Y` stream — **no cluster/oc needed** — compare to provenance, decide `needs_bake` (overridable with `--openshift-version` / `--stream`) | hosted / runner | ✅ |
+| `bootimage/version` | **the supported / mirrored OCP version set** (one per line) — the air-gap-authoritative answer to "which versions a cluster can be here, so CAPA needs a matching image". Committed (the runner has no local `all.yml`). The matrix bakes exactly these; single-version mode uses the first line. GA-only by default (`-ec/-rc/-fc` skipped). | git | ✅ |
+| `scripts/bootimage_detect.py` | resolve each version's RHCOS via the installer `release-X.Y` stream — **no cluster/oc needed** — skip what's already in provenance. `--all-from` = matrix (the whole list); default = single (first line); `--ai-versions <file>` = optional cross-check against a connected AI list | hosted / runner | ✅ |
+| `scripts/ai_versions.py` | (optional, connected) fetch AI-supported versions from assisted-service `/openshift-versions` (offline token from `all.yml`) — feed to `detect --ai-versions` to cross-check the list, or to regenerate `bootimage/version` | runner | ✅ |
 | `ansible/playbooks/10-prepare-worker-bootimage.yml` | the bake (guestfish re-stamp + OSS + ImportImage) | runner (VPC) | — |
 | `scripts/bootimage-gate.sh` | **offline format gate**: qemu-img check + partition layout + extract + karg assertions, BEFORE any upload | runner | partial (needs an image) |
 | `scripts/verify_kargs.py` (+ `_test.py`) | pure karg-assertion logic: all `ignition.platform.id=aliyun`, no residual, completeness, cross-version diff guard | anywhere | ✅ (unit-tested) |
