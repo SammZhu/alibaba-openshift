@@ -18,7 +18,18 @@ jobs:
       - name: Bake every RHCOS from the floor up (skip already baked)
         run: |
           set -uo pipefail
-          LIST="$(python3 scripts/bootimage_detect.py --all-from --provenance-dir bootimage/provenance)"
+          # AND 上 AI 版本矩阵(P3-IMG.2):只烤 AI 也支持的版本(集群真能装的)。
+          # runner 上有 offline-token 就启用交集,没有则告警+只按 floor 烤。
+          AI_ARG=""
+          if [ -f "$HOME/.openshift/offline-token" ] && python3 scripts/ai_versions.py > /tmp/ai-versions.txt 2>/tmp/ai.err; then
+            AI_ARG="--ai-versions /tmp/ai-versions.txt"
+            echo "AI-supported: $(tr '\n' ' ' < /tmp/ai-versions.txt)"
+          else
+            echo "::warning::AI 版本拉取跳过/失败 — 不做 AI 交集,仅按 floor 烤"; cat /tmp/ai.err 2>/dev/null || true
+          fi
+          LIST="$(python3 scripts/bootimage_detect.py --all-from $AI_ARG --provenance-dir bootimage/provenance)"
+
+          
           if [ -z "$LIST" ]; then
             echo "✓ all versions up to date — nothing to bake"
             exit 0
