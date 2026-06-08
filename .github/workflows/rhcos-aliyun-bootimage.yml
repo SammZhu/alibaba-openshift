@@ -46,3 +46,19 @@ jobs:
             echo "::endgroup::"
           done <<< "$LIST"
           exit $rc
+
+      - name: Refresh provenance ocpVersion to latest z-stream
+        if: ${{ !cancelled() }}            # 即使某个版本烤失败也刷新其它条目
+        run: |
+          set -uo pipefail
+          # 复用 bake 步骤已拉好的 AI 列表;没有就跳过(没 AI 源刷不了 z)
+          [ -s /tmp/ai-versions.txt ] || { echo "no AI list — skip refresh"; exit 0; }
+          python3 scripts/normalize_provenance.py \
+            --ai-versions /tmp/ai-versions.txt \
+            --provenance-dir bootimage/provenance
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bootimage/provenance
+          git commit -m "chore(bootimage): refresh ocpVersion to latest z" || { echo "no change"; exit 0; }
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME:-main}"
+          git push origin "HEAD:${GITHUB_REF_NAME:-main}"
