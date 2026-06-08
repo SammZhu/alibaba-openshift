@@ -1,7 +1,10 @@
 ---
 # Convenience wrapper: run Phases 00 → 07 in sequence (split architecture).
-# Phase 08 (post-install) runs on jump host inventory and is NOT included
-# here.  Phase 99 (teardown) must run with explicit confirmation.
+# This brings up the CLUSTER (control plane via Assisted). The post-install
+# WORKER PLANE (phases 08 → 12: CAPI provider + CSI, aliyun worker boot image,
+# declarative pools) is the companion wrapper site-post.yml — it runs on jump
+# host / local inventory and is NOT included here.
+# Phase 99 (teardown) must run with explicit confirmation.
 #
 # The 04/05 mirror playbooks end_play harmlessly when mirror_enabled=false,
 # so site.yml can include them unconditionally.

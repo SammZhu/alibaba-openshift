@@ -1,0 +1,31 @@
+---
+# Convenience wrapper: post-install phases (08 → 12), the counterpart to site.yml.
+#
+# site.yml brings up the CLUSTER (phases 00–07, control plane via Assisted).
+# site-post.yml brings up the CAPA WORKER PLANE on top of that finished cluster:
+# the CAPI provider + CSI, the re-stamped aliyun RHCOS worker boot image, and the
+# declarative multi-AZ worker pools.
+#
+# Inventory: these run jump-host / local (not the operator host directly) — each
+# playbook declares its own hosts / delegates as needed, exactly like site.yml.
+# Run the same way:
+#
+#   ansible-playbook -i ansible/inventory.yml ansible/playbooks/site-post.yml
+#
+# Prerequisites: site.yml completed (cluster install-complete) and the operator's
+# all.yml carries the deploy version (openshift_version), picked from the
+# bootimage/provenance/ menu.
+#
+# DEFAULT CHAIN (08 → 10 → 12):
+- ansible.builtin.import_playbook: 08-deploy-post-install.yml   # CAPI provider + CSI
+- ansible.builtin.import_playbook: 10-prepare-worker-bootimage.yml  # aliyun RHCOS worker image
+- ansible.builtin.import_playbook: 12-capa-machinedeployment.yml    # declarative multi-AZ pools
+#
+# OPTIONAL — validation hooks, not part of the deploy path (uncomment to run):
+#   09-capa-smoke.yml        CAPA controller behavioural smoke test
+#   11-capa-routeb-join.yml  single hand-crafted Route B Machine. NOTE: Phase 12
+#                            SUPERSEDES this (declarative pools) — running both
+#                            provisions an extra standalone worker. Use 11 only as
+#                            a one-off Route B validation, not alongside 12.
+# - ansible.builtin.import_playbook: 09-capa-smoke.yml
+# - ansible.builtin.import_playbook: 11-capa-routeb-join.yml
