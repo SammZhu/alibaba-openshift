@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Editor / local backups (operator-local all.yml, state, etc.)
+*.bak
+*.bak.*
+*~
+
+# Build / mirror work dirs (large, never committed)
+mirror-build/
+
+# Operator-local secrets / state must never be committed
+ansible/group_vars/all.yml
+ansible/state.yml
