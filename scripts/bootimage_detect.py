@@ -66,6 +66,19 @@ def fetch_stream_for_version(version):
     return s
 
 
+def enumerate_minors(floor_minor, cap=40):
+    """Yield (branch, stream) for release-<floor>.. up to the first 404."""
+    major, mn = floor_minor.split(".")
+    m = int(mn)
+    while m <= int(mn) + cap:
+        branch = f"{major}.{m}"
+        stream = fetch_stream_for_minor(branch)
+        if stream is None:
+            break
+        yield branch, stream
+        m += 1
+
+
 def _grep1(path, key):
     """First `key: value` scalar from a simple YAML file (no PyYAML)."""
     pat = re.compile(r'^\s*' + re.escape(key) + r'\s*:\s*["\']?([^"\'#\s]+)')
@@ -87,21 +100,13 @@ def version_from_group_vars(path):
     return v
 
 
-def versions_from_file(path):
-    """All non-comment, non-blank version lines (the supported/mirrored set)."""
-    out = []
+def version_from_file(path):
+    """First non-comment, non-blank line of the committed version file (the FLOOR)."""
     for line in open(path, encoding="utf-8", errors="replace"):
         s = line.strip()
         if s and not s.startswith("#"):
-            out.append(s)
-    if not out:
-        raise ValueError(f"no version line in {path}")
-    return out
-
-
-def version_from_file(path):
-    """First version line (single-version mode)."""
-    return versions_from_file(path)[0]
+            return s
+    raise ValueError(f"no version line in {path}")
 
 
 def known_versions(provenance_dir):
@@ -121,59 +126,52 @@ def main(argv=None):
     ap.add_argument("--openshift-version", help="explicit OCP version, e.g. 4.20.22")
     ap.add_argument("--group-vars", help="operator-local group_vars override (reads openshift_version)")
     ap.add_argument("--version-file", default="bootimage/version",
-                    help="committed authoritative version file (default source)")
+                    help="committed FLOOR version file (the minimum supported OCP)")
     ap.add_argument("--all-from", action="store_true",
-                    help="MATRIX: bake every OCP version listed in the version file "
-                         "(the supported/mirrored set) that is not yet in provenance; "
-                         "emit TSV lines (rhcos<TAB>ocp<TAB>url<TAB>sha256)")
+                    help="MATRIX: enumerate every OCP minor from the floor (version "
+                         "file / --openshift-version) up to the latest; emit TSV lines "
+                         "(rhcos<TAB>ocp_minor<TAB>url<TAB>sha256) for the ones not yet "
+                         "in provenance")
     ap.add_argument("--ai-versions",
-                    help="optional cross-check: file of OCP versions a cluster can "
-                         "actually be (from ai_versions.py / a connected "
-                         "assisted-service). When given, only bake versions whose "
-                         "minor is also in this set — catches a version listed in the "
-                         "version file that AI can't actually install.")
+                    help="INTERSECT (#84): file of OCP versions a cluster can actually "
+                         "be (from ai_versions.py / a connected assisted-service). When "
+                         "given, only bake minors also in this set — so every image "
+                         "matches a version AI can install.")
     ap.add_argument("--include-prereleases", action="store_true",
                     help="keep -ec/-rc/-fc pre-release versions (default: GA only)")
     ap.add_argument("--provenance-dir", required=True)
     args = ap.parse_args(argv)
 
-    # ── MATRIX mode: bake exactly the versions listed in the version file ────────
-    # The version file IS the supported/mirrored set (one OCP version per line) —
-    # the air-gap-authoritative source of what a cluster can actually be here. We
-    # resolve each version's RHCOS, drop pre-releases (unless --include-prereleases),
-    # skip anything already in provenance, and emit the rest.
+    # ── MATRIX mode: floor minor .. latest, skip already-baked, emit a list ──────
+    # bootimage/version is the FLOOR (minimum supported OCP). The actual set to bake
+    # = enumerate floor..latest, minus what provenance already has. Optionally AND
+    # with the AI-supported set (#84) so every image matches a version a cluster can
+    # actually be. GA-only unless --include-prereleases.
     if args.all_from:
-        versions = versions_from_file(args.version_file)
-        # optional cross-check against a connected AI list (catch typos / versions
-        # the env mirrored but AI can't actually install).
+        floor = args.openshift_version or version_from_file(args.version_file)
+        fminor = minor(floor)
         ai_minors = None
         if args.ai_versions and os.path.exists(args.ai_versions):
             ai_minors = {minor(s.strip()) for s in open(args.ai_versions)
                          if s.strip() and not s.startswith("#")
                          and (args.include_prereleases or is_ga(s.strip()))}
         have = known_versions(args.provenance_dir)
-        seen = set(have)   # also dedups versions that pin the same RHCOS build
-        to_bake, skipped_pre, skipped_ai, errs = [], [], [], []
-        for v in versions:
-            if not (args.include_prereleases or is_ga(v)):
-                skipped_pre.append(v)
+        seen = set(have)   # also dedups minors that pin the same RHCOS build
+        to_bake, scanned, skipped_not_ai = [], [], []
+        for branch, stream in enumerate_minors(fminor):
+            scanned.append(branch)
+            if ai_minors is not None and branch not in ai_minors:
+                skipped_not_ai.append(branch)
                 continue
-            if ai_minors is not None and minor(v) not in ai_minors:
-                skipped_ai.append(v)
-                continue
-            try:
-                info = extract(fetch_stream_for_version(v))
-            except Exception as e:   # noqa: BLE001 — one bad version mustn't sink the run
-                errs.append(f"{v}: {e}")
-                continue
+            info = extract(stream)
             if info["rhcosVersion"] not in seen:
-                to_bake.append((info, minor(v)))
+                to_bake.append((info, branch))
                 seen.add(info["rhcosVersion"])
-        for info, mnr in to_bake:
-            print(f"{info['rhcosVersion']}\t{mnr}\t{info['url']}\t{info['sha256']}")
+        for info, branch in to_bake:
+            print(f"{info['rhcosVersion']}\t{branch}\t{info['url']}\t{info['sha256']}")
         sys.stderr.write(
-            f"[detect] versions={versions} prerelease_skipped={skipped_pre} "
-            f"ai_filtered_out={skipped_ai} errors={errs} already_baked={sorted(have)} "
+            f"[detect] floor={fminor} scanned={scanned} "
+            f"ai_filtered_out={skipped_not_ai} already_baked={sorted(have)} "
             f"to_bake={[i['rhcosVersion'] for i, _ in to_bake]}\n")
         return 0
 

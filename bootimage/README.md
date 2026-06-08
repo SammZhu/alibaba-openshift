@@ -24,9 +24,9 @@ git (provenance + scripts)                     ← only durable thing; ~0 storag
 
 | File | Role | Runs where | Offline-testable |
 |---|---|---|---|
-| `bootimage/version` | **the supported / mirrored OCP version set** (one per line) — the air-gap-authoritative answer to "which versions a cluster can be here, so CAPA needs a matching image". Committed (the runner has no local `all.yml`). The matrix bakes exactly these; single-version mode uses the first line. GA-only by default (`-ec/-rc/-fc` skipped). | git | ✅ |
-| `scripts/bootimage_detect.py` | resolve each version's RHCOS via the installer `release-X.Y` stream — **no cluster/oc needed** — skip what's already in provenance. `--all-from` = matrix (the whole list); default = single (first line); `--ai-versions <file>` = optional cross-check against a connected AI list | hosted / runner | ✅ |
-| `scripts/ai_versions.py` | (optional, connected) fetch AI-supported versions from assisted-service `/openshift-versions` (offline token from `all.yml`) — feed to `detect --ai-versions` to cross-check the list, or to regenerate `bootimage/version` | runner | ✅ |
+| `bootimage/version` | **the FLOOR** — the minimum supported OCP version. Committed (the runner has no local `all.yml`). NOT the list to bake; the set is derived at run time (floor→latest, minus provenance). | git | ✅ |
+| `scripts/bootimage_detect.py` | resolve RHCOS via the installer `release-X.Y` stream — **no cluster/oc needed**. `--all-from` = matrix (enumerate floor→latest, skip what's in provenance, optionally `--ai-versions` AND); default = single (the floor line) | hosted / runner | ✅ |
+| `scripts/ai_versions.py` | (optional, connected) fetch AI-supported versions from assisted-service `/openshift-versions` (offline token from `all.yml`) — feed to `detect --ai-versions` so the matrix only bakes minors a cluster can actually be (#84) | runner | ✅ |
 | `ansible/playbooks/10-prepare-worker-bootimage.yml` | the bake (guestfish re-stamp + OSS + ImportImage) | runner (VPC) | — |
 | `scripts/bootimage-gate.sh` | **offline format gate**: qemu-img check + partition layout + extract + karg assertions, BEFORE any upload | runner | partial (needs an image) |
 | `scripts/verify_kargs.py` (+ `_test.py`) | pure karg-assertion logic: all `ignition.platform.id=aliyun`, no residual, completeness, cross-version diff guard | anywhere | ✅ (unit-tested) |

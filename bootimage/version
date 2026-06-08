@@ -1,13 +1,13 @@
-# Supported OCP versions for the RHCOS aliyun boot-image supply chain (P3-IMG.1).
+# FLOOR: the minimum supported OCP version for the RHCOS aliyun boot-image supply
+# chain (P3-IMG.1). This file is committed, so the CI runner (which has NO local
+# ansible/group_vars/all.yml) has an explicit, auditable floor decoupled from the
+# operator's all.yml.
 #
-# This file IS the supported / mirrored set — the air-gap-authoritative answer to
-# "which OCP versions can a cluster actually be here, so CAPA must have a matching
-# aliyun boot image". It is committed, so the CI runner (which has NO local
-# ansible/group_vars/all.yml) has an explicit, auditable source decoupled from the
-# operator's local all.yml.
+# This is NOT the list of versions to bake — that is derived at run time:
+#   matrix (detect --all-from) = enumerate this minor .. the latest OCP release,
+#   MINUS whatever bootimage/provenance/ already has (skip already-baked), and
+#   optionally AND the AI-supported set (--ai-versions). GA-only by default.
+# Single-version mode uses this line as the version to bake.
 #
-# One OCP version per line. Add a line when you mirror a new version; the matrix
-# job (detect --all-from) bakes exactly the versions listed here that aren't yet
-# in provenance. Single-version mode uses the first line. Pre-releases
-# (-ec/-rc/-fc) are skipped unless --include-prereleases. Comments/blank lines OK.
+# detect reads the first non-comment, non-blank line below.
 4.20.22
