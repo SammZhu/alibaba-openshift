@@ -27,7 +27,7 @@ git (provenance + scripts)                     ← only durable thing; ~0 storag
 | `bootimage/version` | **the FLOOR** — the minimum supported OCP version. Committed (the runner has no local `all.yml`). NOT the list to bake; the set is derived at run time (floor→latest, minus provenance). | git | ✅ |
 | `scripts/bootimage_detect.py` | resolve RHCOS via the installer `release-X.Y` stream — **no cluster/oc needed**. `--all-from` = matrix (enumerate floor→latest, skip what's in provenance, optionally `--ai-versions` AND); default = single (the floor line) | hosted / runner | ✅ |
 | `scripts/ai_versions.py` | (optional, connected) fetch AI-supported versions from assisted-service `/openshift-versions` (offline token from `all.yml`) — feed to `detect --ai-versions` so the matrix only bakes minors a cluster can actually be **and records the precise z-stream** (#84) | runner | ✅ |
-| `scripts/normalize_provenance.py` | rewrite any provenance `ocpVersion` that is a bare minor (`4.21`) to the highest GA z of that minor from the AI set (`4.21.x`) — so every entry is a precise, deployable version. One-off backfill + safety net | runner | ✅ |
+| `scripts/normalize_provenance.py` | refresh each provenance `ocpVersion` to the latest GA z of its minor from the AI set (`4.21` → `4.21.12` → later `4.21.13` …) **only while** `release-X.Y` still points at that entry's `rhcosVersion` (else it's a historical image — left untouched, no drift). Idempotent; backfill now + schedule for ongoing refresh | runner | ✅ |
 | `ansible/playbooks/10-prepare-worker-bootimage.yml` | the bake (guestfish re-stamp + OSS + ImportImage) | runner (VPC) | — |
 | `scripts/bootimage-gate.sh` | **offline format gate**: qemu-img check + partition layout + extract + karg assertions, BEFORE any upload | runner | partial (needs an image) |
 | `scripts/verify_kargs.py` (+ `_test.py`) | pure karg-assertion logic: all `ignition.platform.id=aliyun`, no residual, completeness, cross-version diff guard | anywhere | ✅ (unit-tested) |
@@ -85,6 +85,11 @@ re-stamp + gate). `ocpVersion` is the precise, deployable z-stream and
 
 `bootimage/version` (the committed FLOOR) only bounds what the matrix bakes; it is
 **not** the deploy version — the deploy version comes from this menu.
+
+The menu stays current automatically: the scheduled workflow runs
+`normalize_provenance.py` after the bake, so when a newer z of a minor ships on the
+*same* RHCOS (e.g. `4.21.12` → `4.21.13`), the recorded `ocpVersion` follows; when
+it ships a *new* RHCOS, the matrix bakes a fresh entry and the old one stays pinned.
 
 ## Status
 

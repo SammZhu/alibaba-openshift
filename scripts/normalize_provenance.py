@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Normalize provenance ocpVersion to a precise, deployable z-stream (P3-IMG.2).
+"""Refresh provenance ocpVersion to the latest deployable z-stream (P3-IMG.2).
 
-Early matrix bakes recorded a bare minor (ocpVersion: "4.21") because
-detect --all-from emitted the release branch. The operator picks a version to
-deploy by eye from bootimage/provenance/, so every entry should be a precise
-version they can copy straight into all.yml's openshift_version.
+The operator picks a deploy version by eye from bootimage/provenance/, so every
+entry should show the *latest* precise version that this exact image can run. The
+same RHCOS boot image serves a whole minor's z-streams, so when a newer GA z of
+the minor appears (4.21.12 -> 4.21.13), the recorded ocpVersion should follow —
+AND an early matrix bake may have recorded only the bare minor (4.21), which is
+not deployable as-is. This does both.
 
-This rewrites any provenance file whose ocpVersion is a bare minor (X.Y) to the
-highest GA z-stream of that minor from the AI-supported set (same source/rule as
-detect --ai-versions). Already-precise entries (X.Y.Z) are left untouched.
+SAFETY GUARD — only bump an entry when the installer release-X.Y stream STILL
+points at this entry's rhcosVersion. If the latest z shipped a *new* RHCOS, this
+image is historical (the matrix bakes a fresh provenance for the new RHCOS); we
+must NOT relabel the old image to a z it can't actually boot (that would drift).
 
-Run on the runner (it has the AI offline token):
+Run on the runner (it has the AI offline token); idempotent, safe to schedule:
   python3 scripts/normalize_provenance.py \
       --ai-versions <(python3 scripts/ai_versions.py --group-vars ansible/group_vars/all.yml) \
       --provenance-dir bootimage/provenance
@@ -22,9 +25,8 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from bootimage_detect import load_ai_versions, _grep1  # noqa: E402
-
-BARE_MINOR = re.compile(r"^\d+\.\d+$")
+from bootimage_detect import (  # noqa: E402
+    load_ai_versions, _grep1, minor, vkey, fetch_stream_for_minor, extract)
 
 
 def main(argv=None):
@@ -42,11 +44,20 @@ def main(argv=None):
         if os.path.basename(path) == "example.yaml":
             continue
         ocp = _grep1(path, "ocpVersion")
-        if not ocp or not BARE_MINOR.match(ocp):
-            continue                       # already precise (X.Y.Z) or unreadable
-        z = ai_max_z.get(ocp)
-        if not z:
-            sys.stderr.write(f"[normalize] {path}: no AI z for minor {ocp}, skip\n")
+        rhcos = _grep1(path, "rhcosVersion")
+        if not ocp or not rhcos:
+            continue
+        m = minor(ocp)
+        z = ai_max_z.get(m)
+        if not z or vkey(z) <= vkey(ocp):
+            continue                       # nothing newer (or AI list lags — no downgrade)
+        # GUARD: is this image still the live one for minor m?
+        stream = fetch_stream_for_minor(m)
+        live = extract(stream)["rhcosVersion"] if stream else None
+        if live != rhcos:
+            sys.stderr.write(
+                f"[normalize] {os.path.basename(path)}: minor {m} live RHCOS {live} "
+                f"!= {rhcos}; image is historical, leaving ocpVersion={ocp}\n")
             continue
         text = open(path).read()
         new = re.sub(r'(?m)^(ocpVersion:\s*)"?%s"?\s*$' % re.escape(ocp),
