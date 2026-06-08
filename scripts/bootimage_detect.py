@@ -125,6 +125,10 @@ def main(argv=None):
                     help="MATRIX: enumerate every OCP minor from the floor (version "
                          "source) up to the latest; emit TSV lines for the ones not "
                          "yet in provenance (rhcos<TAB>ocp_minor<TAB>url<TAB>sha256)")
+    ap.add_argument("--ai-versions",
+                    help="INTERSECT: file of AI-supported OCP versions (from "
+                         "ai_versions.py); only bake minors AI also supports — so "
+                         "every image matches a version a cluster can actually be")
     ap.add_argument("--provenance-dir", required=True)
     args = ap.parse_args(argv)
 
@@ -132,11 +136,20 @@ def main(argv=None):
     if args.all_from:
         floor = args.openshift_version or version_from_file(args.version_file)
         fminor = minor(floor)
+        # The AND with the AI version matrix (P3-IMG.2): only versions a cluster
+        # can actually be installed at are worth a CAPA boot image.
+        ai_minors = None
+        if args.ai_versions:
+            ai_minors = {minor(s.strip()) for s in open(args.ai_versions)
+                         if s.strip() and not s.startswith("#")}
         have = known_versions(args.provenance_dir)
         seen = set(have)   # also dedups minors that pin the same RHCOS build
-        to_bake, scanned = [], []
+        to_bake, scanned, skipped_not_ai = [], [], []
         for branch, stream in enumerate_minors(fminor):
             scanned.append(branch)
+            if ai_minors is not None and branch not in ai_minors:
+                skipped_not_ai.append(branch)
+                continue
             info = extract(stream)
             if info["rhcosVersion"] not in seen:
                 to_bake.append((info, branch))
@@ -144,7 +157,8 @@ def main(argv=None):
         for info, branch in to_bake:
             print(f"{info['rhcosVersion']}\t{branch}\t{info['url']}\t{info['sha256']}")
         sys.stderr.write(
-            f"[detect] floor={fminor} scanned={scanned} already_baked={sorted(have)} "
+            f"[detect] floor={fminor} scanned={scanned} "
+            f"ai_filtered_out={skipped_not_ai} already_baked={sorted(have)} "
             f"to_bake={[i['rhcosVersion'] for i, _ in to_bake]}\n")
         return 0
 
