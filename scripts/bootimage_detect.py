@@ -39,6 +39,12 @@ def minor(version):
     return f"{m.group(1)}.{m.group(2)}"
 
 
+def is_ga(version):
+    """False for -ec/-rc/-fc pre-releases (e.g. 4.22.0-ec.0[-multi]). -multi is
+    a multi-arch GA variant, not a pre-release."""
+    return not re.search(r"-(ec|rc|fc)\.", version)
+
+
 def fetch_stream_for_minor(branch):
     """Fetch the installer rhcos.json for a release-X.Y branch; None on 404."""
     url = INSTALLER_RHCOS.format(branch=branch)
@@ -126,9 +132,13 @@ def main(argv=None):
                          "source) up to the latest; emit TSV lines for the ones not "
                          "yet in provenance (rhcos<TAB>ocp_minor<TAB>url<TAB>sha256)")
     ap.add_argument("--ai-versions",
-                    help="INTERSECT: file of AI-supported OCP versions (from "
-                         "ai_versions.py); only bake minors AI also supports — so "
-                         "every image matches a version a cluster can actually be")
+                    help="INTERSECT: file of supported OCP versions (from "
+                         "ai_versions.py, a local assisted-service, or a committed "
+                         "list). Default: bootimage/supported-versions if present. "
+                         "Only bake minors in this set — so every image matches a "
+                         "version a cluster can actually be.")
+    ap.add_argument("--include-prereleases", action="store_true",
+                    help="keep -ec/-rc/-fc pre-release versions (default: GA only)")
     ap.add_argument("--provenance-dir", required=True)
     args = ap.parse_args(argv)
 
@@ -136,12 +146,18 @@ def main(argv=None):
     if args.all_from:
         floor = args.openshift_version or version_from_file(args.version_file)
         fminor = minor(floor)
-        # The AND with the AI version matrix (P3-IMG.2): only versions a cluster
-        # can actually be installed at are worth a CAPA boot image.
+        # The AND with the supported-version matrix (P3-IMG.2): only versions a
+        # cluster can actually be installed at are worth a CAPA boot image. Source
+        # priority: --ai-versions, else committed bootimage/supported-versions
+        # (the env's mirrored/installable set — the air-gap-authoritative source).
+        src = args.ai_versions
+        if not src and os.path.exists("bootimage/supported-versions"):
+            src = "bootimage/supported-versions"
         ai_minors = None
-        if args.ai_versions:
-            ai_minors = {minor(s.strip()) for s in open(args.ai_versions)
-                         if s.strip() and not s.startswith("#")}
+        if src and os.path.exists(src):
+            ai_minors = {minor(s.strip()) for s in open(src)
+                         if s.strip() and not s.startswith("#")
+                         and (args.include_prereleases or is_ga(s.strip()))}
         have = known_versions(args.provenance_dir)
         seen = set(have)   # also dedups minors that pin the same RHCOS build
         to_bake, scanned, skipped_not_ai = [], [], []

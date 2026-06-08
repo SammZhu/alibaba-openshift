@@ -25,6 +25,8 @@ git (provenance + scripts)                     ← only durable thing; ~0 storag
 | File | Role | Runs where | Offline-testable |
 |---|---|---|---|
 | `bootimage/version` | the **authoritative committed OCP version** for CI (the runner has no local `all.yml`); single-version now, the matrix FLOOR later | git | ✅ |
+| `bootimage/supported-versions` | (optional) the env's **mirrored / installable** OCP versions — the air-gap-authoritative AND source. When present, the matrix is intersected with it (only bake versions a cluster can really be here). GA-only by default (`-ec/-rc/-fc` ignored). Copy from `.example`. | git | ✅ |
+| `scripts/ai_versions.py` | (connected) fetch AI-supported versions from assisted-service `/openshift-versions` (offline token from `all.yml`) — a broader AND source than the mirrored set | runner | ✅ |
 | `scripts/bootimage_detect.py` | resolve RHCOS from `bootimage/version` via the installer `release-X.Y` stream — **no cluster/oc needed** — compare to provenance, decide `needs_bake` (overridable with `--openshift-version` / `--stream`) | hosted / runner | ✅ |
 | `ansible/playbooks/10-prepare-worker-bootimage.yml` | the bake (guestfish re-stamp + OSS + ImportImage) | runner (VPC) | — |
 | `scripts/bootimage-gate.sh` | **offline format gate**: qemu-img check + partition layout + extract + karg assertions, BEFORE any upload | runner | partial (needs an image) |

@@ -1,0 +1,10 @@
+# Air-gap-authoritative AND source for the version matrix (P3-IMG.2).
+#
+# Copy to bootimage/supported-versions and list the OCP versions THIS environment
+# has MIRRORED / can actually install (the truly-installable set). The boot-image
+# matrix is intersected with this — so CAPA only bakes images for versions a
+# cluster can really be here, not every version the SaaS offers.
+#
+# When present, detect uses this by default (no --ai-versions needed). Pre-release
+# (-ec/-rc/-fc) lines are ignored unless --include-prereleases. minors only matter.
+4.20.22
