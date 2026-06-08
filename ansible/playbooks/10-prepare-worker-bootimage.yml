@@ -284,6 +284,19 @@
             and (_img_wait.stdout | from_json).Images.Image[0].Status == 'Available'
           when: not (skip_upload_until_gate | bool)
 
+        # OSS is transit-only: once the ECS image is Available it stores the disk
+        # independently, so the multi-GB qcow object is dead weight. Delete it now
+        # (zero standing storage) rather than letting it linger until teardown.
+        - name: Delete the OSS transit object (image materialized; zero standing storage)
+          ansible.builtin.command:
+            argv: [aliyun, oss, rm, "oss://{{ oss_bucket }}/{{ oss_object }}",
+                   "--endpoint={{ _oss_endpoint }}",
+                   "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
+                   "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
+          no_log: true
+          changed_when: true
+          when: not (skip_upload_until_gate | bool)
+
     # ── Persist the image id (standalone only) ─────────────────────────────────
     - name: Save worker_boot_image_id to state
       ansible.builtin.include_tasks: ../tasks/save_state.yml

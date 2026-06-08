@@ -135,11 +135,58 @@
           failed_when: false
           changed_when: false
 
+        # ── Worker boot image (Route B / P3-IMG.1): the re-stamped aliyun RHCOS
+        #    image materialized by 10-prepare-worker-bootimage.yml. It belongs to
+        #    this cluster, so it dies with the cluster-stack. DeleteImage does NOT
+        #    cascade its SnapshotForImage (same as the ISO image), so:
+        #    query → delete image → delete each backing snapshot. The OSS transit
+        #    object is already gone (deleted right after ImportImage in phase 10).
+        - name: Worker image — look up backing snapshots
+          ansible.builtin.command:
+            argv: [aliyun, ecs, DescribeImages, --RegionId, "{{ region }}",
+                   --ImageId, "{{ worker_boot_image_id }}", --profile, "{{ aliyun_profile }}"]
+          register: _worker_img_desc
+          changed_when: false
+          failed_when: false
+          when: worker_boot_image_id is defined and worker_boot_image_id | length > 0
+
+        - name: Worker image — extract backing snapshot IDs
+          ansible.builtin.set_fact:
+            _worker_img_snaps: >-
+              {{ ((_worker_img_desc.stdout | default('{}') | from_json)
+                  .Images.Image | default([]) | first | default({}))
+                 .DiskDeviceMappings.DiskDeviceMapping | default([])
+                 | map(attribute='SnapshotId') | list }}
+          when:
+            - worker_boot_image_id is defined and worker_boot_image_id | length > 0
+            - _worker_img_desc.stdout is defined
+
+        - name: Worker image — delete custom image
+          ansible.builtin.command:
+            argv: [aliyun, ecs, DeleteImage, --RegionId, "{{ region }}",
+                   --ImageId, "{{ worker_boot_image_id }}", --Force, "true",
+                   --profile, "{{ aliyun_profile }}"]
+          when: worker_boot_image_id is defined and worker_boot_image_id | length > 0
+          failed_when: false
+          changed_when: true
+
+        - name: Worker image — cascade-delete backing snapshots (aliyun has no auto cascade)
+          ansible.builtin.command:
+            argv: [aliyun, ecs, DeleteSnapshot, --RegionId, "{{ region }}",
+                   --SnapshotId, "{{ item }}", --profile, "{{ aliyun_profile }}"]
+          loop: "{{ _worker_img_snaps | default([]) }}"
+          loop_control:
+            label: "{{ item }} (was backing worker image {{ worker_boot_image_id }})"
+          when: (_worker_img_snaps | default([])) | length > 0
+          failed_when: false
+          changed_when: true
+
         - name: Clear cluster_* fields in state
           ansible.builtin.include_tasks: ../tasks/save_state.yml
           vars:
             new_state:
               cluster_stack_id: ''
+              worker_boot_image_id: ''
               api_lb_endpoint: ''
               worker_sg: ''
               master_ip1: ''
