@@ -18,6 +18,13 @@
 # older images don't listen on :9443 and — with failurePolicy: Fail — would make
 # every AlibabaCloud* create/update fail. The 08-deploy / 09-smoke playbooks pin
 # the digest accordingly.
+#
+# failurePolicy: Fail (P4-OPS.1 review) — kept, because it is now HA-backed: the
+# controller Deployment runs replicas: 2 with pod anti-affinity, and the webhook
+# server runs in EVERY replica (not leader-gated), so admission stays available
+# across a node drain / rollout. The webhooks only intercept
+# infrastructure.cluster.x-k8s.io resources (never core/pods), so there is no
+# bootstrap self-deadlock. timeoutSeconds: 10 bounds any single call.
 ---
 apiVersion: v1
 kind: Service
@@ -47,6 +54,7 @@ webhooks:
     admissionReviewVersions: ["v1"]
     sideEffects: None
     failurePolicy: Fail
+    timeoutSeconds: 10
     clientConfig:
       service:
         name: capa-webhook-service
@@ -70,6 +78,7 @@ webhooks:
     admissionReviewVersions: ["v1"]
     sideEffects: None
     failurePolicy: Fail
+    timeoutSeconds: 10
     clientConfig:
       service:
         name: capa-webhook-service
@@ -85,6 +94,7 @@ webhooks:
     admissionReviewVersions: ["v1"]
     sideEffects: None
     failurePolicy: Fail
+    timeoutSeconds: 10
     clientConfig:
       service:
         name: capa-webhook-service

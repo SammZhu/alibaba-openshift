@@ -74,7 +74,17 @@ metadata:
   labels:
     app: capa-controller-manager
 spec:
-  replicas: 1
+  # HA (P4-OPS.1): 2 replicas with leader election (--leader-elect=true below) —
+  # only the leader reconciles, the standby takes over on leader loss. The webhook
+  # server runs in EVERY replica (not leader-gated), so 2 replicas also keep
+  # admission available during a node drain / rollout, which lets failurePolicy=Fail
+  # stay safe (see 02-capa-webhooks.yaml).
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
   selector:
     matchLabels:
       app: capa-controller-manager
@@ -85,6 +95,17 @@ spec:
     spec:
       serviceAccountName: capa-controller-manager
       terminationGracePeriodSeconds: 10
+      # Spread the replicas across nodes so a single node failure can't take both
+      # the active leader and the standby (and both webhook servers) down at once.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: capa-controller-manager
       containers:
         - name: manager
           # Pinned to immutable version tag (NOT :latest) — IfNotPresent below
