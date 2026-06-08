@@ -26,7 +26,8 @@ git (provenance + scripts)                     ← only durable thing; ~0 storag
 |---|---|---|---|
 | `bootimage/version` | **the FLOOR** — the minimum supported OCP version. Committed (the runner has no local `all.yml`). NOT the list to bake; the set is derived at run time (floor→latest, minus provenance). | git | ✅ |
 | `scripts/bootimage_detect.py` | resolve RHCOS via the installer `release-X.Y` stream — **no cluster/oc needed**. `--all-from` = matrix (enumerate floor→latest, skip what's in provenance, optionally `--ai-versions` AND); default = single (the floor line) | hosted / runner | ✅ |
-| `scripts/ai_versions.py` | (optional, connected) fetch AI-supported versions from assisted-service `/openshift-versions` (offline token from `all.yml`) — feed to `detect --ai-versions` so the matrix only bakes minors a cluster can actually be (#84) | runner | ✅ |
+| `scripts/ai_versions.py` | (optional, connected) fetch AI-supported versions from assisted-service `/openshift-versions` (offline token from `all.yml`) — feed to `detect --ai-versions` so the matrix only bakes minors a cluster can actually be **and records the precise z-stream** (#84) | runner | ✅ |
+| `scripts/normalize_provenance.py` | rewrite any provenance `ocpVersion` that is a bare minor (`4.21`) to the highest GA z of that minor from the AI set (`4.21.x`) — so every entry is a precise, deployable version. One-off backfill + safety net | runner | ✅ |
 | `ansible/playbooks/10-prepare-worker-bootimage.yml` | the bake (guestfish re-stamp + OSS + ImportImage) | runner (VPC) | — |
 | `scripts/bootimage-gate.sh` | **offline format gate**: qemu-img check + partition layout + extract + karg assertions, BEFORE any upload | runner | partial (needs an image) |
 | `scripts/verify_kargs.py` (+ `_test.py`) | pure karg-assertion logic: all `ignition.platform.id=aliyun`, no residual, completeness, cross-version diff guard | anywhere | ✅ (unit-tested) |
@@ -68,6 +69,22 @@ no firewall hole. Register (private repo only):
 - Only outbound is needed: `github.com:443` (honors `HTTPS_PROXY`), the RHCOS
   source (prefer the internal mirror), and the Alibaba OSS/ECS **internal** endpoints.
 - **Security**: private repo, no fork-PR execution on self-hosted, pin to this workflow.
+
+## Choosing a version to deploy (operator)
+
+`bootimage/provenance/` is the **menu**: every entry is a baked, gate-passed image
+for a version that satisfies both AI (`--ai-versions` intersect) and CAPA (the
+re-stamp + gate). `ocpVersion` is the precise, deployable z-stream and
+`rhcosVersion` is the exact boot image behind it.
+
+1. Look at `bootimage/provenance/*.yaml`, pick an `ocpVersion` (e.g. `4.20.22`).
+2. Put that in the operator's local `ansible/group_vars/all.yml` →
+   `openshift_version`. AI installs that z-stream; CAPA workers boot the matching
+   `rhcosVersion` aliyun image — no drift, because the recorded z is the one whose
+   RHCOS == the baked image.
+
+`bootimage/version` (the committed FLOOR) only bounds what the matrix bakes; it is
+**not** the deploy version — the deploy version comes from this menu.
 
 ## Status
 

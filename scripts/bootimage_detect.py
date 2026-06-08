@@ -45,6 +45,32 @@ def is_ga(version):
     return not re.search(r"-(ec|rc|fc)\.", version)
 
 
+def vkey(version):
+    """Numeric sort key so 4.21.10 > 4.21.5 (string sort gets this wrong). The
+    -multi/-ec/... suffix is dropped before comparing."""
+    base = version.split("-", 1)[0]
+    return tuple(int(n) for n in re.findall(r"\d+", base))
+
+
+def load_ai_versions(path, include_prereleases):
+    """Parse an AI/ supported-version file -> (set of minors, {minor: highest GA
+    z-stream without the -multi suffix}). The z map turns a bare minor (4.21) into
+    a precise, deployable version (4.21.x) for provenance."""
+    minors, max_z = set(), {}
+    for line in open(path, encoding="utf-8", errors="replace"):
+        v = line.strip()
+        if not v or v.startswith("#"):
+            continue
+        if not (include_prereleases or is_ga(v)):
+            continue
+        m = minor(v)
+        z = v.split("-", 1)[0]            # 4.21.5-multi -> 4.21.5
+        minors.add(m)
+        if m not in max_z or vkey(z) > vkey(max_z[m]):
+            max_z[m] = z
+    return minors, max_z
+
+
 def fetch_stream_for_minor(branch):
     """Fetch the installer rhcos.json for a release-X.Y branch; None on 404."""
     url = INSTALLER_RHCOS.format(branch=branch)
@@ -150,11 +176,14 @@ def main(argv=None):
     if args.all_from:
         floor = args.openshift_version or version_from_file(args.version_file)
         fminor = minor(floor)
-        ai_minors = None
+        # The AI-supported set (#84) doubles as the z-stream resolver: ocpVersion
+        # recorded in provenance is the highest GA z of the minor (precise,
+        # deployable), not a bare minor. Without --ai-versions we can only record
+        # the minor.
+        ai_minors, ai_max_z = None, {}
         if args.ai_versions and os.path.exists(args.ai_versions):
-            ai_minors = {minor(s.strip()) for s in open(args.ai_versions)
-                         if s.strip() and not s.startswith("#")
-                         and (args.include_prereleases or is_ga(s.strip()))}
+            ai_minors, ai_max_z = load_ai_versions(
+                args.ai_versions, args.include_prereleases)
         have = known_versions(args.provenance_dir)
         seen = set(have)   # also dedups minors that pin the same RHCOS build
         to_bake, scanned, skipped_not_ai = [], [], []
@@ -165,14 +194,15 @@ def main(argv=None):
                 continue
             info = extract(stream)
             if info["rhcosVersion"] not in seen:
-                to_bake.append((info, branch))
+                ocp = ai_max_z.get(branch, branch)   # precise z, else bare minor
+                to_bake.append((info, ocp))
                 seen.add(info["rhcosVersion"])
-        for info, branch in to_bake:
-            print(f"{info['rhcosVersion']}\t{branch}\t{info['url']}\t{info['sha256']}")
+        for info, ocp in to_bake:
+            print(f"{info['rhcosVersion']}\t{ocp}\t{info['url']}\t{info['sha256']}")
         sys.stderr.write(
             f"[detect] floor={fminor} scanned={scanned} "
             f"ai_filtered_out={skipped_not_ai} already_baked={sorted(have)} "
-            f"to_bake={[i['rhcosVersion'] for i, _ in to_bake]}\n")
+            f"to_bake={[(i['rhcosVersion'], o) for i, o in to_bake]}\n")
         return 0
 
     # ── SINGLE mode (default): one version, GITHUB_OUTPUT key=value ──────────────
