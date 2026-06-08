@@ -103,7 +103,11 @@ skew), but it tells you loudly what to fix.
 - **CSI** → its own Operator, later. (Heavier than CAPA: a privileged node
   DaemonSet + sidecars + SCC, so it earns a separate effort.)
 - **CCM** → unchanged. It is upstream-owned and a thin manifest; re-packaging it
-  would only add drift. We depend on it, we document it, we **don't fork it**.
+  would only add drift. We depend on it, we document it, we **don't fork it** —
+  *in steady state*. The contingency for when upstream stalls / ships a CVE /
+  breaks on a new OCP is spelled out in
+  [COMPATIBILITY-MATRIX.md §4](COMPATIBILITY-MATRIX.md) (fork as a bridge, with an
+  explicit exit criterion).
 
 Keeping them as **three independent units** matches their independent lifecycles.
 When both CAPA and CSI are Operators in the same catalog, OLM can declare an
