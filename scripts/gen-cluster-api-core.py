@@ -65,6 +65,16 @@ for d in yaml.safe_load_all(text):
         ann.pop("cert-manager.io/inject-ca-from")
         ann["service.beta.openshift.io/inject-cabundle"] = "true"
         md["annotations"] = ann
+    # 3. OpenShift SCC: upstream pins the container's runAsUser/runAsGroup to 65532,
+    #    which restricted-v2 rejects ("must be in ranges 100077xxxx" — the namespace
+    #    UID range), so no pod is ever created (ReplicaFailure/FailedCreate). Drop
+    #    them (keep runAsNonRoot / drop-ALL caps / seccompProfile, all SCC-compatible)
+    #    and let OCP's SCC assign a compliant UID/GID.
+    if kind == "Deployment":
+        for c in (d.get("spec", {}).get("template", {}).get("spec", {}).get("containers") or []):
+            csc = c.get("securityContext") or {}
+            csc.pop("runAsUser", None)
+            csc.pop("runAsGroup", None)
     kept.append(d)
 
 header = (
