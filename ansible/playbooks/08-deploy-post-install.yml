@@ -145,6 +145,20 @@
       register: capi_apply
       changed_when: "'unchanged' not in capi_apply.stdout"
 
+    - name: Apply CAPA admission webhooks (Service + webhook configs)
+      # The controller (v0.1.8+) runs a webhook server that needs a serving cert at
+      # /tmp/k8s-webhook-server/serving-certs/tls.crt. That cert is minted by the
+      # OpenShift service-ca operator into the capa-webhook-server-cert secret —
+      # but ONLY once this Service (carrying the service-ca annotation) exists.
+      # Without applying it the controller crash-loops "no such file ... tls.crt".
+      # (v0.1.2 had no webhook, which masked this gap on the default chain.)
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, --server-side=true,
+               --force-conflicts, -f,
+               "{{ jump_repo_root }}/alibaba-openshift/custom_manifests/02-capa-webhooks.yaml"]
+      register: capa_webhooks_apply
+      changed_when: "'unchanged' not in capa_webhooks_apply.stdout"
+
     # ── CSI operator ──────────────────────────────────────────────────────
     - name: Set CSI operator image in kustomize
       ansible.builtin.command:
