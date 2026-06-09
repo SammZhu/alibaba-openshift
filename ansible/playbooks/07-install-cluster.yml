@@ -954,9 +954,12 @@
           Cluster installed.
           Kubeconfig: {{ output_dir }}/auth/kubeconfig
           {% if jump_host_ip | default('') | length > 0 %}
-          Next: ssh -i {{ ssh_priv_key_file }} root@{{ jump_host_ip }}
-                cd /root/openshift-alibaba/alibaba-openshift
-                ansible-playbook ansible/playbooks/08-deploy-post-install.yml
-          {% else %}
-          Next: from inside the VPC, run 08-deploy-post-install.yml
+          Jump host (manual oc access if needed): root@{{ jump_host_ip }}
           {% endif %}
+          Next — from the operator host (same place you ran site.yml), deploy the
+          worker plane. Each phase resolves the jump host from state and delegates,
+          so you do NOT ssh into the VPC yourself:
+                ansible-playbook -i ansible/inventory.yml ansible/playbooks/site-post.yml
+          This chains 08 (CAPI provider + CSI) -> 10 (worker boot image) -> 12
+          (declarative multi-AZ pools). Run a single phase directly if needed,
+          e.g. ansible/playbooks/08-deploy-post-install.yml
