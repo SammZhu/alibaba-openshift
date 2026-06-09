@@ -169,3 +169,37 @@ single source of truth for "what versions go together."
 
 Owner: this project (the integrator). Upstream owns each component; we own the
 combination.
+
+---
+
+## 7. Bumping the CAPA image version (single source of truth)
+
+The CAPA controller image tag has **one source of truth**: `ansible/vars/images.yml`
+(`capa_image_tag`). The mirror (`04`), deploy (`08`), smoke (`09`) and Route B (`11`)
+playbooks pull it via `vars_files` as `{{ capa_image }}` — bump the tag in that one
+file and the whole chain follows. Do **not** hardcode the tag in a playbook or
+manifest: it drifted to v0.1.2 in four places once and shipped a crash-looping
+controller while Route B was on v0.1.11 and smoke on v0.1.4.
+
+Two spots live outside ansible's var loading and are kept in sync by hand (both
+carry a comment pointing here): `scripts/build-mirror-tarball.sh`
+(`OPENSHIFT_CAPI_IMAGE` default) and `custom_manifests/02-capa-controller.yaml`
+(the static `image:` fallback that `08` sed-overrides at deploy time).
+
+**Auto-sync from the provider CI.** The provider repo (`openshift-capi-alicloud`)
+CI builds + pushes the image on a `v*` tag, then a `sync-deploy-tag` job rewrites
+`capa_image_tag` here and commits to `main` — so a plain `git pull` tracks the
+latest provider build, no hand-editing. Requires a repo secret `ANSIBLE_REPO_TOKEN`
+(a token with `contents:write` on this repo); without it the job no-ops.
+
+**Updating the image on a running cluster** (no rebuild needed):
+1. provider tags `v0.1.X` → CI bumps `capa_image_tag` → `git pull` here.
+2. `ansible-playbook -i inventory.yml playbooks/04-prepare-mirror.yml`
+   — idempotently pulls+pushes the new tag into the air-gapped mirror (only when
+   MISSING; existing tags are skipped). Needs the mirror ECS up (Phase 03, or a
+   fast-path snapshot restore).
+3. `ansible-playbook -i inventory.yml playbooks/08-deploy-post-install.yml`
+   — rolls the controller to the new tag.
+
+Phases 01–03 / 06–07 stay untouched. Only a from-scratch build runs `04` as part
+of the full `site.yml` chain.
