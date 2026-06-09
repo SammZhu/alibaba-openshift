@@ -416,22 +416,30 @@ controller. The OCP-hosted cluster-capi-operator does **not** supply core on
 platform=external (verified: `clusters.cluster.x-k8s.io` and the
 `openshift-cluster-api` namespace both NotFound), so we must self-manage it.
 
-**TODO — self-managed core controller (offline, folded into the default chain):**
-- **core-only** — drop the kubeadm bootstrap/control-plane providers from the
-  bundle (we BYO bootstrap; only cluster/machine/MD/MS/MHC controllers are needed).
-- **webhooks via service-ca** — CAPI core's webhooks default to cert-manager, which
-  isn't present (the cluster has no cert-manager ns/CRD). Re-point them at the
-  OpenShift service-ca operator (same as CAPA's #29 webhook), or disable them.
-- **mirror the core image** — `registry.k8s.io/cluster-api/cluster-api-controller`
-  → mirror `:8443` + an IDMS entry. The jump host can curl GitHub, but cluster
-  nodes only pull from the mirror.
-- **offline + in the default chain** — vendor the (core-only, service-ca) manifest
-  into the repo (don't `curl` GitHub at deploy time the way 11/09 do for the CRDs),
-  and apply it at the head of `site-post` / before `08`. Fold the CRD install in
-  too (today it's manual / curl-from-GitHub, air-gap-fragile).
+**Self-managed core controller — IMPLEMENTED 2026-06-09 (offline, in the default
+chain; pending a live-cluster verification run):**
+- **core-only** — `scripts/gen-cluster-api-core.py` derives
+  `custom_manifests/cluster-api-core.yaml` from cluster-api v1.12.7's components,
+  dropping the kubeadm bootstrap/control-plane providers (we BYO bootstrap). 24
+  resources; regenerate via the script to bump versions — do not hand-edit.
+- **webhooks via service-ca** — the generator drops the cert-manager
+  Certificate+Issuer and stamps the webhook Service with `serving-cert-secret-name`
+  and every webhook (2 admission + 13 CRD conversion) with `inject-cabundle`, so
+  OCP service-ca mints `capi-webhook-service-cert` and injects the CA bundle (same
+  pattern as CAPA's 02-capa-webhooks).
+- **mirror + IDMS + apply** — `ansible/playbooks/08a-capi-core.yml`: `oc image
+  mirror` pushes `registry.k8s.io/cluster-api/cluster-api-controller:v1.12.7` into
+  the air-gapped registry, applies an IDMS, digest-pins (the 09-smoke recipe), and
+  applies the manifest (which **also installs the CAPI core CRDs** — replacing the
+  curl-GitHub awk path), then waits for the rollout.
+- **default chain** — imported at the head of `site-post` (08a → 08 → 10 → 12), so
+  core CRDs + controller exist before CAPA (08) and the MD pools (12).
 
-Until this lands, `site-post`'s `12` (MD pools) cannot complete; Route B (`11`) is
-the only working worker path.
+Commits `557fb27` (generator + manifest) and `2caaab5` (08a + wiring). Still to
+verify on a live cluster: the jump host reaching `registry.k8s.io` + mirror push
+auth, the controller coming Ready under service-ca, and 12's MD pools deriving
+Machines into workers. `11`/`09` still curl GitHub for CRDs (optional paths) — fold
+them onto the vendored manifest later.
 
 ---
 
