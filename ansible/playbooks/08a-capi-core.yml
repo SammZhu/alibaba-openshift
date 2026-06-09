@@ -3,15 +3,39 @@
 #
 # The OCP-hosted cluster-capi-operator supplies no CAPI core on platform=external,
 # so declarative MachineDeployment pools (#62) need us to run core ourselves. This
-# play mirrors the upstream core controller image into the air-gapped registry,
-# points the cluster at it via IDMS, and applies the vendored core-only +
-# service-ca manifest (custom_manifests/cluster-api-core.yaml, produced by
+# mirrors the upstream core controller image into the air-gapped registry, points
+# the cluster at it via IDMS, and applies the vendored core-only + service-ca
+# manifest (custom_manifests/cluster-api-core.yaml, produced by
 # scripts/gen-cluster-api-core.py). That manifest also ships the CAPI core CRDs, so
-# this REPLACES the old curl-GitHub awk-extract CRD path in 11/09 with an offline,
-# in-repo install.
+# this REPLACES the old curl-GitHub awk-extract CRD path in 11/09.
 #
-# Runs at the head of site-post (before 08). Idempotent. hosts: jumphost (it has oc
-# + egress + reachability to the mirror).
+# Runs at the head of site-post (before 08). Idempotent. Two plays like 08/12:
+# play 1 (local) resolves + add_host's the jump host; play 2 runs there.
+- name: Resolve jump host for the CAPI core install
+  hosts: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: Assert jump host + mirror are known
+      ansible.builtin.assert:
+        that:
+          - jump_host_ip | default('') | length > 0
+          - mirror_private_ip | default('') | length > 0
+        fail_msg: >-
+          jump_host_ip / mirror_private_ip missing in state.yml — bring up the
+          mirror-stack (Phase 03) first; 08a deploys via the jump host + mirror.
+
+    - name: Add the jump host to the inventory (carry the mirror IP)
+      ansible.builtin.add_host:
+        name: jumphost
+        ansible_host: "{{ jump_host_ip }}"
+        ansible_user: root
+        ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+        groups: deploy
+        mirror_private_ip: "{{ mirror_private_ip }}"
+
 - name: Self-managed CAPI core controller (offline, service-ca)
   hosts: jumphost
   gather_facts: false
@@ -22,14 +46,6 @@
     capi_core_tag: v1.12.7
     capi_core_mirror_repo: cluster-api/cluster-api-controller
   tasks:
-    - ansible.builtin.include_tasks: ../tasks/load_state.yml
-
-    - name: Assert the mirror is up (Phase 03 ran)
-      ansible.builtin.assert:
-        that:
-          - mirror_private_ip is defined and mirror_private_ip | length > 0
-        fail_msg: "mirror_private_ip missing — Phase 03 (mirror-stack) must have run."
-
     - name: Refresh repo on the jump host (for custom_manifests/cluster-api-core.yaml)
       ansible.builtin.command:
         argv: [git, -C, "{{ repo }}", pull, --ff-only]
@@ -43,8 +59,6 @@
       changed_when: false
 
     # ── 1. Mirror the core controller image upstream → cluster mirror ──────────
-    #    oc image mirror is idempotent (skips layers already present). The jump
-    #    host pulls from registry.k8s.io (egress) and pushes to the in-VPC mirror.
     - name: Mirror the CAPI core image into the air-gapped registry
       ansible.builtin.command:
         argv: [oc, image, mirror,
@@ -75,8 +89,6 @@
       changed_when: "'unchanged' not in _idms_apply.stdout"
 
     # ── 3. Digest-pin the controller image, then apply the manifest ────────────
-    #    Air-gap nodes resolve only @sha256 via the IDMS (digest-only mirror), so
-    #    swap the manifest's :tag for the mirror-resolved digest before applying.
     - name: Resolve the CAPI core image digest from the mirror
       ansible.builtin.command:
         argv: [oc, image, info,
@@ -102,8 +114,6 @@
       changed_when: "'unchanged' not in _core_apply.stdout"
 
     # ── 4. Wait for the core controller to be Ready ────────────────────────────
-    #    service-ca mints the webhook serving cert asynchronously, so the pod may
-    #    crash-loop a couple of times before the cert lands — retry the rollout.
     - name: Wait for capi-controller-manager rollout
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, capi-system,
