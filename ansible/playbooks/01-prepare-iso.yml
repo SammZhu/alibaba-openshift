@@ -107,8 +107,9 @@
     # P3-FIX.8: a NEW infra-env will be created below, which bakes a NEW
     # --infra-env-id into the discovery ISO ignition.  The ECS custom image
     # (openshift-<cluster>-iso) is ImportImage'd FROM that ISO, so it carries
-    # the OLD infra-env-id and must be rebuilt too.  Clearing ecs_image_id +
-    # iso_path forces 02-import-image to re-import a fresh image; otherwise
+    # the OLD infra-env-id and must be rebuilt too.  Clearing ecs_image_id
+    # (NOT iso_path — see the set_fact note below) forces 02-import-image to
+    # re-import a fresh image; otherwise
     # 02 reuses the same-named stale image, the SNO master boots from it, and
     # its agent.service registers against the deleted infra-env → AI shows
     # hosts=0 and 07 polls forever.  Observed 2026-06-05.
@@ -177,8 +178,15 @@
         infra_env_id: ''
         dynamic_manifest_file: ''
         ecs_image_id: ''
-        iso_path: ''
       when: _ai_stale_install | default(false) | bool
+      # NOTE: do NOT clear iso_path here. It is the get_url `dest` for
+      # "Download Discovery ISO" below (and 02's ImportImage source);
+      # emptying it makes the download fail with dest="" ("Destination
+      # does not exist"). The stale ISO is overwritten in place via
+      # force:true — its download `when` fires because a new infra-env is
+      # created on the stale path. Image staleness is handled by deleting
+      # the same-named ECS image, not by clearing iso_path. (fast-path
+      # preserves_ai regression, observed 2026-06-09.)
 
     # ── Adopt existing cluster by name to avoid duplicates ─────────────────
     - name: List existing Assisted clusters
