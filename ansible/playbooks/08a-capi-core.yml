@@ -37,6 +37,12 @@
           jump_host_ip / mirror_private_ip missing in state.yml — bring up the
           mirror-stack (Phase 03) first; 08a deploys via the jump host + mirror.
 
+    - name: Remove any stale CAPI core tar (docker-archive can't be re-written)
+      ansible.builtin.file:
+        path: "/tmp/capi-core-{{ capi_core_tag }}.tar"
+        state: absent
+      delegate_to: localhost
+
     - name: Pull the CAPI core image into a docker-archive (operator has egress)
       ansible.builtin.command:
         argv:
