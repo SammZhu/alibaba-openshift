@@ -322,6 +322,33 @@
         - teardown_target in ['mirror', 'both']
         - mirror_stack_id is defined and mirror_stack_id | length > 0
       block:
+        # Phase 12's ensure_vswitch creates capa-worker-<zone> vSwitches INSIDE the
+        # mirror stack's VPC. They are NOT stack-managed, so once site-post's 12 has
+        # run, DeleteStack on the mirror stack fails (the VPC still has vSwitches) —
+        # i.e. testing site-post made teardown impossible. Sweep them first.
+        - name: List leftover capa-worker vSwitches in the mirror VPC
+          ansible.builtin.command:
+            argv: [aliyun, vpc, DescribeVSwitches, --RegionId, "{{ region }}",
+                   --VpcId, "{{ mirror_vpc_id }}", --PageSize, "50",
+                   --profile, "{{ aliyun_profile }}"]
+          register: _capa_vsw_q
+          changed_when: false
+          failed_when: false
+          when: mirror_vpc_id is defined and mirror_vpc_id | length > 0
+
+        - name: Delete each leftover capa-worker vSwitch (Phase 12, not stack-managed)
+          ansible.builtin.command:
+            argv: [aliyun, vpc, DeleteVSwitch, --RegionId, "{{ region }}",
+                   --VSwitchId, "{{ item.VSwitchId }}", --profile, "{{ aliyun_profile }}"]
+          loop: "{{ (_capa_vsw_q.stdout | default('{}') | from_json).VSwitches.VSwitch
+                    | default([]) | selectattr('VSwitchName', 'defined')
+                    | selectattr('VSwitchName', 'match', '^capa-worker-') | list }}"
+          loop_control:
+            label: "{{ item.VSwitchName }} ({{ item.VSwitchId }})"
+          changed_when: true
+          failed_when: false
+          when: _capa_vsw_q.stdout is defined
+
         - name: DeleteStack — mirror
           ansible.builtin.command:
             argv:
