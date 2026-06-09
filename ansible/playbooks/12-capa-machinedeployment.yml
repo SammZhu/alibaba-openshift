@@ -80,7 +80,23 @@
     - name: Build zone->vsw map + VPC cidr base
       ansible.builtin.set_fact:
         _zone_vsw: "{{ dict(_existing_vsws | map(attribute='ZoneId') | zip(_existing_vsws | map(attribute='VSwitchId'))) }}"
-        _used_octets: "{{ _existing_vsws | map(attribute='CidrBlock') | map('regex_replace', '^\\d+\\.\\d+\\.(\\d+)\\..*$', '\\1') | map('int') | list }}"
+        # Expand each existing subnet's CIDR into EVERY /24 third-octet it covers,
+        # not just its base octet. OCP ROS subnets are /20 (16 octets each, e.g.
+        # 10.0.0.0/20 → 0..15); taking only the base octet ({0,16,32}) let the /24
+        # allocator pick octet 1 → 10.0.1.0/24, overlapping 10.0.0.0/20
+        # (InvalidCidrBlock.Overlapped). Parse with split (NOT regex — regex in a
+        # block scalar mis-parsed the prefix → 2**24 range blowup); _blk bounded to
+        # plen 17..24. Verified on ansible-core 2.16: returns a real list, picks 48.
+        _used_octets: >-
+          {%- set ns = namespace(o=[]) -%}
+          {%- for _c in (_existing_vsws | map(attribute='CidrBlock') | list) -%}
+          {%-   set _third = _c.split('/')[0].split('.')[2] | int -%}
+          {%-   set _plen = _c.split('/')[1] | int -%}
+          {%-   set _blk = (2 ** (24 - _plen)) if (_plen >= 17 and _plen <= 24) else 1 -%}
+          {%-   set _aligned = _third - (_third % _blk) -%}
+          {%-   set ns.o = ns.o + (range(_aligned, _aligned + _blk) | list) -%}
+          {%- endfor -%}
+          {{ ns.o | unique | sort | list }}
         _vpc_cidr: "{{ (_vsw_q.stdout | from_json).VSwitches.VSwitch[0].CidrBlock | default('192.168.0.0/24') }}"
 
     - name: Derive the VPC /16 base (first two octets) from an existing vSwitch CIDR
