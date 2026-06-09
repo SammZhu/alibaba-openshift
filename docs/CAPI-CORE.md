@@ -401,9 +401,44 @@ Full smoke evidence lives in [CAPA-SMOKE.md §8](CAPA-SMOKE.md).
 
 ---
 
-## 9. Version history
+## 9. The CRDs-only ceiling — declarative MD pools need the full core controller
+
+The CRDs-only path above is enough for **Route B**: you hand-craft a single
+Cluster+Machine and CAPA reconciles the AlibabaCloudMachine directly. It is **not**
+enough for the **declarative multi-AZ MachineDeployment pools** (#62): a
+MachineDeployment needs the **CAPI core controller** (MD → MachineSet → Machine) to
+derive Machines. With CRDs only, `12`'s pools apply but never spin a single worker.
+
+Confirmed 2026-06-09 on a live SNO cluster: CAPA v0.1.12 reached 2/2 Ready (after
+fixing a chain of default-chain gaps — image SSOT, vSwitch allocator, template
+path, missing webhook Service), but no Machine/worker materializes without the core
+controller. The OCP-hosted cluster-capi-operator does **not** supply core on
+platform=external (verified: `clusters.cluster.x-k8s.io` and the
+`openshift-cluster-api` namespace both NotFound), so we must self-manage it.
+
+**TODO — self-managed core controller (offline, folded into the default chain):**
+- **core-only** — drop the kubeadm bootstrap/control-plane providers from the
+  bundle (we BYO bootstrap; only cluster/machine/MD/MS/MHC controllers are needed).
+- **webhooks via service-ca** — CAPI core's webhooks default to cert-manager, which
+  isn't present (the cluster has no cert-manager ns/CRD). Re-point them at the
+  OpenShift service-ca operator (same as CAPA's #29 webhook), or disable them.
+- **mirror the core image** — `registry.k8s.io/cluster-api/cluster-api-controller`
+  → mirror `:8443` + an IDMS entry. The jump host can curl GitHub, but cluster
+  nodes only pull from the mirror.
+- **offline + in the default chain** — vendor the (core-only, service-ca) manifest
+  into the repo (don't `curl` GitHub at deploy time the way 11/09 do for the CRDs),
+  and apply it at the head of `site-post` / before `08`. Fold the CRD install in
+  too (today it's manual / curl-from-GitHub, air-gap-fragile).
+
+Until this lands, `site-post`'s `12` (MD pools) cannot complete; Route B (`11`) is
+the only working worker path.
+
+---
+
+## 10. Version history
 
 | Date | Change |
 |---|---|
 | 2026-06-01 | Initial — P2-CAPI verification run.  CRDs-only path works; CAPA v0.1.2 (with the credential fix from openshift-capi-alicloud `bb1f73e`) calls RunInstances and a real ECS `i-0jl0ucoda565o2pq16wj` boots in cn-wulanchabu.  Commits: `6033915` (alibaba-openshift v0.1.1→v0.1.2 + envFrom alibaba-creds) + `bb1f73e` (openshift-capi-alicloud resolveCredential). |
 | 2026-06-05 | CAPA `v0.1.3` (PR1) tightens CAPI-contract behaviour (§8): bootstrap-data gate, slash providerID + self-clearing finalizer, controlPlaneEndpoint Ready gate.  Affects how the manual CRDs-only path must be driven. |
+| 2026-06-09 | Live SNO run drove the default chain end-to-end under v0.1.12 + declarative MD pools. CAPA v0.1.12 reached 2/2 Ready after fixing 5 default-chain gaps (`4cad336`/`afb4daa`/`806cd22`/`5f1aae1`/`933e6bc`). Confirmed the CRDs-only ceiling (§9): MD pools need the self-managed core controller. #79 step-0 done — OCP supplies no hosted core on platform=external. |
