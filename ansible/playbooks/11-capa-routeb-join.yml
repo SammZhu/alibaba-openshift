@@ -166,18 +166,17 @@
       changed_when: false
       failed_when: false
 
-    - name: Install CAPI core CRDs when missing
-      ansible.builtin.shell: |
-        set -euo pipefail
-        export KUBECONFIG=/root/kubeconfig
-        cd /root
-        curl -fsSL -o cluster-api-components.yaml \
-          https://github.com/kubernetes-sigs/cluster-api/releases/download/{{ capi_core_version }}/cluster-api-components.yaml
-        awk 'BEGIN{RS="\n---\n"} /(^|\n)kind: CustomResourceDefinition($|\n)/{printf "%s\n---\n", $0}' \
-          cluster-api-components.yaml > capi-crds-only.yaml
-        oc apply --server-side=true --force-conflicts -f capi-crds-only.yaml
+    - name: Require CAPI core CRDs (installed offline by 08a-capi-core)
+      # The CAPI core CRDs (+ controller) are installed offline by
+      # ansible/playbooks/08a-capi-core.yml from the vendored
+      # custom_manifests/cluster-api-core.yaml — no curl-from-GitHub. site-post runs
+      # 08a before this; if you run 11 standalone, run 08a first.
+      ansible.builtin.fail:
+        msg: >-
+          CAPI core CRDs (cluster.x-k8s.io) are missing. Run
+          ansible/playbooks/08a-capi-core.yml first (site-post runs it before this),
+          then re-run.
       when: _capi_crd.rc != 0
-      changed_when: true
 
     # ── Worker pointer Ignition -> bootstrap secret ────────────────────────────
     - name: Build the worker pointer Ignition secret from worker-user-data

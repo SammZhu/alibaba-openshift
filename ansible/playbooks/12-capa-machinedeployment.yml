@@ -193,7 +193,7 @@
         set -euo pipefail
         export KUBECONFIG=/root/kubeconfig
         if ! oc get crd machinedeployments.cluster.x-k8s.io >/dev/null 2>&1; then
-          echo "ERROR: CAPI core CRDs (MachineDeployment) not installed — run Phase 11 first." >&2
+          echo "ERROR: CAPI core CRDs (MachineDeployment) not installed — run 08a-capi-core first (site-post runs it before this)." >&2
           exit 1
         fi
       changed_when: false
