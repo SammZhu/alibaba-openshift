@@ -1,0 +1,115 @@
+---
+# Phase 08a — self-managed CAPI core controller (offline, service-ca webhooks).
+#
+# The OCP-hosted cluster-capi-operator supplies no CAPI core on platform=external,
+# so declarative MachineDeployment pools (#62) need us to run core ourselves. This
+# play mirrors the upstream core controller image into the air-gapped registry,
+# points the cluster at it via IDMS, and applies the vendored core-only +
+# service-ca manifest (custom_manifests/cluster-api-core.yaml, produced by
+# scripts/gen-cluster-api-core.py). That manifest also ships the CAPI core CRDs, so
+# this REPLACES the old curl-GitHub awk-extract CRD path in 11/09 with an offline,
+# in-repo install.
+#
+# Runs at the head of site-post (before 08). Idempotent. hosts: jumphost (it has oc
+# + egress + reachability to the mirror).
+- name: Self-managed CAPI core controller (offline, service-ca)
+  hosts: jumphost
+  gather_facts: false
+  vars:
+    kubeconfig_file: /root/kubeconfig
+    repo: /root/openshift-alibaba/alibaba-openshift
+    capi_core_upstream: registry.k8s.io/cluster-api/cluster-api-controller
+    capi_core_tag: v1.12.7
+    capi_core_mirror_repo: cluster-api/cluster-api-controller
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: Assert the mirror is up (Phase 03 ran)
+      ansible.builtin.assert:
+        that:
+          - mirror_private_ip is defined and mirror_private_ip | length > 0
+        fail_msg: "mirror_private_ip missing — Phase 03 (mirror-stack) must have run."
+
+    - name: Refresh repo on the jump host (for custom_manifests/cluster-api-core.yaml)
+      ansible.builtin.command:
+        argv: [git, -C, "{{ repo }}", pull, --ff-only]
+      changed_when: false
+      failed_when: false
+
+    - name: Extract the cluster pull secret (mirror auth for oc image mirror/info)
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, openshift-config,
+               extract, secret/pull-secret, --to=/root, --confirm]
+      changed_when: false
+
+    # ── 1. Mirror the core controller image upstream → cluster mirror ──────────
+    #    oc image mirror is idempotent (skips layers already present). The jump
+    #    host pulls from registry.k8s.io (egress) and pushes to the in-VPC mirror.
+    - name: Mirror the CAPI core image into the air-gapped registry
+      ansible.builtin.command:
+        argv: [oc, image, mirror,
+               "{{ capi_core_upstream }}:{{ capi_core_tag }}={{ mirror_private_ip }}:8443/{{ capi_core_mirror_repo }}:{{ capi_core_tag }}",
+               "--registry-config=/root/.dockerconfigjson", --insecure]
+      register: _core_mirror
+      retries: 3
+      delay: 20
+      until: _core_mirror.rc == 0
+      changed_when: true
+
+    # ── 2. IDMS: point registry.k8s.io/cluster-api/cluster-api-controller at mirror
+    - name: Apply IDMS for the CAPI core image
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+      args:
+        stdin: |
+          apiVersion: config.openshift.io/v1
+          kind: ImageDigestMirrorSet
+          metadata:
+            name: capi-core
+          spec:
+            imageDigestMirrors:
+              - source: {{ capi_core_upstream }}
+                mirrors:
+                  - {{ mirror_private_ip }}:8443/{{ capi_core_mirror_repo }}
+      register: _idms_apply
+      changed_when: "'unchanged' not in _idms_apply.stdout"
+
+    # ── 3. Digest-pin the controller image, then apply the manifest ────────────
+    #    Air-gap nodes resolve only @sha256 via the IDMS (digest-only mirror), so
+    #    swap the manifest's :tag for the mirror-resolved digest before applying.
+    - name: Resolve the CAPI core image digest from the mirror
+      ansible.builtin.command:
+        argv: [oc, image, info,
+               "{{ mirror_private_ip }}:8443/{{ capi_core_mirror_repo }}:{{ capi_core_tag }}",
+               "--registry-config=/root/.dockerconfigjson", --insecure, -o, json]
+      register: _core_imginfo
+      changed_when: false
+
+    - name: Render cluster-api-core.yaml with the digest-pinned image
+      ansible.builtin.shell: >
+        sed 's|image: {{ capi_core_upstream }}:.*|image: {{ capi_core_upstream }}@{{ (_core_imginfo.stdout | from_json).digest }}|'
+        '{{ repo }}/custom_manifests/cluster-api-core.yaml'
+      register: _core_rendered
+      changed_when: false
+
+    - name: Apply CAPI core (CRDs + controller + service-ca webhooks)
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply,
+               --server-side=true, --force-conflicts, -f, "-"]
+      args:
+        stdin: "{{ _core_rendered.stdout }}"
+      register: _core_apply
+      changed_when: "'unchanged' not in _core_apply.stdout"
+
+    # ── 4. Wait for the core controller to be Ready ────────────────────────────
+    #    service-ca mints the webhook serving cert asynchronously, so the pod may
+    #    crash-loop a couple of times before the cert lands — retry the rollout.
+    - name: Wait for capi-controller-manager rollout
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, capi-system,
+               rollout, status, deploy/capi-controller-manager, --timeout=180s]
+      register: _core_rollout
+      retries: 4
+      delay: 20
+      until: _core_rollout.rc == 0
+      changed_when: false

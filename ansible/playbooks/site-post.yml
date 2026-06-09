@@ -16,7 +16,8 @@
 # all.yml carries the deploy version (openshift_version), picked from the
 # bootimage/provenance/ menu.
 #
-# DEFAULT CHAIN (08 → 10 → 12):
+# DEFAULT CHAIN (08a → 08 → 10 → 12):
+- ansible.builtin.import_playbook: 08a-capi-core.yml            # CAPI core controller (offline) — MUST precede 08/12
 - ansible.builtin.import_playbook: 08-deploy-post-install.yml   # CAPI provider + CSI
 - ansible.builtin.import_playbook: 10-prepare-worker-bootimage.yml  # aliyun RHCOS worker image
 - ansible.builtin.import_playbook: 12-capa-machinedeployment.yml    # declarative multi-AZ pools
