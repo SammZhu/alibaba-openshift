@@ -22,8 +22,10 @@
 - name: Resolve jump host + smoke inputs from operator
   hosts: local
   gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../vars/images.yml"
   vars:
-    capa_smoke_image: quay.io/samzhu/openshift-capi-alicloud:v0.1.4
+    capa_smoke_image: "{{ capa_image }}"
     capi_core_version: v1.12.7
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml

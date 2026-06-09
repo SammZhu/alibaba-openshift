@@ -256,10 +256,13 @@ echo "    → pinned ${_CCM_TAG} → ${_CCM_DIGEST}"
 # Alibaba CAPA controller — third-party image referenced by
 # custom_manifests/02-capa-controller.yaml.  Built from
 # SammZhu/cluster-api-provider-alibaba @ feature/capi-v1beta1-rewrite,
-# published as quay.io/samzhu/openshift-capi-alicloud:v0.1.2 (public).
+# published as quay.io/samzhu/openshift-capi-alicloud:v0.1.12 (public).
 # Same digest-pin + tag-alias treatment as the CCM above so the manifest's
-# tag-form reference (:v0.1.2) resolves on the mirror.
-OPENSHIFT_CAPI_IMAGE="${OPENSHIFT_CAPI_IMAGE:-quay.io/samzhu/openshift-capi-alicloud:v0.1.2}"
+# tag-form reference (:v0.1.12) resolves on the mirror.
+# Keep this tag in sync with ansible/vars/images.yml (capa_image_tag) — the SSOT
+# the deploy playbooks read. This script runs on an out-of-cluster build host and
+# can't read ansible vars, so override via OPENSHIFT_CAPI_IMAGE if they ever drift.
+OPENSHIFT_CAPI_IMAGE="${OPENSHIFT_CAPI_IMAGE:-quay.io/samzhu/openshift-capi-alicloud:v0.1.12}"
 echo "[2c/8] Pinning Alibaba CAPA image: $OPENSHIFT_CAPI_IMAGE"
 _CAPI_REPO="${OPENSHIFT_CAPI_IMAGE%:*}"
 _CAPI_TAG="${OPENSHIFT_CAPI_IMAGE##*:}"

@@ -61,9 +61,11 @@
 - name: Deploy post-install components (executed on the jump host)
   hosts: jumphost
   gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../vars/images.yml"
   vars:
     csi_operator_img: quay.io/samzhu/alibaba-cloud-csi-operator:v1.35.3
-    capi_provider_img: quay.io/samzhu/openshift-capi-alicloud:v0.1.2
+    capi_provider_img: "{{ capa_image }}"
     kubeconfig_file: /root/kubeconfig
     # Repos live here on the jump host (NOT {{ playbook_dir }} — that resolves to
     # the operator's path; these commands run on the jump host).
