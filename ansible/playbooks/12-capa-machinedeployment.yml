@@ -210,9 +210,13 @@
       changed_when: true
 
     # ── Render the multi-AZ chain from the repo template ────────────────────────
+    # `template` reads src from the ANSIBLE CONTROLLER (the operator host running
+    # the playbook), not the jump host — so src must be the controller-side repo
+    # path ({{ playbook_dir }}/..), NOT {{ repo }} (which is the jump host's
+    # /root/openshift-alibaba checkout, used for the on-jumphost `git pull`/`oc`).
     - name: Render the multi-AZ MachineDeployment chain
       ansible.builtin.template:
-        src: "{{ repo }}/custom_manifests/capa-worker-machinedeployment.yaml"
+        src: "{{ playbook_dir }}/../../custom_manifests/capa-worker-machinedeployment.yaml"
         dest: /root/caworkers-chain.yaml
         mode: "0644"
       vars:
