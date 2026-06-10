@@ -4,6 +4,8 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+  labels:
+    cluster.x-k8s.io/v1beta2: v1beta1
   name: alibabacloudclusters.infrastructure.cluster.x-k8s.io
 spec:
   group: infrastructure.cluster.x-k8s.io
@@ -292,6 +294,17 @@ spec:
                   - name
                   type: object
                 type: array
+              initialization:
+                description: |-
+                  Initialization provides the v1beta2 infra-cluster contract's provisioned
+                  signal (status.initialization.provisioned); CAPI core uses it — not
+                  status.ready — to drive Cluster.status.infrastructureReady.
+                properties:
+                  provisioned:
+                    description: Provisioned is true once the cluster infrastructure
+                      is fully provisioned.
+                    type: boolean
+                type: object
               ready:
                 default: false
                 description: Ready indicates that the cluster infrastructure is ready.
@@ -319,6 +332,8 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+  labels:
+    cluster.x-k8s.io/v1beta2: v1beta1
   name: alibabacloudclustertemplates.infrastructure.cluster.x-k8s.io
 spec:
   group: infrastructure.cluster.x-k8s.io
@@ -516,6 +531,8 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+  labels:
+    cluster.x-k8s.io/v1beta2: v1beta1
   name: alibabacloudmachines.infrastructure.cluster.x-k8s.io
 spec:
   group: infrastructure.cluster.x-k8s.io
@@ -912,6 +929,17 @@ spec:
                 - bucket
                 - key
                 type: object
+              initialization:
+                description: |-
+                  Initialization provides the v1beta2 infra-machine contract's provisioned
+                  signal (status.initialization.provisioned); CAPI core uses it — not
+                  status.ready — to mark the owning Machine's infrastructure ready.
+                properties:
+                  provisioned:
+                    description: Provisioned is true once the ECS instance backing
+                      this machine exists.
+                    type: boolean
+                type: object
               instanceID:
                 description: InstanceID is the ECS instance ID of the provisioned
                   machine.
@@ -938,6 +966,8 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+  labels:
+    cluster.x-k8s.io/v1beta2: v1beta1
   name: alibabacloudmachinetemplates.infrastructure.cluster.x-k8s.io
 spec:
   group: infrastructure.cluster.x-k8s.io
