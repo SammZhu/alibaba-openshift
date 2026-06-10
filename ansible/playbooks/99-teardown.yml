@@ -90,6 +90,58 @@
         that: teardown_confirmed | bool or _confirm.user_input == 'yes'
         fail_msg: "Aborted"
 
+    # ── 0. CAPA worker-pool ECS cleanup (#62) ────────────────────────────
+    # Phase 12's MachineDeployments create worker ECS DIRECTLY via CAPA (not ROS
+    # stack-managed), inside the mirror VPC, tagged openshift-worker-pool=
+    # capa-multiaz (tag propagates to disks + ENIs). 12 no longer deletes them on
+    # the way out — it leaves the pools running so a failed pool can be debugged
+    # online — so teardown must remove them here, BEFORE any DeleteStack, or their
+    # ENIs block the capa-worker vSwitch sweep + mirror DeleteStack (same failure
+    # class as the leftover vSwitches). Pure aliyun CLI: no dependency on the
+    # cluster API / jump host (which may already be gone). Runs for every target
+    # since the workers belong to the cluster, not to either ROS stack.
+    - name: CAPA workers — delete tagged worker ECS (frees ENIs for stack teardown)
+      when: region is defined and region | length > 0
+      block:
+        - name: CAPA workers — list ECS tagged openshift-worker-pool=capa-multiaz
+          ansible.builtin.command:
+            argv: [aliyun, ecs, DescribeInstances, --RegionId, "{{ region }}",
+                   "--Tag.1.Key", openshift-worker-pool, "--Tag.1.Value", capa-multiaz,
+                   --PageSize, "100", --profile, "{{ aliyun_profile }}"]
+          register: _capa_ecs_q
+          changed_when: false
+          failed_when: false
+
+        - name: CAPA workers — extract instance IDs
+          ansible.builtin.set_fact:
+            _capa_ecs_ids: >-
+              {{ (_capa_ecs_q.stdout | default('{}') | from_json).Instances.Instance
+                 | default([]) | map(attribute='InstanceId') | list }}
+
+        - name: CAPA workers — delete each (force stops + deletes; disks/ENIs cascade by tag)
+          ansible.builtin.command:
+            argv: [aliyun, ecs, DeleteInstance, --RegionId, "{{ region }}",
+                   --InstanceId, "{{ item }}", --Force, "true", --profile, "{{ aliyun_profile }}"]
+          loop: "{{ _capa_ecs_ids | default([]) }}"
+          loop_control:
+            label: "{{ item }} (capa-multiaz worker)"
+          when: (_capa_ecs_ids | default([])) | length > 0
+          failed_when: false
+          changed_when: true
+
+        - name: CAPA workers — wait until all tagged ECS are gone (ENIs released)
+          ansible.builtin.command:
+            argv: [aliyun, ecs, DescribeInstances, --RegionId, "{{ region }}",
+                   "--Tag.1.Key", openshift-worker-pool, "--Tag.1.Value", capa-multiaz,
+                   --PageSize, "100", --profile, "{{ aliyun_profile }}"]
+          register: _capa_ecs_gone
+          retries: 30
+          delay: 10
+          until: ((_capa_ecs_gone.stdout | default('{}') | from_json).Instances.Instance | default([]) | length) == 0
+          failed_when: false
+          changed_when: false
+          when: (_capa_ecs_ids | default([])) | length > 0
+
     # ── 1. Cluster-stack teardown ────────────────────────────────────────
     - name: Delete cluster-stack
       when:
@@ -716,6 +768,17 @@
           changed_when: false
           failed_when: false
 
+        # CAPA worker ECS are named caworkers-* (after the Machine), NOT
+        # cluster_name-*, so the name audit above misses them — check by tag.
+        - name: Audit — CAPA worker ECS still tagged openshift-worker-pool=capa-multiaz
+          ansible.builtin.command:
+            argv: [aliyun, ecs, DescribeInstances, --RegionId, "{{ region }}",
+                   "--Tag.1.Key", openshift-worker-pool, "--Tag.1.Value", capa-multiaz,
+                   --PageSize, "100", --profile, "{{ aliyun_profile }}"]
+          register: _audit_capa_ecs
+          changed_when: false
+          failed_when: false
+
         - name: Audit — orphan SnapshotForImage (ISO + mirror-from-snap)
           ansible.builtin.command:
             argv: [aliyun, ecs, DescribeSnapshots, --RegionId, "{{ region }}",
@@ -754,6 +817,9 @@
                  | list | length }}
             _obs_ecs: >-
               {{ ((_audit_ecs.stdout | default('{}') | from_json).Instances.Instance | default([]))
+                 | length }}
+            _obs_capa_workers: >-
+              {{ ((_audit_capa_ecs.stdout | default('{}') | from_json).Instances.Instance | default([]))
                  | length }}
             _obs_orphans: >-
               {{ _audit_orphan.results
@@ -808,6 +874,7 @@
               - (_obs_cluster_stack | int) == (_exp_cluster_stack | int)
               - (_obs_mirror_stack  | int) == (_exp_mirror_stack  | int)
               - (_obs_ecs           | int) == (_exp_ecs           | int)
+              - (_obs_capa_workers  | int) == 0
               - (_obs_orphans       | int) == (_exp_orphans       | int)
               - (_obs_mirror_snaps  | int) <= (_exp_mirror_snaps  | int)
             fail_msg: |
@@ -819,6 +886,7 @@
               │ cluster-stack ROS            │ {{ _exp_cluster_stack }}      │ {{ _obs_cluster_stack }}      │
               │ mirror-stack ROS             │ {{ _exp_mirror_stack }}      │ {{ _obs_mirror_stack }}      │
               │ ECS instances ({{ cluster_name }}-*)│ {{ _exp_ecs }}      │ {{ _obs_ecs }}      │
+              │ CAPA worker ECS (capa-multiaz)│ 0      │ {{ _obs_capa_workers }}      │
               │ SnapshotForImage orphans     │ {{ _exp_orphans }}      │ {{ _obs_orphans }}      │
               │ mirror data/system snapshots │ ≤{{ _exp_mirror_snaps }}     │ {{ _obs_mirror_snaps }}      │
               └──────────────────────────────┴────────┴────────┘
@@ -833,6 +901,7 @@
                 cluster-stack={{ _obs_cluster_stack }}/{{ _exp_cluster_stack }}
                 mirror-stack={{ _obs_mirror_stack }}/{{ _exp_mirror_stack }}
                 ECS={{ _obs_ecs }}/{{ _exp_ecs }}
+                capa-workers={{ _obs_capa_workers }}/0
                 orphan-snapshots={{ _obs_orphans }}/{{ _exp_orphans }}
                 mirror-snapshots={{ _obs_mirror_snaps }}/≤{{ _exp_mirror_snaps }}
 

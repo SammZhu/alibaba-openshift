@@ -321,9 +321,13 @@
 
       always:
         # Capture the pool state (#62 spread / #78 providerID->nodeRef / #69 MHC)
-        # BEFORE tearing the chain down, so every run leaves a diagnosable
-        # snapshot in the log — pass or fail — without keeping cloud resources
-        # around. Read-only (oc get/logs); never fails the run.
+        # so every run leaves a diagnosable snapshot in the log — pass or fail.
+        # Read-only (oc get/logs); never fails the run.
+        #
+        # The pools are intentionally LEFT RUNNING (no cleanup here) so a failed
+        # run can be debugged online against the live objects. Teardown removes
+        # the worker ECS (by tag openshift-worker-pool=capa-multiaz) when the
+        # cluster/mirror is torn down — see playbooks/99-teardown.yml.
         - name: Capture worker-pool verification report (read-only)
           ansible.builtin.command:
             argv: [bash, "{{ repo }}/scripts/verify-capi-pools.sh"]
@@ -336,14 +340,3 @@
         - name: Worker-pool verification report (#62 / #78 / #69)
           ansible.builtin.debug:
             var: _pool_verify.stdout_lines
-
-        - name: Cleanup — delete the multi-AZ chain
-          ansible.builtin.command:
-            argv: [oc, "--kubeconfig", /root/kubeconfig, delete, -f, /root/caworkers-chain.yaml,
-                   --ignore-not-found, "--wait=true", "--timeout=300s"]
-          changed_when: true
-          failed_when: false
-
-        - name: Cleanup — sweep any leftover caworkers ECS by tag (safety net)
-          ansible.builtin.debug:
-            msg: "If any ECS tagged openshift-worker-pool=capa-multiaz remains, the operator teardown sweep will catch it."
