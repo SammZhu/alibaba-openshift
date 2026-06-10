@@ -67,10 +67,39 @@
     - name: Pick the worker zones (mirror zone + others, up to desired_zone_count)
       ansible.builtin.set_fact:
         _all_zone_ids: "{{ (_zones_q.stdout | from_json).Zones.Zone | map(attribute='ZoneId') | list }}"
-    - name: Order zones with the mirror zone first
+
+    # Not every zone offers every instance type — e.g. cn-wulanchabu-d has no
+    # ecs.g7.xlarge, so a MachineDeployment pinned there fails RunInstances with
+    # InvalidResourceType.NotSupported and that worker never appears (observed
+    # 2026-06-10: caworkers-c stuck on cn-wulanchabu-d). Ask Alibaba which zones
+    # actually have stock of the worker instance type and keep only those.
+    - name: Query zones that offer the worker instance type
+      ansible.builtin.command:
+        argv: [aliyun, ecs, DescribeAvailableResource, --RegionId, "{{ region }}",
+               --DestinationResource, Zone, --InstanceType, "{{ worker_instance_type }}",
+               --profile, "{{ aliyun_profile }}"]
+      register: _avail_q
+      changed_when: false
+
+    - name: Derive the set of zones with stock of the worker instance type
+      ansible.builtin.set_fact:
+        _type_zones: >-
+          {{ (_avail_q.stdout | from_json).AvailableZones.AvailableZone | default([])
+             | selectattr('Status', 'equalto', 'Available') | map(attribute='ZoneId') | list }}
+
+    - name: Order supported zones with the mirror zone first
       ansible.builtin.set_fact:
         _target_zones: >-
-          {{ ([mirror_zone_id] + (_all_zone_ids | difference([mirror_zone_id])))[:desired_zone_count] }}
+          {{ (([mirror_zone_id] if mirror_zone_id in _type_zones else [])
+              + (_type_zones | difference([mirror_zone_id])))[:desired_zone_count] }}
+
+    - name: Assert at least one usable worker zone was found
+      ansible.builtin.assert:
+        that: _target_zones | length > 0
+        fail_msg: >-
+          No zone in {{ region }} has stock of {{ worker_instance_type }}
+          (zones seen: {{ _all_zone_ids }}; with-stock: {{ _type_zones }}).
+          Choose a different worker_instance_type.
 
     # ── Inventory existing vSwitches in the VPC (zone -> vsw, used /24s) ─────────
     - name: Describe existing vSwitches in the VPC

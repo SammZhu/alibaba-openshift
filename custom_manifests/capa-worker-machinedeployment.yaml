@@ -65,7 +65,13 @@ spec:
       securityGroupIDs: ["{{ sg }}"]
       ramRoleName: {{ ram_role }}
       systemDisk: {category: cloud_essd, size: 40}
-      # metadataOptions omitted -> controller defaults httpTokens=required.
+      # IMDSv2 (httpTokens=required, the controller default) makes the Alibaba
+      # metadata service reject RHCOS Ignition's tokenless GET of
+      # http://100.100.100.200/latest/user-data with 403 Forbidden — the worker's
+      # pointer Ignition never loads, boot drops to emergency mode, and the node
+      # never joins. RHCOS Ignition on the aliyun platform fetches user-data
+      # without an IMDSv2 token, so workers MUST allow IMDSv1 (httpTokens=optional).
+      metadataOptions: {httpEndpoint: enabled, httpTokens: optional}
       tags:
         - {key: openshift-worker-pool, value: capa-multiaz}
 {% for z in worker_zones %}
