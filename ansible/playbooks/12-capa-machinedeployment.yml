@@ -288,6 +288,22 @@
               -p "{\"metadata\":{\"ownerReferences\":[{\"apiVersion\":\"cluster.x-k8s.io/v1beta2\",\"kind\":\"Cluster\",\"name\":\"caworkers\",\"uid\":\"$CU\",\"controller\":true,\"blockOwnerDeletion\":true}]}}"
           changed_when: true
 
+        # CAPI core binds Machine.status.nodeRef by listing Nodes in the WORKLOAD
+        # cluster, which it reaches via the <cluster>-kubeconfig secret. This is a
+        # self-managed setup — the workers join THIS OCP cluster, the same one core
+        # runs in — so point the secret at our own kubeconfig. Without it core logs
+        # "connection to the workload cluster is down" / "Secret caworkers-kubeconfig
+        # not found" forever and nodeRef never binds (Machines stay Provisioned,
+        # MachineDeployments never reach readyReplicas even though the Nodes are Ready).
+        - name: Create caworkers-kubeconfig so CAPI core can reach the cluster (nodeRef)
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG=/root/kubeconfig
+            oc -n {{ ns }} create secret generic caworkers-kubeconfig \
+              --from-file=value=/root/kubeconfig \
+              --dry-run=client -o yaml | oc apply -f -
+          changed_when: true
+
         - name: Wait for CAPI Cluster.status.failureDomains to be populated (spread prerequisite)
           ansible.builtin.command:
             argv: [oc, "--kubeconfig", /root/kubeconfig, -n, "{{ ns }}", get, cluster, caworkers,
