@@ -17,7 +17,12 @@ NS="${NS:-default}"
 CLUSTER="${CLUSTER:-caworkers}"
 OC=(oc --kubeconfig "${KUBECONFIG}")
 
-c_hdr=$'\033[1;36m'; c_ok=$'\033[1;32m'; c_warn=$'\033[1;33m'; c_off=$'\033[0m'
+# Colour only on an interactive TTY (keeps ansible-captured output clean).
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  c_hdr=$'\033[1;36m'; c_ok=$'\033[1;32m'; c_warn=$'\033[1;33m'; c_off=$'\033[0m'
+else
+  c_hdr=''; c_ok=''; c_warn=''; c_off=''
+fi
 section() { printf '\n%s== %s ==%s\n' "$c_hdr" "$1" "$c_off"; }
 kv()      { printf '  %-34s %s\n' "$1" "$2"; }
 
