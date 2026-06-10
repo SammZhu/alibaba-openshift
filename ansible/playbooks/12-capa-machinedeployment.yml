@@ -13,13 +13,13 @@
 #   - Phase 10 produced worker_boot_image_id; cluster installed.
 #
 #   ansible-playbook -i ansible/inventory.yml ansible/playbooks/12-capa-machinedeployment.yml \
-#     [-e replicas_per_zone=1] [-e worker_instance_type=ecs.g7.xlarge] [-e keep_pools=true]
+#     [-e replicas_per_zone=1] [-e worker_instance_type=ecs.g7.xlarge]
 #
-# keep_pools=true  — skip the always-cleanup so the cluster/MachineDeployments/
-#                    Machines stay up after the run (pass OR fail) for inspection
-#                    via scripts/verify-capi-pools.sh / playbook 13. Default false
-#                    (clean run). Use it for first-time bring-up / debugging, then
-#                    delete the chain (or teardown) when done.
+# Every run captures a READ-ONLY worker-pool verification report (#62 multi-AZ
+# spread, #78 providerID->nodeRef, #69 MachineHealthCheck) via
+# scripts/verify-capi-pools.sh in the always-block, BEFORE the chain is torn
+# down — so site-post always leaves a diagnosable snapshot in the log (pass or
+# fail) without keeping cloud resources around.
 - name: Resolve multi-AZ inputs + ensure per-zone vSwitches (operator)
   hosts: local
   gather_facts: false
@@ -320,32 +320,30 @@
             msg: "✓ B2: {{ md_worker_zones | length }} per-AZ MachineDeployments converged, workers spread across distinct zones, scale-up on pool-a succeeded (CSRs auto-approved by the controller)."
 
       always:
-        # By default we tear the chain down on the way out (CI/clean-run hygiene).
-        # For a bring-up / "边测边修" run pass -e keep_pools=true: the cluster +
-        # MachineDeployments + Machines STAY UP so they can be inspected
-        # (scripts/verify-capi-pools.sh, playbook 13) and iterated on — pass OR
-        # fail. Without this the always-cleanup deletes the very objects you were
-        # trying to verify, leaving caworkers in Deleting (the trap that made
-        # post-run inspection pointless).
+        # Capture the pool state (#62 spread / #78 providerID->nodeRef / #69 MHC)
+        # BEFORE tearing the chain down, so every run leaves a diagnosable
+        # snapshot in the log — pass or fail — without keeping cloud resources
+        # around. Read-only (oc get/logs); never fails the run.
+        - name: Capture worker-pool verification report (read-only)
+          ansible.builtin.command:
+            argv: [bash, "{{ repo }}/scripts/verify-capi-pools.sh"]
+          environment:
+            KUBECONFIG: /root/kubeconfig
+          register: _pool_verify
+          changed_when: false
+          failed_when: false
+
+        - name: Worker-pool verification report (#62 / #78 / #69)
+          ansible.builtin.debug:
+            var: _pool_verify.stdout_lines
+
         - name: Cleanup — delete the multi-AZ chain
           ansible.builtin.command:
             argv: [oc, "--kubeconfig", /root/kubeconfig, delete, -f, /root/caworkers-chain.yaml,
                    --ignore-not-found, "--wait=true", "--timeout=300s"]
           changed_when: true
           failed_when: false
-          when: not (keep_pools | default(false) | bool)
-
-        - name: Pools kept for inspection (keep_pools=true)
-          ansible.builtin.debug:
-            msg: >-
-              keep_pools=true — caworkers chain left running for inspection.
-              Verify with `ansible-playbook playbooks/13-verify-capi-pools.yml`,
-              then remove with
-              `oc --kubeconfig /root/kubeconfig delete -f /root/caworkers-chain.yaml`
-              (or a full teardown).
-          when: keep_pools | default(false) | bool
 
         - name: Cleanup — sweep any leftover caworkers ECS by tag (safety net)
           ansible.builtin.debug:
             msg: "If any ECS tagged openshift-worker-pool=capa-multiaz remains, the operator teardown sweep will catch it."
-          when: not (keep_pools | default(false) | bool)
