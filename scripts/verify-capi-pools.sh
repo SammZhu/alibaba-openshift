@@ -59,6 +59,23 @@ kv "ACC provisioned"  "$("${OC[@]}" -n "$NS" get alibabacloudcluster "$CLUSTER" 
 kv "ACC failureDomains[].name" \
    "$("${OC[@]}" -n "$NS" get alibabacloudcluster "$CLUSTER" -o jsonpath='{.status.failureDomains[*].name}' 2>&1)"
 
+# ── 1c. externally-managed control plane (gates worker node-health → MD ready) ─
+# CAPI v1.12 gates worker Machine node-health (and thus MachineDeployment
+# readyReplicas) on the Cluster's ControlPlaneInitialized. The AlibabaCloudControlPlane
+# (mode=external) adopts the existing OCP control plane and reports it initialized.
+# Expect: ACP initialized=true + externalManaged=true → Cluster ControlPlaneInitialized=True.
+section "1c. control plane (AlibabaCloudControlPlane → ControlPlaneInitialized)"
+kv "Cluster ControlPlaneInitialized" \
+   "$("${OC[@]}" -n "$NS" get cluster "$CLUSTER" -o jsonpath='{.status.conditions[?(@.type=="ControlPlaneInitialized")].status}' 2>&1)"
+kv "Cluster controlPlaneReady" \
+   "$("${OC[@]}" -n "$NS" get cluster "$CLUSTER" -o jsonpath='{.status.controlPlaneReady}' 2>&1)"
+kv "ACP initialized" \
+   "$("${OC[@]}" -n "$NS" get alibabacloudcontrolplane "$CLUSTER" -o jsonpath='{.status.initialization.controlPlaneInitialized}' 2>&1)"
+kv "ACP externalManaged" \
+   "$("${OC[@]}" -n "$NS" get alibabacloudcontrolplane "$CLUSTER" -o jsonpath='{.status.externalManagedControlPlane}' 2>&1)"
+kv "ACP ready / version" \
+   "$("${OC[@]}" -n "$NS" get alibabacloudcontrolplane "$CLUSTER" -o jsonpath='{.status.ready}  {.status.version}' 2>&1)"
+
 # ── 2. #62 MachineDeployment / MachineSet pools ──────────────────────────────
 section "2. #62 — MachineDeployment + MachineSet pools"
 "${OC[@]}" -n "$NS" get machinedeployment -l "cluster.x-k8s.io/cluster-name=$CLUSTER" \
