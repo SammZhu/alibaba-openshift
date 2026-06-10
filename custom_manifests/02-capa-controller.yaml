@@ -27,6 +27,15 @@ rules:
   - apiGroups: [infrastructure.cluster.x-k8s.io]
     resources: [alibabacloudclusters/finalizers, alibabacloudmachines/finalizers]
     verbs: [update]
+  # Externally-managed control plane (AlibabaCloudControlPlane) — Cluster's
+  # controlPlaneRef; reports the existing OCP control plane as initialized so
+  # CAPI core marks ControlPlaneInitialized and worker MachineDeployments converge.
+  - apiGroups: [controlplane.cluster.x-k8s.io]
+    resources: [alibabacloudcontrolplanes]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [controlplane.cluster.x-k8s.io]
+    resources: [alibabacloudcontrolplanes/status]
+    verbs: [get, update, patch]
   - apiGroups: [cluster.x-k8s.io]
     resources: [clusters, machines, machines/status]
     verbs: [get, list, watch]

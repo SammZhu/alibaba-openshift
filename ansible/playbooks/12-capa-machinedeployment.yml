@@ -244,6 +244,19 @@
           --from-file=value=/tmp/worker.ign --dry-run=client -o yaml | oc apply -f -
       changed_when: true
 
+    # The AlibabaCloudControlPlane (external mode) needs the cluster's real k8s
+    # version for the control-plane contract (spec.version). Read it from the
+    # live cluster so the adopted control plane reports the correct version.
+    - name: Discover the cluster Kubernetes version (control-plane contract)
+      ansible.builtin.command:
+        argv: [oc, "--kubeconfig", /root/kubeconfig, version, -o, json]
+      register: _oc_version
+      changed_when: false
+
+    - name: Extract server Kubernetes version
+      ansible.builtin.set_fact:
+        _k8s_version: "{{ (_oc_version.stdout | from_json).serverVersion.gitVersion }}"
+
     # ── Render the multi-AZ chain from the repo template ────────────────────────
     # `template` reads src from the ANSIBLE CONTROLLER (the operator host running
     # the playbook), not the jump host — so src must be the controller-side repo
@@ -261,6 +274,7 @@
         sg: "{{ md_sg }}"
         ram_role: "{{ md_ram_role }}"
         cp_host: "{{ md_cp_host }}"
+        cp_k8s_version: "{{ _k8s_version }}"
         worker_zones: "{{ md_worker_zones }}"
         replicas_per_zone: "{{ md_replicas_per_zone }}"
         bootstrap_secret: caworkers-bootstrap

@@ -36,14 +36,38 @@ spec:
     - {zoneID: {{ z.zone }}, vSwitchID: {{ z.vsw }}}
 {% endfor %}
 ---
-# CAPI Cluster wrapper (control plane is the existing cluster; this only wires
-# the infra ref so MachineSet/MachineDeployment can read status.failureDomains).
+# Externally-managed control plane: the OCP control plane (masters) already
+# exists out-of-band (Assisted Installer / ROS), so we adopt it (mode=external).
+# It reports initialized + externalManagedControlPlane=true, which makes CAPI core
+# mark the Cluster's ControlPlaneInitialized=True — the contract-correct way to
+# tell core "this cluster's control plane is managed outside CAPI". Without it,
+# worker Machine node-health gates on ControlPlaneInitialized and MachineDeployments
+# never reach readyReplicas even though the workers are Ready nodes with nodeRef.
+apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+kind: AlibabaCloudControlPlane
+metadata:
+  name: caworkers
+  namespace: {{ ns }}
+  labels:
+    cluster.x-k8s.io/cluster-name: caworkers
+spec:
+  mode: external
+  version: {{ cp_k8s_version }}
+  controlPlaneEndpoint: {host: {{ cp_host }}, port: 6443}
+---
+# CAPI Cluster: control plane = the externally-managed AlibabaCloudControlPlane
+# above (existing OCP masters); infra = AlibabaCloudCluster (publishes
+# failureDomains for MachineSet/MachineDeployment spread).
 apiVersion: cluster.x-k8s.io/v1beta2
 kind: Cluster
 metadata:
   name: caworkers
   namespace: {{ ns }}
 spec:
+  controlPlaneRef:
+    apiGroup: controlplane.cluster.x-k8s.io
+    kind: AlibabaCloudControlPlane
+    name: caworkers
   infrastructureRef:
     apiGroup: infrastructure.cluster.x-k8s.io
     kind: AlibabaCloudCluster
