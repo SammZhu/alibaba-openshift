@@ -817,8 +817,17 @@
           - "oc --kubeconfig=/root/kubeconfig -n openshift-ingress get pods -l ingresscontroller.operator.openshift.io/deployment-ingresscontroller=default -o jsonpath='{.items[*].status.hostIP}'"
       register: _router_ips
       changed_when: false
-      retries: 12   # ~2 min — router-default pods may take a moment after
-      delay: 10     # control plane is up to be Scheduled+Running
+      # ~7.5 min budget (30 x 15s). The 2-min budget here used to give up while
+      # the control plane was still rolling its FIRST static-pod revisions
+      # (kube-apiserver/etcd PROGRESSING "0 nodes active, revision 0"): on a
+      # single schedulable-master cluster the ingress operator only creates
+      # router-default AFTER apiserver/etcd stabilize, so the router pod can
+      # appear 4-6 min post-node-Ready — well past 2 min. Observed again
+      # 2026-06-11 (site.yml failed=1 here; router-default was Pending/
+      # ContainerCreating only as the task exhausted its retries). Widen the
+      # window to cover real control-plane convergence on slow/SNO topologies.
+      retries: 30   # ~7.5 min — covers first-revision control-plane convergence
+      delay: 15     # before the ingress operator schedules router-default
       until: ((_router_ips.stdout | default('')).split() | length) > 0
       when: jump_host_ip | default('') | length > 0
 
