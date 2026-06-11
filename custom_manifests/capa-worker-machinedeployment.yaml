@@ -149,10 +149,24 @@ spec:
   selector:
     matchLabels:
       cluster.x-k8s.io/cluster-name: caworkers
-  # Tolerate brief blips; remediate sustained failures. Cap concurrent
-  # remediation so a transient control-plane hiccup can't drain every pool.
-  maxUnhealthy: 40%
-  nodeStartupTimeout: 20m
-  unhealthyConditions:
-    - {type: Ready, status: "False", timeout: 300s}
-    - {type: Ready, status: Unknown, timeout: 300s}
+  # CAPI v1beta2 MHC layout (cluster-api v1.13): the old v1beta1 top-level fields
+  # (maxUnhealthy / nodeStartupTimeout / unhealthyConditions) were RELOCATED under
+  # spec.checks and spec.remediation. Writing the old names under apiVersion
+  # v1beta2 silently prunes them (unknown fields) — the MHC then has NO unhealthy
+  # conditions and NEVER remediates (observed 2026-06-11: live MHC had only a
+  # defaulted checks.nodeStartupTimeoutSeconds=600, no conditions). Use the
+  # v1beta2 field names below.
+  checks:
+    # Max time to wait for a new Machine's Node to appear before flagging it
+    # unhealthy (was nodeStartupTimeout: 20m).
+    nodeStartupTimeoutSeconds: 1200
+    # Tolerate brief blips; remediate sustained Node failures (was
+    # unhealthyConditions with duration strings — now timeoutSeconds ints).
+    unhealthyNodeConditions:
+      - {type: Ready, status: "False", timeoutSeconds: 300}
+      - {type: Ready, status: Unknown, timeoutSeconds: 300}
+  remediation:
+    # Cap concurrent remediation so a transient control-plane hiccup can't drain
+    # every pool at once (was maxUnhealthy: 40%).
+    triggerIf:
+      unhealthyLessThanOrEqualTo: 40%
