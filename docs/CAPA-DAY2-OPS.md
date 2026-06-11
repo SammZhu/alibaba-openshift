@@ -34,6 +34,60 @@ worker node-health on `ControlPlaneInitialized`).
 
 ---
 
+## 0.1 Resource ownership — who creates whom
+
+Three systems interlock. We own only the CAPA infra-provider layer; MachineSet is
+created by **CAPI core**, and MachineConfig belongs to the **OpenShift MCO** — we
+consume/integrate with both, we don't re-design them.
+
+```
+                       ┌──────────────────────────────────────────────────┐
+   OCP control plane:  │  masters installed out-of-band (Assisted + ROS)   │  not ours
+                       └───────────────────────┬──────────────────────────┘
+                                               │ adopted by
+   OURS (CAPA CRDs/controllers + orchestration)▼
+   ┌──────────────────────────────────────────────────────────────────────┐
+   │ Cluster ──controlPlaneRef──▶ AlibabaCloudControlPlane (mode=external)  │ ours: CRD+ctrl,
+   │   │                          → reports ControlPlaneInitialized=True    │ status-only, no cloud
+   │   └──infrastructureRef──▶ AlibabaCloudCluster (region/failureDomains)  │ ours
+   │ MachineDeployment (one per AZ) ──▶ AlibabaCloudMachineTemplate         │ ours
+   │ MachineHealthCheck                                                     │ ours
+   └───────────┬──────────────────────────────────────────────────┬───────┘
+               │ CAPI core: MachineDeployment ctrl creates          │ MHC ctrl
+               ▼                                                    │ remediates
+        ┌─────────────┐  ← created by CAPI CORE (not us)            │
+        │  MachineSet  │                                            │
+        └──────┬───────┘                                            │
+               ▼ MachineSet ctrl creates                            │
+        ┌─────────────┐  ← CAPI core                                │
+        │   Machine    │◀────────────────────────────────────────────┘
+        └──────┬───────┘   nodeRef bound by core (exact providerID match, #78)
+               ▼ creates infra machine from the template
+        ┌──────────────────────┐  ← OURS (CRD + controller)
+        │  AlibabaCloudMachine  │  RunInstances on create · frees ECS + sweeps tag on
+        └──────┬────────────────┘  delete (G8) · IMDS hardening after nodeRef (G14)
+               ▼
+        ┌──────────────────────┐      ┌──────── OCP / Alibaba, existing — NOT ours ────────┐
+        │  ECS (RHCOS, booted   │ join │ CCM: writes Node.providerID, clears uninitialized  │
+        │  via user-data        │─────▶│   taint, zone labels                               │
+        │  Ignition, Route B)   │      │ MCS: serves the worker pointer Ignition            │
+        └──────────────────────┘      │ MCO: renders MachineConfig / registries.conf       │
+                                       │   (IDMS/ITMS → why applying an ITMS rolls workers) │
+                                       └────────────────────────────────────────────────────┘
+```
+
+Ownership in one line:
+- **Ours** = the `AlibabaCloud*` CRDs/controllers (Cluster / Machine / MachineTemplate
+  / ControlPlane) + CSR auto-approval + the orchestration manifests (MachineDeployment,
+  MachineHealthCheck, the Cluster ref wiring).
+- **CAPI core** (upstream) = MachineDeployment → **MachineSet** → Machine → nodeRef, and
+  the MHC remediation logic.
+- **OpenShift** (existing) = the control plane, **MachineConfig/MCO**, the CCM, the MCS.
+
+Note the two distinct MachineSets: the **CAPI** `cluster.x-k8s.io` MachineSet (used
+here) vs the **OCP MachineAPI** `machine.openshift.io` MachineSet (a different system
+we do NOT use; the legacy `config/` machineset.openshift.io CRD is dead CCCMO-era code).
+
 ## 1. Externally-managed control plane (prerequisite)
 
 `AlibabaCloudControlPlane` (apiGroup `controlplane.cluster.x-k8s.io`, mode=external)
