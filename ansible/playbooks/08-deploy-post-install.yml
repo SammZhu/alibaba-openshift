@@ -102,6 +102,34 @@
       delay: 10
       until: oc_nodes.rc == 0
 
+    # Air-gap: pin the CAPA controller image BY DIGEST (not tag) — the same
+    # pattern 08a uses for the CAPI core image. The companion ITMS (below) already
+    # redirects tag pulls to the mirror, but a digest pin is stricter: the
+    # install-config ImageDigestMirrorSet resolves it directly, the reference is
+    # immutable, and CAPA stays consistent with capi-core. Resolve the digest from
+    # the mirror copy that 04-prepare-mirror pushed. No-op (keeps the tag) when the
+    # mirror is disabled — a connected cluster pulls from quay.io by tag.
+    - name: Pin CAPA controller image by digest from the mirror (air-gap)
+      when: mirror_private_ip | default('') | length > 0
+      block:
+        - name: Extract the cluster pull secret (mirror auth for oc image info)
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, openshift-config,
+                   extract, secret/pull-secret, --to=/root, --confirm]
+          changed_when: false
+
+        - name: Resolve the CAPA controller image digest from the mirror
+          ansible.builtin.command:
+            argv: [oc, image, info,
+                   "{{ mirror_private_ip }}:8443/samzhu/openshift-capi-alicloud:{{ capa_image_tag }}",
+                   "--registry-config=/root/.dockerconfigjson", "--insecure", -o, json]
+          register: _capa_imginfo
+          changed_when: false
+
+        - name: Override capi_provider_img with the digest-pinned reference
+          ansible.builtin.set_fact:
+            capi_provider_img: "quay.io/samzhu/openshift-capi-alicloud@{{ (_capa_imginfo.stdout | from_json).digest }}"
+
     # ── CAPI provider ──────────────────────────────────────────────────────
     - name: Apply CAPI CRDs
       ansible.builtin.command:

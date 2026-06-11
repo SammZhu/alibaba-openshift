@@ -125,13 +125,16 @@ spec:
           # Pinned to immutable version tag (NOT :latest) — IfNotPresent below
           # would otherwise never re-pull a mutated :latest, masking rollouts.
           # Image is mirrored by build-mirror-tarball.sh (additionalImages +
-          # TAG_MAPPING entry). This `image:` is pinned BY TAG, so on a restricted
-          # cluster it is redirected to the mirror by the ImageTagMirrorSet
-          # (samzhu-tag-mirror, applied in 08-deploy-post-install) — NOT by the
-          # install-config ImageDigestMirrorSet, which only redirects digest pulls.
-          # Without the ITMS a tag pull escapes to public quay.io and fails on any
-          # node that hasn't already cached the image (P3-CAPA: HA degraded after
-          # node churn rescheduled the standby pod, 2026-06-11).
+          # TAG_MAPPING entry). This static `image:` is pinned by TAG, but on a
+          # restricted cluster 08-deploy-post-install resolves the mirror digest and
+          # sed-overrides it to a DIGEST reference (quay.io/...@sha256:...), which
+          # the install-config ImageDigestMirrorSet redirects to the mirror. A
+          # companion ImageTagMirrorSet (samzhu-tag-mirror) is also applied as a
+          # backstop for any tag pull (e.g. CSI, or if digest resolution is skipped).
+          # Both matter: the IDMS only redirects DIGEST pulls, so without one of
+          # these a tag pull escapes to public quay.io and fails on any node that
+          # hasn't cached the image (P3-CAPA: HA degraded after node churn
+          # rescheduled the standby pod, 2026-06-11).
           # Version history:
           #   v0.1.0 → init() panic on non-semver build version (semver.MustParse)
           #   v0.1.1 → parseVersionOrFallback fix (a4dc369)
