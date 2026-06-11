@@ -74,14 +74,17 @@ The playbook asserts, on-cluster:
 4. scaling `caworkers-a` up by 1 converges (declarative scale-up).
 
 ### Unified-validation checklist (one fast-path cluster run)
-- [ ] 3 pools × N replicas Ready, spread across a/b/c
-- [ ] scale up / down a pool converges; rolling replace on a template change
-- [ ] `oc delete machine <one>` → drained + ECS released → MachineSet recreates
-- [ ] **#69**: release one ECS in the aliyun console → Machine Failed
-      (`InstanceDisappeared`) → MHC → MachineSet rebuild
+The procedures, pass criteria, and gotchas for all of these now live in
+[CAPA-DAY2-OPS.md](CAPA-DAY2-OPS.md). Status (2026-06-11):
+- [x] 3 pools × N replicas Ready, spread across a/b/c
+- [x] scale up / down a pool converges; rolling replace on a template change
+- [x] `oc delete machine <one>` → drained + ECS released → MachineSet recreates
+- [x] **#69**: stop one ECS (aliyun) → node NotReady → MHC remediates → MachineSet
+      rebuild *(needed the MHC v1beta2 field fix — see CAPA-DAY2-OPS §4)*
 - [ ] capacity: force a sold-out zone → PR-B terminal → rebuild elsewhere
-- [ ] hardening spot-checks: ECS metadata requires token (IMDSv2); deleting a
-      Machine leaves no orphan disk/ENI; tags present on disks+ENIs
+- [x] hardening: post-boot IMDSv2 flip (G14, httpTokensAfterBoot) *(code v0.1.19,
+      live-verify pending)*; deleting a Machine leaves no orphan ECS/disk/ENI
+      (G8 — verified by the cost audit, see CAPA-DAY2-OPS §5)
 
 > Cost: multi-replica stress (e.g. 50) is intentionally **not** run. A few
 > replicas across a/b/c is enough to prove the logic; teardown sweeps the pools.
