@@ -635,26 +635,47 @@
     # match current infra_env_id, master will register to a deleted infra-env
     # and AI will show hosts=[] forever.  Observed 2026-06-04.
     #
-    # Cheap check: grep -a (binary-safe) for the current infra_env_id UUID in
-    # the ISO bytes.  Match → ISO is for this infra-env, safe to reuse.  No
-    # match → stale, force re-download.
-    - name: Verify existing ISO has current infra_env_id baked in
-      ansible.builtin.command:
-        argv: [grep, -aq, "{{ infra_env_id }}", "{{ iso_path }}"]
-      register: _iso_infra_match
-      changed_when: false
+    # Freshness check via a DETERMINISTIC sidecar, not a binary grep of the ISO.
+    # The old `grep -aq <infra_env_id> <iso>` searched the UUID as a raw byte
+    # substring, but AI's full-ISO embeds the infra-env pointer inside a
+    # compressed/encoded Ignition — the UUID is NOT reliably a contiguous
+    # plain-text match, so the grep gave a FALSE "stale" on a perfectly good ISO
+    # (infra_env_id unchanged) and triggered a needless ISO rebuild + ECS image
+    # re-import (~15-30 min, plus an orphan backing snapshot). Observed
+    # 2026-06-11. Instead, whenever we download an ISO we record the infra_env_id
+    # it was built for in `<iso_path>.infra_env_id`; here we just string-compare
+    # that sidecar. A pre-existing ISO without a sidecar is treated as stale and
+    # rebuilt once (we cannot trust the binary to tell us its infra-env) — a
+    # one-time migration cost.
+    - name: Read the ISO freshness sidecar (infra_env_id the ISO was built for)
+      ansible.builtin.slurp:
+        src: "{{ iso_path }}.infra_env_id"
+      register: _iso_sidecar
       failed_when: false
       when:
         - iso_stat.stat.exists | default(false)
         - infra_env_id | default('') | length > 0
 
-    - name: Delete stale ISO when infra-env-id baked in doesn't match
-      ansible.builtin.file:
-        path: "{{ iso_path }}"
-        state: absent
+    - name: Determine whether the on-disk ISO matches the current infra-env
+      ansible.builtin.set_fact:
+        _iso_infra_fresh: >-
+          {{ (_iso_sidecar.content is defined)
+             and ((_iso_sidecar.content | b64decode | trim) == (infra_env_id | trim)) }}
       when:
         - iso_stat.stat.exists | default(false)
-        - _iso_infra_match.rc | default(0) != 0
+        - infra_env_id | default('') | length > 0
+
+    - name: Delete stale ISO (and its sidecar) when it doesn't match the current infra-env
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ iso_path }}"
+        - "{{ iso_path }}.infra_env_id"
+      when:
+        - iso_stat.stat.exists | default(false)
+        - infra_env_id | default('') | length > 0
+        - not (_iso_infra_fresh | default(false))
       register: _stale_iso_deleted
 
     # Always re-stat (no `when`): a skipped task still OVERWRITES its registered
@@ -739,6 +760,19 @@
         path: "{{ iso_path }}"
       register: iso_stat_final
       failed_when: iso_stat_final.stat.size < (900 * 1024 * 1024)
+
+    # Record which infra-env this on-disk ISO corresponds to, so the freshness
+    # check above can string-compare instead of grepping the binary. At this point
+    # the ISO is guaranteed to match the current infra_env_id (either it was fresh
+    # and kept, or it was deleted as stale and just re-downloaded). Idempotent.
+    - name: Write the ISO freshness sidecar (current infra_env_id)
+      ansible.builtin.copy:
+        content: "{{ infra_env_id }}"
+        dest: "{{ iso_path }}.infra_env_id"
+        mode: "0644"
+      when:
+        - infra_env_id | default('') | length > 0
+        - iso_stat_final.stat.exists | default(false)
 
     # ── Persist state ──────────────────────────────────────────────────────
     - name: Save state
