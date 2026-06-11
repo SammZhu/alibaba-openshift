@@ -8,7 +8,7 @@
 #
 # Keep in sync (both are outside ansible's var loading, so they can't read this):
 #   - scripts/build-mirror-tarball.sh   OPENSHIFT_CAPI_IMAGE default
-#   - custom_manifests/02-capa-controller.yaml  static `image:` fallback
+#   - openshift-capi-alicloud config/manager/deployment.yaml  static `image:` fallback
 #     (08 sed-overrides it with capa_image at deploy time, but keep it current)
 capa_image_repo: "quay.io/samzhu/openshift-capi-alicloud"
 capa_image_tag: "v0.1.19"

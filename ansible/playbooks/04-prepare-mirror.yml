@@ -955,7 +955,7 @@
       changed_when: true
 
     # ── CAPA controller image: belt-and-suspenders pre-pull via operator relay ──
-    # The CAPA Deployment in custom_manifests/02-capa-controller.yaml
+    # The CAPA Deployment in openshift-capi-alicloud config/manager/deployment.yaml
     # references quay.io/samzhu/openshift-capi-alicloud:{{ capa_image_tag }}.
     # build-mirror-tarball.sh has pinned CAPA into the imageset since
     # commit 7054bfe (2026-05-31), so any tarball built after that
@@ -1298,7 +1298,7 @@
     #         (CCM v2.14.0 — referenced by custom_manifests/01-alibaba-ccm.yaml.j2,
     #          mirrored in by build-mirror-tarball.sh CCM section + 04 belt-and-suspenders.)
     #   1 × quay.io/samzhu/openshift-capi-alicloud
-    #         (CAPA controller {{ capa_image_tag }} — referenced by custom_manifests/02-capa-controller.yaml,
+    #         (CAPA controller {{ capa_image_tag }} — referenced by openshift-capi-alicloud config/manager/deployment.yaml,
     #          mirrored in by build-mirror-tarball.sh CAPA section.  Note: only relevant for
     #          08-deploy-post-install; install (Phase 07) never pulls this image.)
     #

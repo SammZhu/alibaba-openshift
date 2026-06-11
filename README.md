@@ -318,9 +318,8 @@ exact command above if it's missing.
 ### Post-Installation
 
 ```bash
-# Apply CAPA controller (enables node auto-scaling)
-oc apply -f custom_manifests/02-capa-crds.yaml
-oc apply -f custom_manifests/02-capa-controller.yaml
+# Apply CAPA (CRDs + RBAC + controller + webhooks) from the provider repo config/ SSOT
+oc kustomize ../openshift-capi-alicloud/config/default | oc apply --server-side=true --force-conflicts -f -
 
 # Get Ingress SLB IP (CCM creates it automatically for the ingress-operator Service)
 oc get svc -n openshift-ingress router-default -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
@@ -441,8 +440,8 @@ openshift-install agent wait-for install-complete --dir install-dir/
 ### Post-Installation
 
 ```bash
-oc apply -f custom_manifests/02-capa-crds.yaml
-oc apply -f custom_manifests/02-capa-controller.yaml
+# CAPA (CRDs + RBAC + controller + webhooks) from the provider repo config/ SSOT
+oc kustomize ../openshift-capi-alicloud/config/default | oc apply --server-side=true --force-conflicts -f -
 
 # Get Ingress SLB IP and add *.apps DNS record (same as Assisted post-install)
 oc get svc -n openshift-ingress router-default -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
@@ -474,8 +473,8 @@ alibaba-openshift/
 ├── custom_manifests/
 │   ├── 00-ovn-mtu.yaml                         # OVN geneve MTU pin              [install-time]
 │   ├── 01-alibaba-ccm.yaml.j2                  # CCM: SA, RBAC, Deployment       [install-time, Jinja]
-│   ├── 02-capa-crds.yaml                       # CAPI CRD definitions            [post-install]
-│   ├── 02-capa-controller.yaml                 # CAPA controller                 [post-install]
+│   │   # CAPA (CRDs + RBAC + controller + webhooks + metrics) now lives in the
+│   │   # provider repo's config/ kustomize SSOT — applied via `oc kustomize`.
 │   ├── 03-machineconfig-providerid-master.yaml # kubelet ProviderID (master)     [install-time]
 │   ├── 03-machineconfig-providerid-worker.yaml # kubelet ProviderID (worker)     [install-time]
 │   ├── 04-csi-driver-cr.yaml                   # CSI driver CR (applied by Phase 08)

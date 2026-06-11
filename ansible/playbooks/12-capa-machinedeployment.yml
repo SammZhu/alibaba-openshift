@@ -217,10 +217,11 @@
         oc -n capa-system rollout status deploy/capa-controller-manager --timeout=120s
       changed_when: false
 
-    - name: Ensure CRDs are current (v0.1.12 adds failureDomains/ignitionStorage/metadataOptions)
+    - name: Ensure CRDs are current (from the provider repo config/crd/bases SSOT)
       ansible.builtin.command:
         argv: [oc, "--kubeconfig", /root/kubeconfig, apply, --server-side=true,
-               --force-conflicts, -f, "{{ repo }}/custom_manifests/02-capa-crds.yaml"]
+               --force-conflicts, -f,
+               "{{ repo }}/../openshift-capi-alicloud/config/crd/bases/"]
       changed_when: true
 
     - name: Install CAPI core CRDs when missing

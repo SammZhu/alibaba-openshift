@@ -67,8 +67,9 @@ ssh -i ~/work/alibabacloud/sshkey/20231118_ed25519 root@$JUMP
 cd /root/openshift-alibaba/alibaba-openshift
 git pull origin main
 
-oc --kubeconfig=/root/kubeconfig apply -f custom_manifests/02-capa-crds.yaml
-oc --kubeconfig=/root/kubeconfig apply -f custom_manifests/02-capa-controller.yaml
+# CAPA (CRDs + RBAC + controller + webhooks) from the provider repo config/ SSOT
+oc kustomize ../openshift-capi-alicloud/config/default \
+  | oc --kubeconfig=/root/kubeconfig apply --server-side=true --force-conflicts -f -
 ```
 
 Verify:
@@ -318,15 +319,14 @@ applied.
 
 Rule: **after any Go struct change to a `*_types.go`, run `make generate` in
 openshift-capi-alicloud AND re-apply the CRDs here** before trusting status.
-The regenerated CRDs live in
-[`custom_manifests/02-capa-crds.yaml`](../custom_manifests/02-capa-crds.yaml)
-(commit `a59828e` carries the `status.controlPlaneEndpoint` schema).
+The regenerated CRDs live in the provider repo's
+`openshift-capi-alicloud/config/crd/bases/` (controller-gen output, the CRD SSOT).
 
 ```bash
 # Sanity-check the deployed CRD actually carries the field:
 oc get crd alibabacloudclusters.infrastructure.cluster.x-k8s.io -o json \
   | jq '.spec.versions[].schema.openAPIV3Schema.properties.status.properties.controlPlaneEndpoint'
-# null  → CRD is stale, re-apply 02-capa-crds.yaml
+# null  → CRD is stale, re-apply: oc apply -f ../openshift-capi-alicloud/config/crd/bases/
 # {...} → good
 ```
 

@@ -26,11 +26,13 @@ endpoint，而 Phase 07 结束时 kubeconfig 刚好被 scp 到跳板。
 部署在 `capa-system` namespace。08 的流程：
 
 ```
-1. oc apply -f ../../openshift-capi-alicloud/config/crd/bases/    # CRD（来自 sibling repo）
-2. sed image override < custom_manifests/02-capa-controller.yaml | oc apply -f -
+# 单一 kustomize SSOT：CRD + RBAC + controller + webhooks 全来自 sibling repo config/default
+oc kustomize ../openshift-capi-alicloud/config/default \
+  | sed image override \
+  | oc apply --server-side=true --force-conflicts -f -
 ```
 
-依赖 sibling 仓库 `openshift-capi-alicloud/` 提供 CRD 定义。镜像默认：
+依赖 sibling 仓库 `openshift-capi-alicloud/` 的 `config/`（CRD + 控制器 + RBAC + webhook 的单一来源）。镜像默认：
 `quay.io/samzhu/openshift-capi-alicloud:v0.1.0`（在 08 playbook 顶部的
 `capi_provider_img` 变量里）。
 

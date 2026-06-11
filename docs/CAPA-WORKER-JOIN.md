@@ -157,7 +157,7 @@ and the webhook, P3-CAPA.7, were validated live in the same run.)
 | `namespaces "capa-system" not found` applying webhooks | apply **controller before webhooks** (controller manifest creates the namespace). |
 | `no endpoints available for service "capa-webhook-service"` on first apply | `failurePolicy: Fail` + pod still rolling/cert-minting; wait for Service **endpoints** before applying `AlibabaCloud*`. |
 | controller pod hangs in `ContainerCreating` on a fresh tag | air-gapped IDMS is `pull-from-mirror = digest-only`; deploy by **digest**, not tag (P3-FIX.11). |
-| new spec fields (spot/disk/bootImageID) silently pruned | re-apply the regenerated `02-capa-crds.yaml` (structural-schema pruning). |
+| new spec fields (spot/disk/bootImageID) silently pruned | re-apply the regenerated CRDs from `openshift-capi-alicloud/config/crd/bases/` (structural-schema pruning). |
 | node never goes Ready | worker SG must allow egress to `api-int:22623` (MCS) + `:6443`; node CSRs need approving (no machine-api machine backs them). |
 | guestfish `no operating systems were found` | RHCOS is OSTree; edit `/boot` (BLS entries) directly via guestfish `mount`+`copy-out/upload`, not `virt-customize --run-command`. |
 

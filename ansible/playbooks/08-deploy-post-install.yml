@@ -27,7 +27,7 @@
           (Phase 03) first; Phase 08 deploys via the jump host.
 
     # The CAPA controller Deployment consumes AK/SK via `envFrom: secretRef:
-    # alibaba-creds` (see custom_manifests/02-capa-controller.yaml).  Read them
+    # alibaba-creds` (see openshift-capi-alicloud config/manager/deployment.yaml). Read them
     # from the operator's aliyun profile here so play 2 can create that secret —
     # without it the controller pod is stuck in CreateContainerConfigError.
     - name: Read Alibaba AK/SK from the operator's aliyun profile
@@ -130,19 +130,13 @@
           ansible.builtin.set_fact:
             capi_provider_img: "quay.io/samzhu/openshift-capi-alicloud@{{ (_capa_imginfo.stdout | from_json).digest }}"
 
-    # ── CAPI provider ──────────────────────────────────────────────────────
-    - name: Apply CAPI CRDs
-      ansible.builtin.command:
-        argv:
-          - oc
-          - --kubeconfig
-          - "{{ kubeconfig_file }}"
-          - apply
-          - -f
-          - "{{ jump_repo_root }}/openshift-capi-alicloud/config/crd/bases/"
-      register: capi_crd
-      changed_when: "'unchanged' not in capi_crd.stdout"
-
+    # ── CAPA provider (single kustomize SSOT: provider repo config/default) ──
+    # CRDs + RBAC + controller + admission webhooks all come from the provider
+    # repo's config/default kustomize base — the SAME source clusterctl
+    # (gen-clusterctl-components.sh) and the OLM bundle CRDs build from. They are
+    # rendered + applied together below, AFTER the namespace + creds secret +
+    # air-gap ITMS are in place (the Deployment's envFrom needs the secret, and the
+    # ITMS must precede the controller image pull).
     - name: Ensure capa-system namespace exists (before the creds secret)
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", create, namespace, capa-system]
@@ -201,34 +195,30 @@
       changed_when: "'unchanged' not in _itms_apply.stdout"
       when: mirror_private_ip | default('') | length > 0
 
-    - name: Render CAPA controller manifest with image override
+    - name: Render CAPA deployment set from config/ kustomize (image override)
+      # `oc kustomize` renders the provider repo's config/default SSOT (CRDs + RBAC
+      # + controller + webhooks). The controller image is the only thing overridden:
+      # sed swaps the placeholder TAG for {{ capi_provider_img }} (the mirror DIGEST
+      # on air-gapped clusters, see the digest-pin block above).
       ansible.builtin.shell: >
-        sed 's|image: quay.io/samzhu/openshift-capi-alicloud:.*|image: {{ capi_provider_img }}|'
-        '{{ jump_repo_root }}/alibaba-openshift/custom_manifests/02-capa-controller.yaml'
-      register: capi_rendered
+        oc kustomize '{{ jump_repo_root }}/openshift-capi-alicloud/config/default'
+        | sed 's|image: quay.io/samzhu/openshift-capi-alicloud:.*|image: {{ capi_provider_img }}|'
+      register: capa_rendered
       changed_when: false
 
-    - name: Apply CAPA controller
-      ansible.builtin.command:
-        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
-      args:
-        stdin: "{{ capi_rendered.stdout }}"
-      register: capi_apply
-      changed_when: "'unchanged' not in capi_apply.stdout"
-
-    - name: Apply CAPA admission webhooks (Service + webhook configs)
-      # The controller (v0.1.8+) runs a webhook server that needs a serving cert at
-      # /tmp/k8s-webhook-server/serving-certs/tls.crt. That cert is minted by the
-      # OpenShift service-ca operator into the capa-webhook-server-cert secret —
-      # but ONLY once this Service (carrying the service-ca annotation) exists.
-      # Without applying it the controller crash-loops "no such file ... tls.crt".
-      # (v0.1.2 had no webhook, which masked this gap on the default chain.)
+    - name: Apply CAPA deployment set (CRDs + RBAC + controller + webhooks)
+      # Server-side apply so the service-ca-injected webhook caBundle is not
+      # clobbered on re-apply (--force-conflicts resolves field ownership). The
+      # controller's webhook server reads its serving cert at
+      # /tmp/k8s-webhook-server/serving-certs/tls.crt, minted by service-ca once the
+      # webhook Service (in this set) exists.
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, --server-side=true,
-               --force-conflicts, -f,
-               "{{ jump_repo_root }}/alibaba-openshift/custom_manifests/02-capa-webhooks.yaml"]
-      register: capa_webhooks_apply
-      changed_when: "'unchanged' not in capa_webhooks_apply.stdout"
+               --force-conflicts, -f, "-"]
+      args:
+        stdin: "{{ capa_rendered.stdout }}"
+      register: capa_apply
+      changed_when: "'unchanged' not in capa_apply.stdout"
 
     # ── CAPA metrics (G11) ────────────────────────────────────────────────
     - name: Check for the Prometheus Operator ServiceMonitor CRD
@@ -239,13 +229,21 @@
       changed_when: false
       failed_when: false
 
+    - name: Render CAPA metrics overlay (config/metrics)
+      ansible.builtin.command:
+        argv: [oc, kustomize, "{{ jump_repo_root }}/openshift-capi-alicloud/config/metrics"]
+      register: capa_metrics_rendered
+      changed_when: false
+      when: _servicemonitor_crd.rc == 0
+
     - name: Apply CAPA metrics Service + ServiceMonitor
       # Wires the controller's :8080 metrics endpoint into OpenShift monitoring.
       # Guarded on the monitoring.coreos.com CRD (always present on OpenShift);
       # skipped on a cluster without the Prometheus Operator so the run stays green.
       ansible.builtin.command:
-        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f,
-               "{{ jump_repo_root }}/alibaba-openshift/custom_manifests/02-capa-metrics.yaml"]
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+      args:
+        stdin: "{{ capa_metrics_rendered.stdout }}"
       register: capa_metrics_apply
       changed_when: "'unchanged' not in capa_metrics_apply.stdout"
       when: _servicemonitor_crd.rc == 0
