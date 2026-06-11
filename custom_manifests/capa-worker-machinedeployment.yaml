@@ -94,8 +94,11 @@ spec:
       # http://100.100.100.200/latest/user-data with 403 Forbidden — the worker's
       # pointer Ignition never loads, boot drops to emergency mode, and the node
       # never joins. RHCOS Ignition on the aliyun platform fetches user-data
-      # without an IMDSv2 token, so workers MUST allow IMDSv1 (httpTokens=optional).
-      metadataOptions: {httpEndpoint: enabled, httpTokens: optional}
+      # without an IMDSv2 token, so workers MUST boot with IMDSv1
+      # (httpTokens=optional). httpTokensAfterBoot then has the controller flip the
+      # instance to IMDSv2 (required) once the node has joined (nodeRef) — Ignition
+      # is done by then, so the IMDSv1 window is closed without breaking boot (G14).
+      metadataOptions: {httpEndpoint: enabled, httpTokens: optional, httpTokensAfterBoot: required}
       tags:
         - {key: openshift-worker-pool, value: capa-multiaz}
 {% for z in worker_zones %}
