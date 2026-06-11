@@ -56,6 +56,11 @@
         groups: deploy
         capa_ak: "{{ _aksk.stdout.split(' ')[0] }}"
         capa_sk: "{{ _aksk.stdout.split(' ')[1] }}"
+        # Carry the mirror IP so play 2 can apply an ImageTagMirrorSet for the
+        # tag-pinned CAPA/CSI images (the install-config only emits an
+        # ImageDigestMirrorSet, which does NOT redirect tag pulls — see the ITMS
+        # task in play 2).
+        mirror_private_ip: "{{ mirror_private_ip | default('') }}"
       no_log: true
 
 - name: Deploy post-install components (executed on the jump host)
@@ -129,6 +134,44 @@
       register: _capa_secret
       changed_when: "'configured' in _capa_secret.stdout or 'created' in _capa_secret.stdout"
       no_log: true
+
+    # Air-gap: the install-config emits only an ImageDigestMirrorSet
+    # (imageDigestSources), which redirects pulls BY DIGEST. But our CAPA and CSI
+    # manifests pin images BY TAG (capa :{{ capa_image_tag }}, csi :v1.35.3), so a
+    # tag pull is NOT redirected and escapes to public quay.io — fine on nodes that
+    # already cached the image, but on any node a pod is rescheduled to (scale /
+    # rolling / drain / MHC remediation) the pull dials quay.io and times out
+    # (capa-controller-manager stuck ImagePullBackOff, HA degraded; observed
+    # 2026-06-11). Apply the companion ImageTagMirrorSet so tag pulls of these
+    # mirrored repos also resolve to the mirror. No-op on non-air-gapped clusters
+    # (mirror_private_ip empty). NOTE: like any IDMS/ITMS change, this is rendered
+    # into registries.conf by the MCO and triggers a rolling node config update.
+    - name: Apply ImageTagMirrorSet for tag-pinned CAPA/CSI mirror images
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+      args:
+        stdin: |
+          apiVersion: config.openshift.io/v1
+          kind: ImageTagMirrorSet
+          metadata:
+            name: samzhu-tag-mirror
+          spec:
+            imageTagMirrors:
+              - source: quay.io/samzhu/openshift-capi-alicloud
+                mirrors:
+                  - {{ mirror_private_ip }}:8443/samzhu/openshift-capi-alicloud
+              - source: quay.io/samzhu/alibaba-cloud-csi-operator
+                mirrors:
+                  - {{ mirror_private_ip }}:8443/samzhu/alibaba-cloud-csi-operator
+              - source: quay.io/samzhu/alibaba-cloud-csi-operator-bundle
+                mirrors:
+                  - {{ mirror_private_ip }}:8443/samzhu/alibaba-cloud-csi-operator-bundle
+              - source: quay.io/samzhu/alibaba-cloud-csi-operator-catalog
+                mirrors:
+                  - {{ mirror_private_ip }}:8443/samzhu/alibaba-cloud-csi-operator-catalog
+      register: _itms_apply
+      changed_when: "'unchanged' not in _itms_apply.stdout"
+      when: mirror_private_ip | default('') | length > 0
 
     - name: Render CAPA controller manifest with image override
       ansible.builtin.shell: >
