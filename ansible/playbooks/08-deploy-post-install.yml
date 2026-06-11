@@ -230,6 +230,26 @@
       register: capa_webhooks_apply
       changed_when: "'unchanged' not in capa_webhooks_apply.stdout"
 
+    # ── CAPA metrics (G11) ────────────────────────────────────────────────
+    - name: Check for the Prometheus Operator ServiceMonitor CRD
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", get, crd,
+               servicemonitors.monitoring.coreos.com]
+      register: _servicemonitor_crd
+      changed_when: false
+      failed_when: false
+
+    - name: Apply CAPA metrics Service + ServiceMonitor
+      # Wires the controller's :8080 metrics endpoint into OpenShift monitoring.
+      # Guarded on the monitoring.coreos.com CRD (always present on OpenShift);
+      # skipped on a cluster without the Prometheus Operator so the run stays green.
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f,
+               "{{ jump_repo_root }}/alibaba-openshift/custom_manifests/02-capa-metrics.yaml"]
+      register: capa_metrics_apply
+      changed_when: "'unchanged' not in capa_metrics_apply.stdout"
+      when: _servicemonitor_crd.rc == 0
+
     # ── CSI operator ──────────────────────────────────────────────────────
     - name: Set CSI operator image in kustomize
       ansible.builtin.command:

@@ -1,0 +1,53 @@
+# CAPA controller metrics (G11)
+# ---------------------------------------------------------------------------
+# The controller-manager serves Prometheus metrics on :8080
+# (--metrics-bind-address, see 02-capa-controller.yaml): controller-runtime
+# built-ins (reconcile totals/latency/errors, workqueue depth, client-go) plus
+# the provider's own capa_* metrics (cloud API requests/latency/throttling,
+# ECS instance create/adopt/delete/harden).
+#
+# This wires them into OpenShift monitoring:
+#   * a Service exposing the :8080 metrics port,
+#   * a ServiceMonitor so (user-workload) Prometheus scrapes it.
+#
+# Requires the Prometheus Operator CRDs (present on OpenShift) and, for the
+# ServiceMonitor to be scraped, user-workload monitoring enabled
+# (enableUserWorkload: true in the cluster-monitoring-config). On a cluster
+# without the monitoring.coreos.com CRDs, skip this file — metrics are still
+# served and reachable directly on the pod's :8080.
+#
+# Metrics are plain HTTP here (SecureServing is off in the manager). Scraping is
+# in-cluster only; the endpoint is not exposed outside the pod network.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: capa-controller-manager-metrics
+  namespace: capa-system
+  labels:
+    app: capa-controller-manager
+spec:
+  selector:
+    app: capa-controller-manager
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+      protocol: TCP
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: capa-controller-manager
+  namespace: capa-system
+  labels:
+    app: capa-controller-manager
+spec:
+  selector:
+    matchLabels:
+      app: capa-controller-manager
+  endpoints:
+    - port: metrics
+      scheme: http
+      path: /metrics
+      interval: 30s

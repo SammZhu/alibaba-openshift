@@ -200,6 +200,12 @@ spec:
             - name: webhook-server
               containerPort: 9443
               protocol: TCP
+            # Prometheus metrics (--metrics-bind-address :8080): controller-runtime
+            # built-ins + the provider's capa_* metrics. Scraped via the metrics
+            # Service + ServiceMonitor in 02-capa-metrics.yaml.
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
           volumeMounts:
             - name: cert
               mountPath: /tmp/k8s-webhook-server/serving-certs
