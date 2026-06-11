@@ -165,6 +165,11 @@ spec:
           #     --from-literal=ALIBABA_CLOUD_ACCESS_KEY_ID=$AK \
           #     --from-literal=ALIBABA_CLOUD_ACCESS_KEY_SECRET=$SK
           #
+          # To harden via RAM RoleArn (AssumeRole) instead of a service-scoped
+          # static key, add ALIBABA_CLOUD_ROLE_ARN (and optionally
+          # ALIBABA_CLOUD_ROLE_SESSION_NAME) to this same Secret — the base key
+          # then needs only sts:AssumeRole. See docs/RAM-POLICY.md.
+          #
           # optional=false → Pod won't start until the Secret exists,
           # making the missing-credential mode a hard failure instead
           # of a silent UnsupportedCredential reconcile loop.
