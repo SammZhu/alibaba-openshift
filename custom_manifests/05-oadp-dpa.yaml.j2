@@ -30,8 +30,13 @@ spec:
       defaultPlugins:
         - openshift   # handles OpenShift-specific resources (SCCs, routes, etc.)
         - aws         # Velero AWS plugin provides S3-compatible storage support
+        - kubevirt    # VM-aware backup/restore (VirtualMachine, DataVolume,
+                      # guest-agent freeze/thaw). Harmless if OpenShift
+                      # Virtualization is not installed — it simply finds no VMs.
       featureFlags:
-        - EnableCSI   # enable CSI snapshot integration (requires snapshot CRDs)
+        - EnableCSI   # enable CSI snapshot integration (requires snapshot CRDs);
+                      # combined with the disk VolumeSnapshotClass this lets VM
+                      # disk PVCs back up via CSI snapshot + data mover to OSS.
     nodeAgent:
       enable: true
       uploaderType: kopia  # kopia is preferred over restic for performance

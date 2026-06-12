@@ -1,7 +1,7 @@
 # Alibaba Cloud CSI Driver 集成设计
 
 **状态**：代码完成（env-free 全部实现，待集群 live 验证）
-**版本**：v0.6（OADP+OSS 备份链参数化 + 08 opt-in 接入 + 气隙包过滤镜像）
+**版本**：v0.7（OADP DPA 加 kubevirt 插件 + OKV 前置/能力矩阵/已知缺口章节 §5.5）
 **日期**：2026-06-12
 **阶段**：Phase 1 扩展（存储支持）
 
@@ -17,6 +17,7 @@
 | v0.4 | 2026-05-14 | 参考 AWS ROSA EBS CSI Operator 和 CDI StorageProfile 机制：新增 seLinuxMount、StorageProfile 主动 patch 策略、条件化 VolumeSnapshotClass、CDI 上游贡献计划、clone strategy 设计 |
 | v0.5 | 2026-06-12 | operator 代码已落地 v0.4 全部设计（seLinuxMount ✅、VolumeSnapshotClass ✅、StorageProfile patch ✅、NAS driver ✅）；新增 per-StorageClass `volumeMode` 字段（去掉 isBlock 硬编码，通用盘 Filesystem / VM 盘 Block 分离）；install CR(04-csi-driver-cr.yaml) 启用 snapshot + storageProfile + NAS。剩余仅集群 live 验证（#32-34 e2e）|
 | v0.6 | 2026-06-12 | OADP+OSS 备份链收口：05-oadp-dpa / 05-oadp-oss-credentials 改 `.j2` 由 `oadp_*` 变量参数化（bucket/region/internal-endpoint/prefix/AK-SK），08-deploy-post-install 加 opt-in 块（`oadp_enabled`，默认关；Secret 走 stdin 不落盘、`no_log`）；group_vars 加 OADP 段;气隙 build-mirror-tarball.sh 加 `OADP_MIRROR=true` 包过滤镜像（只拉 redhat-oadp-operator,非整 catalog）。剩 OSS bucket+RAM 用户实建 + live 备份/恢复验证 |
+| v0.7 | 2026-06-12 | OKV 适配收口：OADP DPA `defaultPlugins` 加 `kubevirt`（VM/DataVolume 感知备份恢复）；新增 §5.5「OKV 部署前置条件与能力支持矩阵」——明确**硬前置=worker 必须裸金属（KVM/`/dev/kvm`）**、KubeVirt 能力×CSI 支持矩阵、已知缺口（NAS 快照未实现→NAS 盘 VM 无快照、共享块 P3、零 live 验证）|
 
 ---
 
@@ -229,6 +230,46 @@ spec:
     - accessModes: [ReadWriteMany]
       volumeMode: Filesystem          # NAS 仅支持 Filesystem
 ```
+
+---
+
+## 5.5 OKV 部署前置条件与能力支持矩阵（重要）
+
+CSI 只是 OKV 的**存储底座**。要在阿里云真正跑起虚拟化场景，还有一个 CSI 之外的
+**硬前置**，以及几处 CSI 内部的能力边界，必须先看清。
+
+### 5.5.1 硬前置：节点必须能跑 KVM（裸金属）
+
+OpenShift Virtualization 要求 worker 节点暴露硬件虚拟化 `/dev/kvm`。**阿里云普通 ECS
+本身是虚拟机，默认不透传嵌套虚拟化** → OKV 要么起不来、要么落到软件模拟（OKV 默认禁止）。
+
+- **OKV worker 池基本必须是阿里云裸金属实例**（弹性裸金属/神龙，如 `ecs.ebmc*` / `ecs.ebmg*`
+  系列），CAPA 的 `AlibabaCloudMachineTemplate.spec.template.spec.instanceType` 要选裸金属规格。
+- 这与 CSI 正交，但**决定了能不能真跑 VM**；裸金属成本显著更高，需在容量规划里算上。
+- 其余正交前置：HCO / OpenShift Virtualization operator、CDI、VM 网络（multus/bridge）、
+  按需 hugepages / CPU manager。
+
+### 5.5.2 KubeVirt 能力 × 本 CSI 支持矩阵
+
+| KubeVirt 能力 | 存储要求 | 本 CSI 支持 | 说明 / 限制 |
+|---|---|---|---|
+| 安装部署 VM（CDI→DataVolume） | SC + CDI 识别 | disk ESSD **Block+RWO**（essd-block，virtDefault）+ StorageProfile patch | ✅ Block 给裸块设备、无 qcow2 双层开销，OS 盘最优 |
+| 克隆 VM | cloneStrategy | `csi-clone`（零拷贝） | ✅ disk |
+| VM 快照（VirtualMachineSnapshot） | CSI VolumeSnapshotClass | disk ✅；**NAS ✗ 未实现** | ⚠️ 仅 disk 盘 VM 可快照；NAS 盘 VM 不行；在线一致性需 guest-agent freeze |
+| **热迁移**（Live Migration） | VM 盘必须 **RWX** | disk RWO **✗ 不能热迁移**；**NAS 性能型 RWX+FS ✅** | ⚠️ 要热迁移的 VM 必须用 NAS 盘；NAS 是 qcow2-on-NFS，IOPS 低于块盘 |
+| 备份（OADP→OSS） | velero + VM 感知 | DPA：openshift+aws+**kubevirt** 插件、EnableCSI、kopia | ✅ 已加 kubevirt 插件（VM/DataVolume 感知、配合 guest-agent 冻结做应用一致） |
+| 恢复（Restore） | velero restore | 同上 | ✅ PVC/VM 资源恢复 |
+| 热插盘（hotplug） | attachRequired | disk `attachRequired=true` ✅ / NAS false | disk 支持热插 |
+
+### 5.5.3 已知缺口（待补）
+
+1. **NAS CSI 快照未实现** → 需热迁移（NAS 盘）的 VM 目前做不了 VolumeSnapshot/VM 快照。
+   补它要 operator 侧给 nasplugin 加 VolumeSnapshotClass，且阿里云 NAS 的 CSI 快照能力有限，
+   可能得退回 OADP 文件级备份。**待 operator 代码改动。**
+2. **共享块存储（RWX+Block）= 热迁移+块性能的理想解，但阿里云生态 P3 不成熟** → 现阶段热迁移
+   只能用 NAS（Filesystem），牺牲 IOPS。
+3. **全链路零 live 验证** → #32-34 e2e + 真起 OKV VM + 热迁移 + VM 快照 + OADP 备份恢复，
+   全在「待重装集群」backlog。代码/设计就绪 ≠ 实测通过。
 
 ---
 
