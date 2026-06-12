@@ -1,7 +1,7 @@
 # Alibaba Cloud CSI Driver 集成设计
 
 **状态**：代码完成（env-free 全部实现，待集群 live 验证）
-**版本**：v0.11（🔴 补气隙 CSI driver 镜像引入 —— 之前只 mirror 了 operator,driver 本体+6 sidecar 全缺,气隙会 ImagePullBackOff）
+**版本**：v0.12（operator-native NAS filesystem 模式供给落 main,随 v0.1.1 发版生效;补气隙 CSI driver 镜像引入 v0.11）
 **日期**：2026-06-12
 **阶段**：Phase 1 扩展（存储支持）
 
@@ -20,6 +20,7 @@
 | v0.7 | 2026-06-12 | OKV 适配收口：OADP DPA `defaultPlugins` 加 `kubevirt`（VM/DataVolume 感知备份恢复）；新增 §5.5「OKV 部署前置条件与能力支持矩阵」——明确**硬前置=worker 必须裸金属（KVM/`/dev/kvm`）**、KubeVirt 能力×CSI 支持矩阵、已知缺口（NAS 快照未实现→NAS 盘 VM 无快照、共享块 P3、零 live 验证）|
 | v0.8 | 2026-06-12 | 核实 NAS 快照：kubernetes-sigs alibaba-cloud-csi-driver 的 NAS controller `ControllerGetCapabilities` 只有 `CREATE_DELETE_VOLUME`+`EXPAND_VOLUME`，**上游不支持 CSI 快照**（非本项目 TODO）。把 §5.5.3「待补」改为「已查清+对策」：NAS 盘走 OADP kopia 文件级备份；operator 删除误导性 `defaultNASSnapClassName` 死代码 + 在 `ensureNASDriver`/常量处注释固化原因。operator build/vet/test 绿（待发版） |
 | v0.9 | 2026-06-12 | **live 层机制落地**：新增 `13-csi-smoke.yml`(site-post 可选钩子)真建真删 disk(RWO FS + Block)/VolumeSnapshot+restore/NAS RWX，出 PASS/FAIL 报告 + always 清理 + §5.6 测试金字塔。**核实发现 NAS SC 缺口**(§5.5.3 缺口2):operator NAS SC 没 `volumeAs`→默认 subpath 需预建 server→动态供给 Pending;动态创建要 filesystem 模式参数(volumeAs/vpc/vsw/zone,集群相关)。故 live smoke 里 disk 三项硬断言、NAS 软检查。NAS SC 参数化为 operator 后续 fix |
+| v0.12 | 2026-06-12 | **operator-native NAS filesystem 模式供给**(operator `27ff312`,落 main 随 v0.1.1 生效):`NASStorageClassSpec` 加 `VolumeAs`(filesystem默认/subpath)+ filesystem 网络字段(FileSystemType/RegionID/ZoneID/VpcID/VSwitchID)+ subpath 的 Server;`nasStorageClassParameters()` 按模式出参、缺字段 log 警告;CRD/bundle 重生成 + 双模式单测。**VERSION/newTag 没动(还 v0.1.0)**——否则在跑集群拉不存在镜像。ansible workaround(08 direct-apply SC)仍是 v0.1.0 活跃路径;v0.1.1 发版+mirror 重建后再切 CR-carried 网络参数 + 翻硬 smoke。§5.5.3 缺口2 |
 | v0.11 | 2026-06-12 | **🔴 补气隙 CSI driver 镜像引入(关键,否则气隙 CSI 全挂)**：之前 mirror 只引入 operator/bundle/catalog(quay.io/samzhu/*),但 operator 实际部署的 **driver 本体 + 6 sidecar**(`registry.cn-hangzhou.aliyuncs.com/acs/{csi-plugin:v1.35.3,csi-provisioner,csi-attacher,csi-resizer,csi-snapshotter,csi-node-driver-registrar,livenessprobe}`,tag 硬编码在 operator 二进制)**三处都没引入** → 气隙集群 driver pod ImagePullBackOff、零 PVC 供给。照 CCM 模式补:① build-mirror-tarball 加 7 个 additionalImages(非致命);② 04-prepare-mirror 加非致命预拉(mirror ECS 直接从阿里云 ACR 拉,复用现有 mirror 也能补,拉不到不中断 site);③ 08 ITMS 加 `registry.cn-hangzhou.aliyuncs.com/acs`→mirror 重定向。三者路径一致(mirror `acs/` namespace) |
 | v0.10 | 2026-06-12 | **NAS 动态供给解掉(不发 operator 新版)**:install CR `nas.storageClasses` 置空(operator 仍部署 NAS driver、不建 SC);**08 直接 apply filesystem 模式 NAS SC**,网络参数(`volumeAs=filesystem`/`vpcId`/`vSwitchId`/`zoneId`/`regionId`/`fileSystemType=standard`/`storageType=Performance`)从 state.yml 的 mirror_vpc_id/mirror_private_vsw_1/mirror_zone_id 填(08 play1 已 load_state,经 add_host 传给 play2)。任务门控网络 var 非空→缺则跳过不破坏 deploy。这样**明天 site 即可 live 验 NAS**(NAS driver v1.35.3 镜像早已 mirror,只多一个 SC 对象)。operator-native 版(网络从 CR 传)仍单独追踪 |
 
@@ -289,8 +290,14 @@ OpenShift Virtualization 要求 worker 节点暴露硬件虚拟化 `/dev/kvm`。
      (operator 仍部署 NAS driver,但不建 SC);**08-deploy-post-install 直接 apply 一个 filesystem
      模式 NAS SC**,网络参数从 `state.yml` 的 `mirror_vpc_id`/`mirror_private_vsw_1`/
      `mirror_zone_id`(CAPA worker 用的同一套)填。任务门控网络 var 非空 → 缺则跳过、deploy 不报错。
-   - **operator-native 版(让 operator 自己建,网络从 CR 传)**仍是更干净的终态,单独追踪
-     (NASStorageClassSpec 加字段)。届时 CR 改回带 storageClasses、08 不再代管。
+   - **operator-native 版已写好,落 main(operator `27ff312`),随 v0.1.1 发版生效**:
+     `NASStorageClassSpec` 加 `VolumeAs`(filesystem|subpath,默认 filesystem)+ filesystem 模式的
+     `FileSystemType`/`RegionID`/`ZoneID`/`VpcID`/`VSwitchID` + subpath 的 `Server`;
+     `nasStorageClassParameters()` 按模式出参,缺集群网络字段时 log 警告(SC 仍建但 PVC 会 Pending)。
+     CRD/bundle 重生成 + 双模式单测。**注:operator VERSION/newTag 仍 v0.1.0 没动**——08 用
+     `kustomize config/default` 的 newTag 部署 operator,若 bump 成 v0.1.1 会让在跑集群拉不存在的镜像。
+     **转换(等 v0.1.1 发版 + mirror 重建后)**:CR 改回带 `nas.storageClasses`(网络参数模板化从 state 填)、
+     删 08 的 direct-apply、smoke 的 NAS 软检查翻硬。在此之前 ansible-侧 workaround 是活跃路径。
 3. **共享块存储（RWX+Block）= 热迁移+块性能的理想解，但阿里云生态 P3 不成熟** → 现阶段热迁移
    只能用 NAS（Filesystem），牺牲 IOPS。
 4. **OKV VM 全链路零 live 验证** → 真起 OKV VM(裸金属)+ 热迁移 + （disk）VM 快照 + OADP 备份恢复,
