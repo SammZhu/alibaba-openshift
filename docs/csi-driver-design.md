@@ -1,7 +1,7 @@
 # Alibaba Cloud CSI Driver 集成设计
 
 **状态**：代码完成（env-free 全部实现，待集群 live 验证）
-**版本**：v0.10（NAS 动态供给用 ansible 侧解掉：CR storageClasses 置空 + 08 直接建 filesystem 模式 SC）
+**版本**：v0.11（🔴 补气隙 CSI driver 镜像引入 —— 之前只 mirror 了 operator,driver 本体+6 sidecar 全缺,气隙会 ImagePullBackOff）
 **日期**：2026-06-12
 **阶段**：Phase 1 扩展（存储支持）
 
@@ -20,6 +20,7 @@
 | v0.7 | 2026-06-12 | OKV 适配收口：OADP DPA `defaultPlugins` 加 `kubevirt`（VM/DataVolume 感知备份恢复）；新增 §5.5「OKV 部署前置条件与能力支持矩阵」——明确**硬前置=worker 必须裸金属（KVM/`/dev/kvm`）**、KubeVirt 能力×CSI 支持矩阵、已知缺口（NAS 快照未实现→NAS 盘 VM 无快照、共享块 P3、零 live 验证）|
 | v0.8 | 2026-06-12 | 核实 NAS 快照：kubernetes-sigs alibaba-cloud-csi-driver 的 NAS controller `ControllerGetCapabilities` 只有 `CREATE_DELETE_VOLUME`+`EXPAND_VOLUME`，**上游不支持 CSI 快照**（非本项目 TODO）。把 §5.5.3「待补」改为「已查清+对策」：NAS 盘走 OADP kopia 文件级备份；operator 删除误导性 `defaultNASSnapClassName` 死代码 + 在 `ensureNASDriver`/常量处注释固化原因。operator build/vet/test 绿（待发版） |
 | v0.9 | 2026-06-12 | **live 层机制落地**：新增 `13-csi-smoke.yml`(site-post 可选钩子)真建真删 disk(RWO FS + Block)/VolumeSnapshot+restore/NAS RWX，出 PASS/FAIL 报告 + always 清理 + §5.6 测试金字塔。**核实发现 NAS SC 缺口**(§5.5.3 缺口2):operator NAS SC 没 `volumeAs`→默认 subpath 需预建 server→动态供给 Pending;动态创建要 filesystem 模式参数(volumeAs/vpc/vsw/zone,集群相关)。故 live smoke 里 disk 三项硬断言、NAS 软检查。NAS SC 参数化为 operator 后续 fix |
+| v0.11 | 2026-06-12 | **🔴 补气隙 CSI driver 镜像引入(关键,否则气隙 CSI 全挂)**：之前 mirror 只引入 operator/bundle/catalog(quay.io/samzhu/*),但 operator 实际部署的 **driver 本体 + 6 sidecar**(`registry.cn-hangzhou.aliyuncs.com/acs/{csi-plugin:v1.35.3,csi-provisioner,csi-attacher,csi-resizer,csi-snapshotter,csi-node-driver-registrar,livenessprobe}`,tag 硬编码在 operator 二进制)**三处都没引入** → 气隙集群 driver pod ImagePullBackOff、零 PVC 供给。照 CCM 模式补:① build-mirror-tarball 加 7 个 additionalImages(非致命);② 04-prepare-mirror 加非致命预拉(mirror ECS 直接从阿里云 ACR 拉,复用现有 mirror 也能补,拉不到不中断 site);③ 08 ITMS 加 `registry.cn-hangzhou.aliyuncs.com/acs`→mirror 重定向。三者路径一致(mirror `acs/` namespace) |
 | v0.10 | 2026-06-12 | **NAS 动态供给解掉(不发 operator 新版)**:install CR `nas.storageClasses` 置空(operator 仍部署 NAS driver、不建 SC);**08 直接 apply filesystem 模式 NAS SC**,网络参数(`volumeAs=filesystem`/`vpcId`/`vSwitchId`/`zoneId`/`regionId`/`fileSystemType=standard`/`storageType=Performance`)从 state.yml 的 mirror_vpc_id/mirror_private_vsw_1/mirror_zone_id 填(08 play1 已 load_state,经 add_host 传给 play2)。任务门控网络 var 非空→缺则跳过不破坏 deploy。这样**明天 site 即可 live 验 NAS**(NAS driver v1.35.3 镜像早已 mirror,只多一个 SC 对象)。operator-native 版(网络从 CR 传)仍单独追踪 |
 
 ---

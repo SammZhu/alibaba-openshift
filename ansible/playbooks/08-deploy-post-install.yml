@@ -196,6 +196,13 @@
               - source: quay.io/samzhu/alibaba-cloud-csi-operator-catalog
                 mirrors:
                   - {{ mirror_private_ip }}:8443/samzhu/alibaba-cloud-csi-operator-catalog
+              # CSI driver + 6 sidecars: the operator pulls these by tag from the
+              # Aliyun ACR (tags hardcoded in the operator binary). Redirect the
+              # whole acs/ namespace to the mirror so the driver Pods don't try to
+              # reach the public registry (no egress in air-gap).
+              - source: registry.cn-hangzhou.aliyuncs.com/acs
+                mirrors:
+                  - {{ mirror_private_ip }}:8443/acs
       register: _itms_apply
       changed_when: "'unchanged' not in _itms_apply.stdout"
       when: mirror_private_ip | default('') | length > 0

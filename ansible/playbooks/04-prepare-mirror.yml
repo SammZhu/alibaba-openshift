@@ -1063,6 +1063,54 @@
       when: "'MISSING' in _capa_on_mirror.stdout"
       changed_when: true
 
+    # ── CSI DRIVER + sidecar images (Aliyun ACR, pulled direct on mirror) ──────
+    # The CSI operator's controller/node pods run the upstream driver + 6 sidecars
+    # from registry.cn-hangzhou.aliyuncs.com/acs/* — these tags are HARDCODED in the
+    # operator binary (internal/controller constants), so the cluster pulls them by
+    # tag and they MUST be on the mirror or the driver Pods hit ImagePullBackOff and
+    # NO PVC ever provisions. Same Aliyun-ACR direct-pull pattern as the CCM task
+    # above (mirror ECS reaches Aliyun ACR over the backbone; podman pull→tag→push).
+    # build-mirror-tarball.sh also pins these as additionalImages for fresh tarballs;
+    # this recovers older mirrors / snapshots. NON-FATAL (failed_when: false): a CSI
+    # mirror miss must NOT abort the cluster install — it surfaces later at 08/smoke.
+    - name: Define CSI driver + sidecar images (tags hardcoded in the operator)
+      ansible.builtin.set_fact:
+        _csi_driver_images:
+          - { repo: acs/csi-plugin,                 tag: v1.35.3 }
+          - { repo: acs/csi-provisioner,            tag: v3.5.0 }
+          - { repo: acs/csi-attacher,               tag: v4.3.0 }
+          - { repo: acs/csi-resizer,                tag: v1.8.0 }
+          - { repo: acs/csi-snapshotter,            tag: v6.3.0 }
+          - { repo: acs/csi-node-driver-registrar,  tag: v2.8.0 }
+          - { repo: acs/livenessprobe,              tag: v2.10.0 }
+
+    - name: Ensure CSI driver + sidecar images are on mirror (pull from Aliyun ACR if missing)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euo pipefail
+        export HOME=/root
+        REG={{ mirror_private_ip }}:8443
+        REPO={{ item.repo }}
+        TAG={{ item.tag }}
+        TOKEN=$(curl -ks -u "$(jq -r .auths[].auth /root/.docker/config.json | base64 -d)" \
+          "https://$REG/v2/auth?service=$REG&scope=repository:$REPO:pull" | jq -r .token)
+        if curl -ksf -H "Authorization: Bearer $TOKEN" "https://$REG/v2/$REPO/manifests/$TAG" > /dev/null; then
+          echo "PRESENT $REPO:$TAG"; exit 0
+        fi
+        echo "MISSING $REPO:$TAG — pulling from registry.cn-hangzhou.aliyuncs.com"
+        podman pull "registry.cn-hangzhou.aliyuncs.com/$REPO:$TAG"
+        podman tag  "registry.cn-hangzhou.aliyuncs.com/$REPO:$TAG" "$REG/$REPO:$TAG"
+        podman push --tls-verify=false "$REG/$REPO:$TAG"
+        echo "✓ $REG/$REPO:$TAG now on mirror"
+        REMOTE
+      loop: "{{ _csi_driver_images }}"
+      loop_control:
+        label: "{{ item.repo }}:{{ item.tag }}"
+      register: _csi_driver_pull
+      changed_when: "'now on mirror' in (_csi_driver_pull.stdout | default(''))"
+      failed_when: false
+      when: mirror_private_ip | default('') | length > 0
+
     # ── CSI Operator (OLM bundle 3 images): same belt-and-suspenders pattern ──
     # custom_manifests/04-csi-{catalogsource,subscription}.yaml reference
     # three OLM images.  All three must be on the mirror for OLM to install

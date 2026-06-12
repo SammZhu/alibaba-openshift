@@ -316,6 +316,38 @@ _pin_quay_public_image ALIBABA_CSI_BUNDLE_IMAGE \
 _pin_quay_public_image ALIBABA_CSI_CATALOG_IMAGE \
   "quay.io/samzhu/alibaba-cloud-csi-operator-catalog:${CSI_OPERATOR_VERSION}"  "2f/8"
 
+# CSI DRIVER + 6 sidecars (Aliyun ACR). The operator's controller/node Pods pull
+# these from registry.cn-hangzhou.aliyuncs.com/acs/* — tags are HARDCODED in the
+# operator binary, so the cluster pulls by tag and they MUST be on the mirror or
+# the driver Pods ImagePullBackOff and no PVC ever provisions. Digest-pin + tag-
+# alias like the CCM image so the tag form resolves on the mirror; 08 applies an
+# ITMS redirecting acs/* to the mirror. NON-FATAL: if the build host can't reach
+# Aliyun ACR (cross-border), skip — 04-prepare-mirror pulls them on the mirror ECS
+# (in-region) as the reliable backstop. Keep these tags in sync with the operator
+# constants (internal/controller/alibabacloudcsidriver_controller.go).
+CSI_DRIVER_REGISTRY="${CSI_DRIVER_REGISTRY:-registry.cn-hangzhou.aliyuncs.com}"
+for _csi_img in \
+  acs/csi-plugin:v1.35.3 \
+  acs/csi-provisioner:v3.5.0 \
+  acs/csi-attacher:v4.3.0 \
+  acs/csi-resizer:v1.8.0 \
+  acs/csi-snapshotter:v6.3.0 \
+  acs/csi-node-driver-registrar:v2.8.0 \
+  acs/livenessprobe:v2.10.0 ; do
+  _cd_repo="${_csi_img%:*}"   # acs/csi-plugin  (mirror namespace, registry stripped)
+  _cd_tag="${_csi_img##*:}"   # v1.35.3
+  _cd_ref="${CSI_DRIVER_REGISTRY}/${_csi_img}"
+  echo "[2g/8] Pinning CSI driver image: $_cd_ref"
+  _cd_digest=$(skopeo inspect --no-tags "docker://$_cd_ref" 2>/dev/null | jq -r .Digest)
+  if [[ -z "$_cd_digest" || "$_cd_digest" == "null" ]]; then
+    echo "    WARN: skopeo inspect failed for $_cd_ref — skipping (04 pulls it on the mirror ECS)." >&2
+    continue
+  fi
+  echo "    - name: ${_cd_ref%:*}@${_cd_digest}" >> imageset-config.yaml
+  printf '%s\t%s\t%s\n' "$_cd_repo" "$_cd_tag" "$_cd_digest" >> "$TAG_MAPPING"
+  echo "    → pinned ${_cd_tag} → ${_cd_digest}"
+done
+
 # Optional: mirror operator catalogs (post-install OperatorHub) for offline install.
 #   OPERATOR_CATALOGS=redhat-operators,certified-operators (comma-separated) →
 #     mirror the FULL catalog(s) — ~10-50 GB each, big.
