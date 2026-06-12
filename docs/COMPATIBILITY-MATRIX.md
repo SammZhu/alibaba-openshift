@@ -26,7 +26,7 @@ cluster (Route B worker join, v2.8 — `node/iz0jlbqw… Ready worker v1.33.11`)
 | **Kubernetes** (derived) | **1.33** (`OCP 4.N → k8s 1.(N+13)`); workers seen as `v1.33.11` | follows OCP |
 | **RHCOS** | **9.6** (aliyun boot image, self-baked — Phase 10) | `10-prepare-worker-bootimage.yml` |
 | **CAPI core** | **v1.12.7** | `11-capa-routeb-join.yml` / `09-capa-smoke.yml` → `capi_core_version` |
-| **CAPA** (this project) | image **v0.1.12** (HEAD `82e0af8`); built against cluster-api lib `v1.12.7`, controller-runtime `v0.22.5`, client-go **1.34** (`k8s.io/* → v0.34.3` via go.mod replace) | `openshift-capi-alicloud` `go.mod`; deployed by `02-capa-controller.yaml` |
+| **CAPA** (this project) | image **v0.1.22** (current; tag SSOT = `ansible/vars/images.yml`); built against cluster-api lib `v1.12.7`, controller-runtime `v0.22.5`, client-go **1.34** (`k8s.io/* → v0.34.3` via go.mod replace) | `openshift-capi-alicloud` `go.mod`; deployed from the `config/` kustomize SSOT (`oc kustomize config/default`) |
 | **CCM** | **v2.14.0** (`…/acs/cloud-controller-manager:v2.14.0`) | `custom_manifests/01-alibaba-ccm.yaml.j2` |
 | **CSI** | **v1.35.3** (alibaba-cloud-csi-operator) | `04-csi-*.yaml`, `08-deploy-post-install.yml`, `04-prepare-mirror.yml` |
 

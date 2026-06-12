@@ -5,6 +5,7 @@ Installing OpenShift Container Platform on Alibaba Cloud using the **External Pl
 Supports two installation methods via the same ROS template — choose `InstallationMethod` when creating the stack.
 
 > **👉 想直接动手？**
+> - **📚 全部文档索引**：[`docs/README.md`](docs/README.md) —— 按主题分组的所有参考文档导航
 > - **全自动（推荐）**：[`ansible/README.md`](ansible/README.md) —— 一条命令端到端，~90 分钟
 > - **简要 split-flow 入口**：[`QUICKSTART.md`](QUICKSTART.md) —— 一页内跑通 + 故障排查链接
 > - **LEGACY 单栈 / 手动控制台流程**：[`QUICKSTART-LEGACY.md`](QUICKSTART-LEGACY.md) —— 不跑 Ansible 时用
