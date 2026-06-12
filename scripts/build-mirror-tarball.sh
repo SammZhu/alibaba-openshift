@@ -303,12 +303,18 @@ _pin_quay_public_image() {
   echo "    → pinned ${tag} → ${digest}"
 }
 
+# CSI operator release version — operator/bundle/catalog images all share it.
+# SSOT is ansible/vars/images.yml csi_operator_image_tag (auto-bumped by the
+# csi-operator CI). This script can't read ansible vars, so keep this in sync
+# (or override via CSI_OPERATOR_VERSION). NOT the upstream csi-driver imageTag
+# (v1.35.3), which ships inside the operator image.
+CSI_OPERATOR_VERSION="${CSI_OPERATOR_VERSION:-v0.1.0}"
 _pin_quay_public_image ALIBABA_CSI_OPERATOR_IMAGE \
-  "quay.io/samzhu/alibaba-cloud-csi-operator:v1.35.3"          "2d/8"
+  "quay.io/samzhu/alibaba-cloud-csi-operator:${CSI_OPERATOR_VERSION}"          "2d/8"
 _pin_quay_public_image ALIBABA_CSI_BUNDLE_IMAGE \
-  "quay.io/samzhu/alibaba-cloud-csi-operator-bundle:v1.35.3"   "2e/8"
+  "quay.io/samzhu/alibaba-cloud-csi-operator-bundle:${CSI_OPERATOR_VERSION}"   "2e/8"
 _pin_quay_public_image ALIBABA_CSI_CATALOG_IMAGE \
-  "quay.io/samzhu/alibaba-cloud-csi-operator-catalog:v1.35.3"  "2f/8"
+  "quay.io/samzhu/alibaba-cloud-csi-operator-catalog:${CSI_OPERATOR_VERSION}"  "2f/8"
 
 # Optional: mirror operator catalogs (post-install OperatorHub) so installing
 # any operator from those catalogs also works fully offline.

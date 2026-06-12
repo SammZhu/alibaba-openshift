@@ -9,9 +9,11 @@ metadata:
   namespace: openshift-marketplace
 spec:
   sourceType: grpc
-  # Pin to an explicit version for reproducibility. Bump alongside the
-  # operator image in 04-csi-subscription.yaml when releasing a new version.
-  image: quay.io/samzhu/alibaba-cloud-csi-operator-catalog:v1.35.3
+  # Pin to the operator release version (the catalog image shares the operator's
+  # semver; SSOT is ansible/vars/images.yml csi_operator_image_tag). NOTE: the
+  # primary deploy path is 08 `kustomize build .../config/default` (direct
+  # manifests); this CatalogSource/Subscription pair is the alternate OLM path.
+  image: quay.io/samzhu/alibaba-cloud-csi-operator-catalog:v0.1.0
   displayName: Alibaba Cloud CSI Operator
   publisher: SammZhu
   updateStrategy:

@@ -1073,12 +1073,16 @@
     # CAPA pattern.  Each task is conditional on `MISSING` in the per-image
     # `_csi_on_mirror.results` register.  Looping cuts ~36 lines (3×12) of
     # copy-paste down to ~24 lines total.
+    # Operator/bundle/catalog all share the operator release tag
+    # (csi_operator_image_tag, SSOT in vars/images.yml, auto-bumped by csi-operator
+    # CI). NOT the upstream csi-driver imageTag (v1.35.3) — that ships inside the
+    # operator image and is mirrored separately by the driver image pre-pull.
     - name: Define CSI image list for pre-pull
       ansible.builtin.set_fact:
         _csi_images:
-          - { repo: samzhu/alibaba-cloud-csi-operator,         tag: v1.35.3, tarname: csi-operator-v1.35.3 }
-          - { repo: samzhu/alibaba-cloud-csi-operator-bundle,  tag: v1.35.3, tarname: csi-bundle-v1.35.3 }
-          - { repo: samzhu/alibaba-cloud-csi-operator-catalog, tag: v1.35.3, tarname: csi-catalog-v1.35.3 }
+          - { repo: samzhu/alibaba-cloud-csi-operator,         tag: "{{ csi_operator_image_tag }}", tarname: "csi-operator-{{ csi_operator_image_tag }}" }
+          - { repo: samzhu/alibaba-cloud-csi-operator-bundle,  tag: "{{ csi_operator_image_tag }}", tarname: "csi-bundle-{{ csi_operator_image_tag }}" }
+          - { repo: samzhu/alibaba-cloud-csi-operator-catalog, tag: "{{ csi_operator_image_tag }}", tarname: "csi-catalog-{{ csi_operator_image_tag }}" }
 
     - name: Check whether each CSI image is already on mirror
       ansible.builtin.shell: |

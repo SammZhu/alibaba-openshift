@@ -13,3 +13,15 @@
 capa_image_repo: "quay.io/samzhu/openshift-capi-alicloud"
 capa_image_tag: "v0.1.22"
 capa_image: "{{ capa_image_repo }}:{{ capa_image_tag }}"
+
+# CSI operator release version (the operator's OWN semver, independent of the
+# bundled upstream csi-driver imageTag which stays v1.35.3 in the CR/operator).
+# Auto-bumped by the alibaba-cloud-csi-operator CI sync-deploy-tag job on a v* tag
+# (same mechanism as capa_image_tag). Drives the air-gap mirror pre-pull list in
+# 04-prepare-mirror.yml — the operator, bundle and catalog images all share this tag.
+# The deploy itself (08 `kustomize build .../config/default`) reads the tag from the
+# operator repo's config/manager/kustomization.yaml, bumped in the same release.
+# Keep in sync (outside ansible var loading, can't read this):
+#   - scripts/build-mirror-tarball.sh   CSI image tags
+csi_operator_image_repo: "quay.io/samzhu/alibaba-cloud-csi-operator"
+csi_operator_image_tag: "v0.1.0"
