@@ -171,10 +171,14 @@ deploy_oadp() {
       || die "OADP CRD never became Established"
   fi
 
-  warn "Edit 05-oadp-oss-credentials.yaml with your OSS AK/SK before applying it"
-  warn "Then run:"
-  warn "  $OC apply -f ${MANIFEST_DIR}/05-oadp-oss-credentials.yaml"
-  warn "  $OC apply -f ${MANIFEST_DIR}/05-oadp-dpa.yaml"
+  # The credentials Secret and DataProtectionApplication are now ansible
+  # templates (05-oadp-oss-credentials.yaml.j2 / 05-oadp-dpa.yaml.j2), rendered
+  # from oadp_* vars. This shell path only installs the operator; finish the
+  # backup wiring via the ansible flow.
+  warn "OADP operator installed. To finish the backup wiring (Secret + DPA):"
+  warn "  set oadp_enabled: true + oadp_oss_bucket / oadp_oss_access_key_id / _secret"
+  warn "  in group_vars/all.yml, then run: ansible-playbook playbooks/08-deploy-post-install.yml"
+  warn "  (the .yaml.j2 templates render the OSS bucket/region/endpoint + AK/SK)"
 }
 
 # ── 5. Post-deploy summary ────────────────────────────────────────────────────

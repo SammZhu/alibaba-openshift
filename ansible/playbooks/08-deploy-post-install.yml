@@ -293,15 +293,90 @@
       register: csi_cr
       changed_when: "'unchanged' not in csi_cr.stdout"
 
+    # ── OADP / OSS backup (optional, opt-in via oadp_enabled) ─────────────────
+    # Deploys the OADP operator (OLM Subscription from redhat-operators), then —
+    # only if backup credentials are supplied — the cloud-credentials Secret and
+    # the DataProtectionApplication (both rendered from oadp_* vars via stdin, so
+    # the AK/SK never lands on disk). Air-gap: the redhat-oadp-operator package
+    # must already be in the private mirror (build-mirror-tarball.sh OADP_MIRROR=true).
+    - name: Apply OADP operator Subscription
+      ansible.builtin.command:
+        argv:
+          - oc
+          - --kubeconfig
+          - "{{ kubeconfig_file }}"
+          - apply
+          - -f
+          - "{{ jump_repo_root }}/alibaba-openshift/custom_manifests/05-oadp-subscription.yaml"
+      register: oadp_sub
+      changed_when: "'unchanged' not in oadp_sub.stdout"
+      when: oadp_enabled | default(false) | bool
+
+    - name: Wait for DataProtectionApplication CRD Established
+      ansible.builtin.command:
+        argv:
+          - oc
+          - --kubeconfig
+          - "{{ kubeconfig_file }}"
+          - wait
+          - --for=condition=Established
+          - --timeout=300s
+          - crd/dataprotectionapplications.oadp.openshift.io
+      register: oadp_crd_wait
+      retries: 10
+      delay: 15
+      until: oadp_crd_wait.rc == 0
+      changed_when: false
+      when: oadp_enabled | default(false) | bool
+
+    - name: Apply OADP OSS credentials Secret (rendered via stdin, never on disk)
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+      args:
+        stdin: "{{ lookup('template', jump_repo_root + '/alibaba-openshift/custom_manifests/05-oadp-oss-credentials.yaml.j2') }}"
+      register: oadp_creds
+      changed_when: "'unchanged' not in oadp_creds.stdout"
+      no_log: true
+      when:
+        - oadp_enabled | default(false) | bool
+        - oadp_oss_access_key_id | default('') | length > 0
+
+    - name: Apply DataProtectionApplication (rendered from oadp_* vars)
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+      args:
+        stdin: "{{ lookup('template', jump_repo_root + '/alibaba-openshift/custom_manifests/05-oadp-dpa.yaml.j2') }}"
+      register: oadp_dpa
+      changed_when: "'unchanged' not in oadp_dpa.stdout"
+      when:
+        - oadp_enabled | default(false) | bool
+        - oadp_oss_access_key_id | default('') | length > 0
+
+    - name: OADP operator deployed without backup credentials (subscription only)
+      ansible.builtin.debug:
+        msg: >
+          OADP operator installed but oadp_oss_access_key_id is empty — skipped the
+          cloud-credentials Secret and DataProtectionApplication. Set
+          oadp_oss_access_key_id / _secret (dedicated backup RAM user) and re-run
+          08 to finish the backup wiring.
+      when:
+        - oadp_enabled | default(false) | bool
+        - oadp_oss_access_key_id | default('') | length == 0
+
     - name: Phase 08 done
       ansible.builtin.debug:
         msg: |
           ✓ CAPI provider, CSI operator, CSI driver CR all applied
             (driven from operator → executed on jump host {{ ansible_host }}).
 
+          {% if oadp_enabled | default(false) | bool %}✓ OADP operator applied{% if oadp_oss_access_key_id | default('') | length > 0 %} + cloud-credentials + DataProtectionApplication (OSS backup → {{ oadp_oss_bucket }}){% else %} (subscription only — set oadp_oss_access_key_id to finish){% endif %}
+          {% endif %}
           Verify on the jump host:
             ssh root@{{ ansible_host }}
             oc --kubeconfig=/root/kubeconfig get pods -n capa-system
             oc --kubeconfig=/root/kubeconfig get pods -n alibaba-cloud-csi-operator-system
             oc --kubeconfig=/root/kubeconfig get alibabacloudcsidriver cluster -o yaml
             oc --kubeconfig=/root/kubeconfig get storageclass | grep alicloud
+          {% if oadp_enabled | default(false) | bool %}  oc --kubeconfig=/root/kubeconfig get dataprotectionapplication -n openshift-adp
+            oc --kubeconfig=/root/kubeconfig get pods -n openshift-adp
+          {% endif %}

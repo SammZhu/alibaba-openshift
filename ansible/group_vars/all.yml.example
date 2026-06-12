@@ -26,6 +26,28 @@ zone2:               cn-wulanchabu-b
 oss_bucket:          openshift-iso-samzhu-test   # must be globally unique
 aliyun_profile:      openshift-test              # aliyun-cli profile
 
+# ── OADP / OSS backup (optional, day-2) ──────────────────────────────────────
+# Backs up cluster resources + PV data to Alibaba Cloud OSS (S3-compatible) via
+# the OADP/Velero operator. Disabled by default. To enable: provision an OSS
+# bucket + a DEDICATED minimum-privilege RAM user (oss:* on that bucket only —
+# do NOT reuse the node instance RAM role), then set oadp_enabled: true and fill
+# the AK/SK below in group_vars/all.yml (gitignored) or ansible-vault — NEVER
+# commit real credentials. Air-gap: rebuild the mirror tarball with OADP_MIRROR=true
+# so the redhat-oadp-operator package is mirrored into the private registry.
+oadp_enabled:               false
+oadp_channel:               stable-1.4
+# Backup bucket is SEPARATE from the install ISO bucket (oss_bucket above).
+oadp_oss_bucket:            "openshift-backup-{{ cluster_name }}"
+oadp_region:                "{{ region }}"
+# Internal OSS endpoint (no egress charge) when cluster + bucket share a region.
+# Set false only for cross-region DR.
+oadp_oss_internal_endpoint: true
+oadp_backup_prefix:         velero
+# Dedicated backup RAM user AK/SK. Leave blank to deploy the OADP operator only
+# (subscription) and skip the credentials Secret + DataProtectionApplication.
+oadp_oss_access_key_id:     ""
+oadp_oss_access_key_secret: ""
+
 # ── Cluster topology ─────────────────────────────────────────────────────────
 # cluster_topology controls which ROS template + AI installer mode is used:
 #   ha  (default) — 3-master HA cluster (ros-templates/cluster-stack.yaml,

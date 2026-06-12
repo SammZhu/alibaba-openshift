@@ -316,19 +316,36 @@ _pin_quay_public_image ALIBABA_CSI_BUNDLE_IMAGE \
 _pin_quay_public_image ALIBABA_CSI_CATALOG_IMAGE \
   "quay.io/samzhu/alibaba-cloud-csi-operator-catalog:${CSI_OPERATOR_VERSION}"  "2f/8"
 
-# Optional: mirror operator catalogs (post-install OperatorHub) so installing
-# any operator from those catalogs also works fully offline.
-# Set OPERATOR_CATALOGS=redhat-operators,certified-operators (comma-separated).
-# Each one expands to its full image set (~10-50 GB per catalog) — big.
-if [[ -n "${OPERATOR_CATALOGS:-}" ]]; then
-  echo "[2b/8] Adding operator catalogs: $OPERATOR_CATALOGS"
+# Optional: mirror operator catalogs (post-install OperatorHub) for offline install.
+#   OPERATOR_CATALOGS=redhat-operators,certified-operators (comma-separated) →
+#     mirror the FULL catalog(s) — ~10-50 GB each, big.
+#   OADP_MIRROR=true → mirror ONLY the redhat-oadp-operator package (small) for
+#     the OSS backup chain (custom_manifests/05-oadp-*). Channel from OADP_CHANNEL
+#     (default stable-1.4). Fine alongside OPERATOR_CATALOGS as long as
+#     redhat-operators is not ALSO listed there (avoid a duplicate index entry).
+# Catalog index images are tagged by MINOR (v4.20), not patch — derive it.
+_OCP_MINOR="${OPENSHIFT_VERSION%.*}"
+if [[ -n "${OPERATOR_CATALOGS:-}" || "${OADP_MIRROR:-}" == "true" ]]; then
   echo "  operators:" >> imageset-config.yaml
+fi
+if [[ -n "${OPERATOR_CATALOGS:-}" ]]; then
+  echo "[2b/8] Adding operator catalogs (full): $OPERATOR_CATALOGS"
   IFS=',' read -ra _CATS <<< "$OPERATOR_CATALOGS"
   for c in "${_CATS[@]}"; do
     cat >> imageset-config.yaml <<EOF
-    - catalog: registry.redhat.io/redhat/${c}-index:v${OPENSHIFT_VERSION}
+    - catalog: registry.redhat.io/redhat/${c}-index:v${_OCP_MINOR}
 EOF
   done
+fi
+if [[ "${OADP_MIRROR:-}" == "true" ]]; then
+  echo "[2b/8] Adding redhat-oadp-operator (channel ${OADP_CHANNEL:-stable-1.4}) for OSS backup"
+  cat >> imageset-config.yaml <<EOF
+    - catalog: registry.redhat.io/redhat/redhat-operators-index:v${_OCP_MINOR}
+      packages:
+        - name: redhat-oadp-operator
+          channels:
+            - name: ${OADP_CHANNEL:-stable-1.4}
+EOF
 fi
 
 # ── Run oc-mirror v2 (the slow step — pulls ~25-30 GB from quay.io) ──────────

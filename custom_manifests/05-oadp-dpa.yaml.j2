@@ -1,0 +1,58 @@
+---
+# DataProtectionApplication — OADP/Velero backup to Alibaba Cloud OSS.
+# ANSIBLE TEMPLATE — rendered by 08-deploy-post-install.yml from oadp_* vars.
+#
+# Architecture:
+#   Velero server (in openshift-adp) uses the OSS S3-compatible API to store
+#   backup tarballs and metadata. PV data is backed up via the kopia file-system
+#   uploader (no VolumeSnapshotLocation needed for the initial setup).
+#
+# OSS endpoint selection (oadp_oss_internal_endpoint):
+#   - true  → INTERNAL endpoint (oss-<region>-internal.aliyuncs.com): cluster
+#             nodes and bucket in the SAME region — no egress charge, faster.
+#   - false → PUBLIC endpoint (oss-<region>.aliyuncs.com): cross-region DR only.
+#
+# OSS is NOT suitable for VM runtime storage (FUSE + poor random I/O); use
+# OADP + OSS only for backup/restore, never as a PV backend.
+#
+# Pre-requisites:
+#   1. OSS bucket {{ oadp_oss_bucket }} created in region {{ oadp_region }}.
+#   2. cloud-credentials Secret applied (05-oadp-oss-credentials.yaml.j2).
+#   3. OADP operator running (05-oadp-subscription.yaml).
+apiVersion: oadp.openshift.io/v1alpha1
+kind: DataProtectionApplication
+metadata:
+  name: alibaba-oss-backup
+  namespace: openshift-adp
+spec:
+  configuration:
+    velero:
+      defaultPlugins:
+        - openshift   # handles OpenShift-specific resources (SCCs, routes, etc.)
+        - aws         # Velero AWS plugin provides S3-compatible storage support
+      featureFlags:
+        - EnableCSI   # enable CSI snapshot integration (requires snapshot CRDs)
+    nodeAgent:
+      enable: true
+      uploaderType: kopia  # kopia is preferred over restic for performance
+
+  backupLocations:
+    - name: default
+      velero:
+        provider: aws
+        default: true
+        objectStorage:
+          bucket: {{ oadp_oss_bucket }}
+          prefix: {{ oadp_backup_prefix }}
+        config:
+          s3Url: https://oss-{{ oadp_region }}{{ '-internal' if oadp_oss_internal_endpoint | default(true) else '' }}.aliyuncs.com
+          region: {{ oadp_region }}
+          s3ForcePathStyle: "true"               # required for OSS path-style access
+          insecureSkipTLSVerify: "false"
+        credential:
+          name: cloud-credentials               # Secret from 05-oadp-oss-credentials.yaml.j2
+          key: cloud
+
+  # No snapshotLocations defined — using file-system backup (kopia) for PV data.
+  # To enable CSI volume snapshots instead, add a snapshotLocations entry pointing
+  # to the VolumeSnapshotClass created by the disk CSI operator.

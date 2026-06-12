@@ -1,7 +1,7 @@
 # Alibaba Cloud CSI Driver 集成设计
 
 **状态**：代码完成（env-free 全部实现，待集群 live 验证）
-**版本**：v0.5（operator 代码对齐 + per-SC volumeMode + install CR 启用 snapshot/storageProfile/NAS）
+**版本**：v0.6（OADP+OSS 备份链参数化 + 08 opt-in 接入 + 气隙包过滤镜像）
 **日期**：2026-06-12
 **阶段**：Phase 1 扩展（存储支持）
 
@@ -16,6 +16,7 @@
 | v0.3 | 2026-05-14 | OpenShift Virtualization 存储适配分析；NAS 升为 P1；OSS 定位为备份存储；新增 VolumeSnapshotClass、StorageProfile、OADP 集成 |
 | v0.4 | 2026-05-14 | 参考 AWS ROSA EBS CSI Operator 和 CDI StorageProfile 机制：新增 seLinuxMount、StorageProfile 主动 patch 策略、条件化 VolumeSnapshotClass、CDI 上游贡献计划、clone strategy 设计 |
 | v0.5 | 2026-06-12 | operator 代码已落地 v0.4 全部设计（seLinuxMount ✅、VolumeSnapshotClass ✅、StorageProfile patch ✅、NAS driver ✅）；新增 per-StorageClass `volumeMode` 字段（去掉 isBlock 硬编码，通用盘 Filesystem / VM 盘 Block 分离）；install CR(04-csi-driver-cr.yaml) 启用 snapshot + storageProfile + NAS。剩余仅集群 live 验证（#32-34 e2e）|
+| v0.6 | 2026-06-12 | OADP+OSS 备份链收口：05-oadp-dpa / 05-oadp-oss-credentials 改 `.j2` 由 `oadp_*` 变量参数化（bucket/region/internal-endpoint/prefix/AK-SK），08-deploy-post-install 加 opt-in 块（`oadp_enabled`，默认关；Secret 走 stdin 不落盘、`no_log`）；group_vars 加 OADP 段;气隙 build-mirror-tarball.sh 加 `OADP_MIRROR=true` 包过滤镜像（只拉 redhat-oadp-operator,非整 catalog）。剩 OSS bucket+RAM 用户实建 + live 备份/恢复验证 |
 
 ---
 
@@ -468,9 +469,9 @@ custom_manifests/
   04-csi-operatorgroup.yaml       ✅ 已完成
   04-csi-subscription.yaml        ✅ 已完成
   04-csi-driver-cr.yaml           ✅ 已更新（NAS + snapshot + storageProfile + per-SC volumeMode）
-  05-oadp-subscription.yaml       🔜 待实现
-  05-oadp-dpa.yaml                🔜 待实现（DataProtectionApplication）
-  05-oadp-oss-credentials.yaml    🔜 待实现（Secret，敏感，需加密处理）
+  05-oadp-subscription.yaml       ✅ 已完成（Namespace + OperatorGroup + Subscription，redhat-operators）
+  05-oadp-dpa.yaml.j2             ✅ 已完成（DataProtectionApplication，oadp_* 变量参数化）
+  05-oadp-oss-credentials.yaml.j2 ✅ 已完成（Secret，AK/SK 由变量注入、stdin 应用不落盘）
 ```
 
 ---
@@ -488,8 +489,9 @@ custom_manifests/
 | NAS CSI controller + DaemonSet | alibaba-cloud-csi-operator | ✅ 已实现 |
 | NAS StorageClass（RWX）| alibaba-cloud-csi-operator | ✅ 已实现（Immediate binding）|
 | CRD 新字段（volumeMode、snapshot、nas.storageClasses）| alibaba-cloud-csi-operator | ✅ 已实现 |
-| OADP Subscription manifest | alibaba-openshift | 🔜 待实现 |
-| OADP DPA manifest（OSS backend）| alibaba-openshift | 🔜 待实现 |
+| OADP Subscription manifest | alibaba-openshift | ✅ 已完成 |
+| OADP DPA manifest（OSS backend）| alibaba-openshift | ✅ 已完成（.j2 参数化 + 08 opt-in 接入）|
+| OADP 气隙镜像（redhat-oadp-operator 包过滤）| alibaba-openshift | ✅ 已完成（build-mirror-tarball.sh OADP_MIRROR=true）|
 | 更新 04-csi-driver-cr.yaml | alibaba-openshift | ✅ 已更新（snapshot+storageProfile+NAS+volumeMode）|
 | ROS template 加 NAS 权限 | alibaba-openshift | ✅ 已有（mirror-stack NodeRamPolicy nas:*）|
 | 三层镜像 build + push | alibaba-cloud-csi-operator | 🔜 待实现（CSI operator 镜像发布）|
