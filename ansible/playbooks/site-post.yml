@@ -24,9 +24,15 @@
 #
 # OPTIONAL — validation hooks, not part of the deploy path (uncomment to run):
 #   09-capa-smoke.yml        CAPA controller behavioural smoke test
+#   13-csi-smoke.yml         CSI storage live smoke — provisions real disk (RWO
+#                            Filesystem + Block), a VolumeSnapshot + restore, and a
+#                            NAS RWX volume shared across two Pods, then tears it all
+#                            down. The "live tier" of the storage test pyramid
+#                            (unit → kind-smoke → e2e → LIVE; #32-34).
 #   11-capa-routeb-join.yml  single hand-crafted Route B Machine. NOTE: Phase 12
 #                            SUPERSEDES this (declarative pools) — running both
 #                            provisions an extra standalone worker. Use 11 only as
 #                            a one-off Route B validation, not alongside 12.
 # - ansible.builtin.import_playbook: 09-capa-smoke.yml
+# - ansible.builtin.import_playbook: 13-csi-smoke.yml
 # - ansible.builtin.import_playbook: 11-capa-routeb-join.yml

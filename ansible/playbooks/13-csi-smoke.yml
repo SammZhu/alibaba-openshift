@@ -1,0 +1,329 @@
+---
+# Phase 13 (OPTIONAL) — CSI / storage live smoke against the real OpenShift +
+# Alibaba Cloud cluster. NOT part of the default site-post chain.
+#
+# This is the "live tier" of the storage test pyramid (unit → kind-smoke → e2e →
+# LIVE). The operator-level kind smoke proves reconcile against a fake/real API
+# server with no cloud; THIS proves the driver actually provisions real Alibaba
+# storage. It exercises the primitives that do NOT need bare-metal / OKV:
+#
+#   [disk-fs]    PVC on alicloud-disk-essd (RWO, Filesystem) → Pod writes a file →
+#                PVC Bound + Pod Ready + file read back
+#   [disk-block] PVC volumeMode=Block on alicloud-disk-essd-block → Pod with
+#                volumeDevices sees a raw block device
+#   [snapshot]   VolumeSnapshot of the disk-fs PVC → ReadyToUse → restore a new PVC
+#                from it → the file written before the snapshot survives
+#   [nas-rwx]    RWX PVC on alicloud-nas-performance → two Pods mount it → one
+#                writes, the other reads the same file (shared, for live migration).
+#                SOFT check — the operator's NAS StorageClass does not yet set the
+#                dynamic-provisioning params (volumeAs=filesystem + vpc/vsw/zone), so
+#                the NAS PVC may stay Pending. Reported but does NOT fail the play.
+#                Disable with -e csi_smoke_nas=false.
+#
+# Real cloud disks and a NAS filesystem ARE created and then deleted. The block in
+# `always:` tears everything down (namespace + wait for finalizers) so a re-run is
+# clean and no orphaned cloud resources are left.
+#
+# Run AFTER site-post (08 applied the CSI operator + CR; #32-34):
+#   ansible-playbook -i ansible/inventory.yml ansible/playbooks/13-csi-smoke.yml
+#
+# Override the test image if openshift/tools is not the imagestream you mirror:
+#   -e csi_smoke_image=image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+- name: Phase 13 — CSI storage live smoke
+  hosts: local
+  gather_facts: false
+  vars:
+    kubeconfig_file: "{{ kubeconfig_file | default('/root/kubeconfig') }}"
+    ns: csi-smoke
+    # Air-gap-safe: the openshift/tools imagestream is populated from the mirrored
+    # release payload, so it is present on any OpenShift cluster without extra mirroring.
+    csi_smoke_image: "{{ csi_smoke_image | default('image-registry.openshift-image-registry.svc:5000/openshift/tools:latest') }}"
+    disk_fs_sc: alicloud-disk-essd
+    disk_block_sc: alicloud-disk-essd-block
+    nas_sc: alicloud-nas-performance
+    snap_class: alibaba-cloud-disk-snapclass
+    pvc_size: 20Gi
+    wait_timeout: 300s
+    # NAS is a SOFT check: the operator's NAS StorageClass currently sets only
+    # mountType/storageType — no `volumeAs`, so it defaults to subpath mode which
+    # needs a pre-existing `server` (mount-target). Dynamic filesystem-mode
+    # provisioning needs volumeAs=filesystem + vpcId/vSwitchId/zoneId/regionId,
+    # which the operator does not set yet. Until that lands, the NAS PVC will stay
+    # Pending — so NAS is reported but does NOT fail the play. Toggle off entirely
+    # with -e csi_smoke_nas=false. Shorter timeout since a stuck PVC won't bind.
+    csi_smoke_nas: true
+    nas_wait_timeout: 120s
+  tasks:
+    - block:
+        # ── namespace ──────────────────────────────────────────────────────
+        - name: Create smoke namespace
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", create, namespace, "{{ ns }}"]
+          register: _ns
+          changed_when: _ns.rc == 0
+          failed_when: _ns.rc != 0 and 'AlreadyExists' not in _ns.stderr
+
+        # ── [disk-fs] RWO Filesystem PVC + writer Pod ──────────────────────
+        - name: "[disk-fs] apply PVC + writer Pod"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+          args:
+            stdin: |
+              apiVersion: v1
+              kind: PersistentVolumeClaim
+              metadata: { name: disk-fs, namespace: {{ ns }} }
+              spec:
+                accessModes: [ReadWriteOnce]
+                storageClassName: {{ disk_fs_sc }}
+                resources: { requests: { storage: {{ pvc_size }} } }
+              ---
+              apiVersion: v1
+              kind: Pod
+              metadata: { name: disk-fs-writer, namespace: {{ ns }} }
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: w
+                    image: {{ csi_smoke_image }}
+                    command: ["/bin/sh","-c","echo csi-smoke-disk-fs > /data/hello.txt && sync && sleep 3600"]
+                    volumeMounts: [{ name: v, mountPath: /data }]
+                volumes:
+                  - name: v
+                    persistentVolumeClaim: { claimName: disk-fs }
+          changed_when: true
+
+        - name: "[disk-fs] wait Pod Ready (binds the WaitForFirstConsumer PVC)"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ ns }}", wait, --for=condition=Ready, pod/disk-fs-writer, "--timeout={{ wait_timeout }}"]
+          register: _diskfs_wait
+          changed_when: false
+          failed_when: false
+
+        - name: "[disk-fs] read the file back"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ ns }}", exec, disk-fs-writer, --, cat, /data/hello.txt]
+          register: _diskfs_cat
+          changed_when: false
+          failed_when: false
+
+        - name: "[disk-fs] record result"
+          ansible.builtin.set_fact:
+            r_disk_fs: "{{ (_diskfs_wait.rc == 0) and ('csi-smoke-disk-fs' in _diskfs_cat.stdout) }}"
+
+        # ── [disk-block] Block volumeMode PVC + Pod with volumeDevices ─────
+        - name: "[disk-block] apply Block PVC + Pod"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+          args:
+            stdin: |
+              apiVersion: v1
+              kind: PersistentVolumeClaim
+              metadata: { name: disk-block, namespace: {{ ns }} }
+              spec:
+                accessModes: [ReadWriteOnce]
+                volumeMode: Block
+                storageClassName: {{ disk_block_sc }}
+                resources: { requests: { storage: {{ pvc_size }} } }
+              ---
+              apiVersion: v1
+              kind: Pod
+              metadata: { name: disk-block-user, namespace: {{ ns }} }
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: b
+                    image: {{ csi_smoke_image }}
+                    command: ["/bin/sh","-c","test -b /dev/xvdb && echo BLOCKOK && sleep 3600"]
+                    volumeDevices: [{ name: v, devicePath: /dev/xvdb }]
+                volumes:
+                  - name: v
+                    persistentVolumeClaim: { claimName: disk-block }
+          changed_when: true
+
+        - name: "[disk-block] wait Pod Ready (raw block device attached)"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ ns }}", wait, --for=condition=Ready, pod/disk-block-user, "--timeout={{ wait_timeout }}"]
+          register: _diskblk_wait
+          changed_when: false
+          failed_when: false
+
+        - name: "[disk-block] record result"
+          ansible.builtin.set_fact:
+            r_disk_block: "{{ _diskblk_wait.rc == 0 }}"
+
+        # ── [snapshot] snapshot the disk-fs PVC, restore, verify data ──────
+        - name: "[snapshot] create VolumeSnapshot of disk-fs"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+          args:
+            stdin: |
+              apiVersion: snapshot.storage.k8s.io/v1
+              kind: VolumeSnapshot
+              metadata: { name: disk-fs-snap, namespace: {{ ns }} }
+              spec:
+                volumeSnapshotClassName: {{ snap_class }}
+                source: { persistentVolumeClaimName: disk-fs }
+          changed_when: true
+
+        - name: "[snapshot] wait readyToUse=true"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ ns }}", wait, "--for=jsonpath={.status.readyToUse}=true", volumesnapshot/disk-fs-snap, "--timeout={{ wait_timeout }}"]
+          register: _snap_wait
+          changed_when: false
+          failed_when: false
+
+        - name: "[snapshot] restore PVC from snapshot + reader Pod"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+          args:
+            stdin: |
+              apiVersion: v1
+              kind: PersistentVolumeClaim
+              metadata: { name: disk-fs-restore, namespace: {{ ns }} }
+              spec:
+                accessModes: [ReadWriteOnce]
+                storageClassName: {{ disk_fs_sc }}
+                dataSource:
+                  name: disk-fs-snap
+                  kind: VolumeSnapshot
+                  apiGroup: snapshot.storage.k8s.io
+                resources: { requests: { storage: {{ pvc_size }} } }
+              ---
+              apiVersion: v1
+              kind: Pod
+              metadata: { name: disk-fs-restore-reader, namespace: {{ ns }} }
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: r
+                    image: {{ csi_smoke_image }}
+                    command: ["/bin/sh","-c","sleep 3600"]
+                    volumeMounts: [{ name: v, mountPath: /data }]
+                volumes:
+                  - name: v
+                    persistentVolumeClaim: { claimName: disk-fs-restore }
+          changed_when: true
+          when: _snap_wait.rc == 0
+
+        - name: "[snapshot] wait restore reader Ready"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ ns }}", wait, --for=condition=Ready, pod/disk-fs-restore-reader, "--timeout={{ wait_timeout }}"]
+          register: _restore_wait
+          changed_when: false
+          failed_when: false
+          when: _snap_wait.rc == 0
+
+        - name: "[snapshot] verify the pre-snapshot file survived"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ ns }}", exec, disk-fs-restore-reader, --, cat, /data/hello.txt]
+          register: _restore_cat
+          changed_when: false
+          failed_when: false
+          when: _snap_wait.rc == 0
+
+        - name: "[snapshot] record result"
+          ansible.builtin.set_fact:
+            r_snapshot: "{{ (_snap_wait.rc == 0) and (_restore_wait.rc | default(1) == 0) and ('csi-smoke-disk-fs' in (_restore_cat.stdout | default(''))) }}"
+
+        # ── [nas-rwx] RWX PVC shared across two Pods ───────────────────────
+        - name: "[nas-rwx] apply RWX PVC + writer + reader Pods"
+          when: csi_smoke_nas | default(true) | bool
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+          args:
+            stdin: |
+              apiVersion: v1
+              kind: PersistentVolumeClaim
+              metadata: { name: nas-rwx, namespace: {{ ns }} }
+              spec:
+                accessModes: [ReadWriteMany]
+                storageClassName: {{ nas_sc }}
+                resources: { requests: { storage: {{ pvc_size }} } }
+              ---
+              apiVersion: v1
+              kind: Pod
+              metadata: { name: nas-writer, namespace: {{ ns }} }
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: w
+                    image: {{ csi_smoke_image }}
+                    command: ["/bin/sh","-c","echo csi-smoke-nas-rwx > /data/shared.txt && sync && sleep 3600"]
+                    volumeMounts: [{ name: v, mountPath: /data }]
+                volumes:
+                  - name: v
+                    persistentVolumeClaim: { claimName: nas-rwx }
+              ---
+              apiVersion: v1
+              kind: Pod
+              metadata: { name: nas-reader, namespace: {{ ns }} }
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: r
+                    image: {{ csi_smoke_image }}
+                    command: ["/bin/sh","-c","sleep 3600"]
+                    volumeMounts: [{ name: v, mountPath: /data }]
+                volumes:
+                  - name: v
+                    persistentVolumeClaim: { claimName: nas-rwx }
+          changed_when: true
+
+        - name: "[nas-rwx] wait both Pods Ready"
+          when: csi_smoke_nas | default(true) | bool
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ ns }}", wait, --for=condition=Ready, pod/nas-writer, pod/nas-reader, "--timeout={{ nas_wait_timeout }}"]
+          register: _nas_wait
+          changed_when: false
+          failed_when: false
+
+        - name: "[nas-rwx] reader reads what the writer wrote (shared volume)"
+          when: csi_smoke_nas | default(true) | bool
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ ns }}", exec, nas-reader, --, cat, /data/shared.txt]
+          register: _nas_cat
+          changed_when: false
+          failed_when: false
+
+        - name: "[nas-rwx] record result"
+          ansible.builtin.set_fact:
+            r_nas_rwx: "{{ csi_smoke_nas | default(true) | bool and (_nas_wait.rc | default(1) == 0) and ('csi-smoke-nas-rwx' in (_nas_cat.stdout | default(''))) }}"
+
+        # ── report ─────────────────────────────────────────────────────────
+        - name: CSI live smoke report
+          ansible.builtin.debug:
+            msg: |
+              ===== CSI storage live smoke =====
+              [disk-fs]    RWO Filesystem PVC + write/read ....... {{ 'PASS' if r_disk_fs | default(false) else 'FAIL' }}   (required)
+              [disk-block] Block volumeMode raw device ........... {{ 'PASS' if r_disk_block | default(false) else 'FAIL' }}   (required)
+              [snapshot]   VolumeSnapshot → restore → data kept .. {{ 'PASS' if r_snapshot | default(false) else 'FAIL' }}   (required)
+              [nas-rwx]    RWX shared across two Pods ............ {{ 'PASS' if r_nas_rwx | default(false) else ('SKIP' if not (csi_smoke_nas | default(true) | bool) else 'FAIL') }}   (soft)
+              ==================================
+
+        - name: "[nas-rwx] note when NAS soft-check failed (expected until SC params land)"
+          ansible.builtin.debug:
+            msg: >
+              NAS soft-check did not pass. Most likely the operator's NAS StorageClass
+              ({{ nas_sc }}) lacks dynamic-provisioning params: it needs
+              volumeAs=filesystem + vpcId/vSwitchId/zoneId/regionId/fileSystemType (or
+              a subpath `server`). Check: oc -n {{ ns }} describe pvc nas-rwx.
+              This is a known operator follow-up, not a cluster failure.
+          when:
+            - csi_smoke_nas | default(true) | bool
+            - not (r_nas_rwx | default(false))
+
+        - name: Fail the play only if a REQUIRED storage test failed (NAS is soft)
+          ansible.builtin.assert:
+            that:
+              - r_disk_fs | default(false)
+              - r_disk_block | default(false)
+              - r_snapshot | default(false)
+            fail_msg: "A required CSI storage test FAILED — see the report and `oc -n {{ ns }} get pvc,pod,volumesnapshot`."
+            success_msg: "Required CSI storage tests PASSED (disk-fs, disk-block, snapshot).{{ ' NAS RWX also PASSED.' if r_nas_rwx | default(false) else ' NAS RWX is a soft check (see note).' }}"
+
+      always:
+        - name: cleanup — delete the smoke namespace (waits for PV/finalizer release)
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", delete, namespace, "{{ ns }}", --ignore-not-found, "--wait=true", "--timeout=300s"]
+          changed_when: true
+          failed_when: false

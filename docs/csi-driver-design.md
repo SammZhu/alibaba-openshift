@@ -1,7 +1,7 @@
 # Alibaba Cloud CSI Driver 集成设计
 
 **状态**：代码完成（env-free 全部实现，待集群 live 验证）
-**版本**：v0.8（核实 NAS 上游无 CSI 快照→固化对策 OADP 文件级备份 + 删 operator 误导死代码）
+**版本**：v0.9（live 层机制 13-csi-smoke.yml + 发现 NAS SC 未参数化动态供给的缺口）
 **日期**：2026-06-12
 **阶段**：Phase 1 扩展（存储支持）
 
@@ -19,6 +19,7 @@
 | v0.6 | 2026-06-12 | OADP+OSS 备份链收口：05-oadp-dpa / 05-oadp-oss-credentials 改 `.j2` 由 `oadp_*` 变量参数化（bucket/region/internal-endpoint/prefix/AK-SK），08-deploy-post-install 加 opt-in 块（`oadp_enabled`，默认关；Secret 走 stdin 不落盘、`no_log`）；group_vars 加 OADP 段;气隙 build-mirror-tarball.sh 加 `OADP_MIRROR=true` 包过滤镜像（只拉 redhat-oadp-operator,非整 catalog）。剩 OSS bucket+RAM 用户实建 + live 备份/恢复验证 |
 | v0.7 | 2026-06-12 | OKV 适配收口：OADP DPA `defaultPlugins` 加 `kubevirt`（VM/DataVolume 感知备份恢复）；新增 §5.5「OKV 部署前置条件与能力支持矩阵」——明确**硬前置=worker 必须裸金属（KVM/`/dev/kvm`）**、KubeVirt 能力×CSI 支持矩阵、已知缺口（NAS 快照未实现→NAS 盘 VM 无快照、共享块 P3、零 live 验证）|
 | v0.8 | 2026-06-12 | 核实 NAS 快照：kubernetes-sigs alibaba-cloud-csi-driver 的 NAS controller `ControllerGetCapabilities` 只有 `CREATE_DELETE_VOLUME`+`EXPAND_VOLUME`，**上游不支持 CSI 快照**（非本项目 TODO）。把 §5.5.3「待补」改为「已查清+对策」：NAS 盘走 OADP kopia 文件级备份；operator 删除误导性 `defaultNASSnapClassName` 死代码 + 在 `ensureNASDriver`/常量处注释固化原因。operator build/vet/test 绿（待发版） |
+| v0.9 | 2026-06-12 | **live 层机制落地**：新增 `13-csi-smoke.yml`(site-post 可选钩子)真建真删 disk(RWO FS + Block)/VolumeSnapshot+restore/NAS RWX，出 PASS/FAIL 报告 + always 清理 + §5.6 测试金字塔。**核实发现 NAS SC 缺口**(§5.5.3 缺口2):operator NAS SC 没 `volumeAs`→默认 subpath 需预建 server→动态供给 Pending;动态创建要 filesystem 模式参数(volumeAs/vpc/vsw/zone,集群相关)。故 live smoke 里 disk 三项硬断言、NAS 软检查。NAS SC 参数化为 operator 后续 fix |
 
 ---
 
@@ -278,10 +279,32 @@ OpenShift Virtualization 要求 worker 节点暴露硬件虚拟化 `/dev/kvm`。
      `EnableCSI` + `kubevirt` 插件 + kopia；应用一致性用 qemu-guest-agent freeze/thaw 钩子。
    - **想要 NAS 盘 VM 的真·VM 快照**：只能等上游 NAS 驱动支持 CSI 快照（目前无），或对该类 VM 用
      disk 盘（牺牲热迁移）二选一。
-2. **共享块存储（RWX+Block）= 热迁移+块性能的理想解，但阿里云生态 P3 不成熟** → 现阶段热迁移
+2. **NAS StorageClass 不是动态可供给的（operator 后续 fix）**。operator 的 NAS SC 只设
+   `mountType` + `storageType`，**没 `volumeAs`** → 上游驱动默认走 **subpath 模式,需要预建的
+   `server`(挂载点)** → 没有就一直 Pending。动态创建要 **filesystem 模式**:SC 需
+   `volumeAs=filesystem` + `fileSystemType` + `regionId`/`zoneId`/`vpcId`/`vSwitchId`(均集群相关,
+   得从 CR 传)。**对策(待做)**:`NASStorageClassSpec` 加这些字段 + ansible CR 从集群 facts 模板化。
+   在此之前 NAS RWX 只能手动建 SC 指定 `server`。live smoke 里 NAS 是软检查(见 §5.6)。
+3. **共享块存储（RWX+Block）= 热迁移+块性能的理想解，但阿里云生态 P3 不成熟** → 现阶段热迁移
    只能用 NAS（Filesystem），牺牲 IOPS。
-3. **全链路零 live 验证** → #32-34 e2e + 真起 OKV VM + 热迁移 + （disk）VM 快照 + OADP 备份恢复，
-   全在「待重装集群」backlog。代码/设计就绪 ≠ 实测通过。
+4. **OKV VM 全链路零 live 验证** → 真起 OKV VM(裸金属)+ 热迁移 + （disk）VM 快照 + OADP 备份恢复,
+   在「待裸金属重装集群」backlog。
+
+### 5.6 存储测试金字塔（live 层机制）
+
+| 层 | 入口 | 需要 | 覆盖 |
+|----|------|------|------|
+| unit | `go test ./internal/...`（operator 仓库） | 无 | reconcile/claim-sets/conditions |
+| kind-smoke | `make test-kind-smoke`（operator 仓库,CI gate） | kind+podman | operator 真在 API server 上 reconcile 出全部对象 |
+| e2e | `make test-e2e` | kind+镜像 | operator-sdk 脚手架 |
+| **live** | **`ansible-playbook playbooks/13-csi-smoke.yml`**（site-post 后跑） | 真 OCP+阿里云 | **真建真删云盘/快照/NAS** |
+
+**`13-csi-smoke.yml`** = #32-34 落地。site-post 可选钩子(默认不在链里),跑完出 PASS/FAIL 报告 + always 清理:
+- `[disk-fs]` RWO Filesystem PVC + Pod 写读(**必过**)
+- `[disk-block]` Block volumeMode 裸设备(**必过**)
+- `[snapshot]` VolumeSnapshot → restore → 数据保留(**必过**)
+- `[nas-rwx]` RWX 两 Pod 共享(**软检查** —— 见缺口 2,NAS SC 未参数化前会 Pending;`-e csi_smoke_nas=false` 可关)
+- 镜像用 `openshift/tools`(release payload 内,气隙自带);disk 三项是硬断言,NAS 软。
 
 ---
 
