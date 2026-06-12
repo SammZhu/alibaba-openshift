@@ -34,6 +34,10 @@ cluster autoscaler (B3) a per-zone pool to scale, and isolates a zone's capacity
 exhaustion to its own pool. The shipped manifest creates `caworkers-a/b/c`, one
 MachineDeployment per zone, over a shared `AlibabaCloudMachineTemplate`.
 
+B3 per-pool autoscaling (cluster-autoscaler `clusterapi` provider, scale-from-zero)
+is wired by the same manifest behind an opt-in flag — see
+[CAPA-AUTOSCALER.md](CAPA-AUTOSCALER.md).
+
 ## 2. How it composes with the rest
 
 - **B1 (CSR auto-approval)** — every scaled-out node joins unattended.

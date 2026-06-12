@@ -81,6 +81,16 @@ kind: AlibabaCloudMachineTemplate
 metadata:
   name: caworkers-worker
   namespace: {{ ns }}
+{% if autoscale_enabled | default(false) %}
+  # Scale-from-zero capacity hints for cluster-autoscaler (clusterapi provider):
+  # the node shape a pool would create when scaling UP FROM 0 replicas (no live
+  # Node to infer from). These MUST match {{ instance_type }} — see the capacity
+  # table in docs/CAPA-AUTOSCALER.md. Harmless when no autoscaler is running.
+  annotations:
+    capacity.cluster-autoscaler.kubernetes.io/cpu: "{{ autoscale_cpu }}"
+    capacity.cluster-autoscaler.kubernetes.io/memory: "{{ autoscale_memory }}"
+    capacity.cluster-autoscaler.kubernetes.io/ephemeral-disk: "40Gi"
+{% endif %}
 spec:
   template:
     spec:
@@ -112,6 +122,14 @@ metadata:
   namespace: {{ ns }}
   labels:
     cluster.x-k8s.io/cluster-name: caworkers
+{% if autoscale_enabled | default(false) %}
+  # cluster-autoscaler node-group bounds for THIS per-AZ pool. The clusterapi
+  # provider discovers the pool from these annotations and scales spec.replicas
+  # between them (per-zone autoscaling, B3). See docs/CAPA-AUTOSCALER.md.
+  annotations:
+    cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size: "{{ autoscale_min | default(0) }}"
+    cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size: "{{ autoscale_max | default(3) }}"
+{% endif %}
 spec:
   clusterName: caworkers
   replicas: {{ replicas_per_zone | default(1) }}
