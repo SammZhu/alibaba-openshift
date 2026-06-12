@@ -3,6 +3,10 @@
 # which CSI drivers to deploy and how to configure them.
 # This CR is injected after the Subscription so the operator is already running.
 # NOTE: The operator itself watches for this CR in kube-system.
+#
+# RAM: the node instance RAM role (mirror-stack NodeRamPolicy) already grants the
+# Disk CSI (ecs:*Disk / *Snapshot) and NAS CSI (nas:*FileSystem / *MountTarget)
+# permissions, so both drivers can provision dynamically with ramToken v2 (IMDSv2).
 apiVersion: csi.alibabacloud.com/v1alpha1
 kind: AlibabaCloudCSIDriver
 metadata:
@@ -14,52 +18,70 @@ spec:
     enabled: true
     defaultStorageClass: true
     storageClasses:
+      # Cluster-wide default StorageClass (first entry + defaultStorageClass: true).
+      # Filesystem mode for general container workloads (RWO + Filesystem).
       - name: alicloud-disk-essd
         type: cloud_essd
         reclaimPolicy: Delete
         allowVolumeExpansion: true
-        virtDefault: true    # default StorageClass for OpenShift Virtualization VM OS disks
+        volumeMode: Filesystem
+      # OpenShift Virtualization VM OS-disk class — Block mode for raw block device
+      # access (best VM I/O, no double filesystem layer). Marked virtDefault so OKV
+      # DataVolumes land here by default.
+      - name: alicloud-disk-essd-block
+        type: cloud_essd
+        reclaimPolicy: Delete
+        allowVolumeExpansion: true
+        volumeMode: Block
+        virtDefault: true
+      # Cheaper general-purpose class (cloud_efficiency), Filesystem.
       - name: alicloud-disk-efficiency
         type: cloud_efficiency
         reclaimPolicy: Delete
         allowVolumeExpansion: true
-    # snapshot.storage.k8s.io CRDs must be installed before enabling.
-    # The operator will skip VolumeSnapshotClass creation gracefully if CRDs are absent.
+        volumeMode: Filesystem
+    # snapshot.storage.k8s.io CRDs ship with OpenShift by default. The operator
+    # creates a VolumeSnapshotClass (is-default-class) for VM snapshots and the
+    # OADP/Velero backup chain. It skips gracefully if the CRDs are absent.
     snapshot:
-      enabled: false
+      enabled: true
       className: alibaba-cloud-disk-snapclass
-    # Patch CDI StorageProfile so KubeVirt DataVolumes select Block+RWO automatically.
-    # Silently skipped if CDI / OpenShift Virtualization is not installed.
+    # Patch the CDI StorageProfile so KubeVirt DataVolumes pick the right
+    # accessMode/volumeMode automatically (disk = RWO + per-class volumeMode).
     # cloneStrategy values (must match CDI cdi.kubevirt.io/v1beta1 CDICloneStrategy):
     #   csi-clone  — zero-copy CSI clone (fastest)
     #   snapshot   — VolumeSnapshot-based copy
     #   copy       — host-assisted pod copy (slowest; NOTE: NOT "host-assisted")
+    # Silently skipped if CDI / OpenShift Virtualization is not installed.
     storageProfile:
-      patch: false
+      patch: true
       cloneStrategy: csi-clone
 
-  # Phase 2: NAS (file storage) driver — required for VM live migration (ReadWriteMany)
+  # Phase 2: NAS (file storage) driver — ReadWriteMany, required for VM live migration.
+  # Node RAM role has the nas:* permissions (mirror-stack) for dynamic filesystem-mode
+  # provisioning. NAS StorageProfile advertises RWX + Filesystem to CDI/OKV.
   nas:
-    enabled: false   # set to true when NAS CSI driver is ready
+    enabled: true
     storageClasses:
-      - name: alicloud-nas-standard
-        storageType: standard
+      - name: alicloud-nas-performance
+        storageType: Performance
         mountProtocol: nfs
         reclaimPolicy: Delete
         allowVolumeExpansion: true
-        virtDefault: true    # recommended for live migration
+        # Not virtDefault: the disk Block class is the OKV default; NAS is opt-in
+        # per-PVC for VMs that require live migration (RWX).
     storageProfile:
-      patch: false
+      patch: true
       cloneStrategy: csi-clone  # NAS supports csi-clone; no snapshot support yet
 
-  # Phase 3: OSS — not yet implemented
+  # Phase 3: OSS — not implemented as a mount driver (backup is via OADP + OSS S3).
   oss:
     enabled: false
 
   # Upstream csi-driver image tag (kubernetes-sigs/alibaba-cloud-csi-driver)
   imageTag: v1.35.3
 
-  # Auth via ECS RAM Role instance principal — no AK/SK required
+  # Auth via ECS RAM Role instance principal (IMDSv2) — no AK/SK required
   auth:
     ramToken: v2
 

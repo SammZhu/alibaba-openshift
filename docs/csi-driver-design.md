@@ -1,8 +1,8 @@
 # Alibaba Cloud CSI Driver 集成设计
 
-**状态**：实现中
-**版本**：v0.4（参考 AWS ROSA EBS CSI Operator + CDI StorageProfile 机制深度对齐）
-**日期**：2026-05-14
+**状态**：代码完成（env-free 全部实现，待集群 live 验证）
+**版本**：v0.5（operator 代码对齐 + per-SC volumeMode + install CR 启用 snapshot/storageProfile/NAS）
+**日期**：2026-06-12
 **阶段**：Phase 1 扩展（存储支持）
 
 ---
@@ -15,6 +15,7 @@
 | v0.2 | 2026-05-14 | 改用 OLM Operator 方案 |
 | v0.3 | 2026-05-14 | OpenShift Virtualization 存储适配分析；NAS 升为 P1；OSS 定位为备份存储；新增 VolumeSnapshotClass、StorageProfile、OADP 集成 |
 | v0.4 | 2026-05-14 | 参考 AWS ROSA EBS CSI Operator 和 CDI StorageProfile 机制：新增 seLinuxMount、StorageProfile 主动 patch 策略、条件化 VolumeSnapshotClass、CDI 上游贡献计划、clone strategy 设计 |
+| v0.5 | 2026-06-12 | operator 代码已落地 v0.4 全部设计（seLinuxMount ✅、VolumeSnapshotClass ✅、StorageProfile patch ✅、NAS driver ✅）；新增 per-StorageClass `volumeMode` 字段（去掉 isBlock 硬编码，通用盘 Filesystem / VM 盘 Block 分离）；install CR(04-csi-driver-cr.yaml) 启用 snapshot + storageProfile + NAS。剩余仅集群 live 验证（#32-34 e2e）|
 
 ---
 
@@ -466,7 +467,7 @@ custom_manifests/
   04-csi-catalogsource.yaml       ✅ 已完成
   04-csi-operatorgroup.yaml       ✅ 已完成
   04-csi-subscription.yaml        ✅ 已完成
-  04-csi-driver-cr.yaml           ⚠️  待更新（加 NAS + snapshot + storageProfile）
+  04-csi-driver-cr.yaml           ✅ 已更新（NAS + snapshot + storageProfile + per-SC volumeMode）
   05-oadp-subscription.yaml       🔜 待实现
   05-oadp-dpa.yaml                🔜 待实现（DataProtectionApplication）
   05-oadp-oss-credentials.yaml    🔜 待实现（Secret，敏感，需加密处理）
@@ -481,17 +482,17 @@ custom_manifests/
 | 工作项 | 工程 | 状态 |
 |-------|------|------|
 | Disk CSI controller + DaemonSet | alibaba-cloud-csi-operator | ✅ 已实现 |
-| Disk StorageClass（含 Block 模式）| alibaba-cloud-csi-operator | 🔜 待加 volumeMode 字段 |
-| VolumeSnapshotClass | alibaba-cloud-csi-operator | 🔜 待实现 |
-| StorageProfile patch | alibaba-cloud-csi-operator | 🔜 待实现 |
-| NAS CSI controller + DaemonSet | alibaba-cloud-csi-operator | 🔜 待实现 |
-| NAS StorageClass（RWX）| alibaba-cloud-csi-operator | 🔜 待实现 |
-| CRD 新字段（volumeMode、snapshot、nas.storageClasses）| alibaba-cloud-csi-operator | 🔜 待实现 |
+| Disk StorageClass（含 Block 模式）| alibaba-cloud-csi-operator | ✅ 已实现（per-SC `volumeMode` 字段，2026-06-12）|
+| VolumeSnapshotClass | alibaba-cloud-csi-operator | ✅ 已实现（条件创建，CRD 缺失则跳过）|
+| StorageProfile patch | alibaba-cloud-csi-operator | ✅ 已实现（claimPropertySets + cloneStrategy + snapshotClass）|
+| NAS CSI controller + DaemonSet | alibaba-cloud-csi-operator | ✅ 已实现 |
+| NAS StorageClass（RWX）| alibaba-cloud-csi-operator | ✅ 已实现（Immediate binding）|
+| CRD 新字段（volumeMode、snapshot、nas.storageClasses）| alibaba-cloud-csi-operator | ✅ 已实现 |
 | OADP Subscription manifest | alibaba-openshift | 🔜 待实现 |
 | OADP DPA manifest（OSS backend）| alibaba-openshift | 🔜 待实现 |
-| 更新 04-csi-driver-cr.yaml | alibaba-openshift | 🔜 待实现 |
-| ROS template 加 NAS 权限 | alibaba-openshift | 🔜 待实现 |
-| 三层镜像 build + push | alibaba-cloud-csi-operator | 🔜 待实现 |
+| 更新 04-csi-driver-cr.yaml | alibaba-openshift | ✅ 已更新（snapshot+storageProfile+NAS+volumeMode）|
+| ROS template 加 NAS 权限 | alibaba-openshift | ✅ 已有（mirror-stack NodeRamPolicy nas:*）|
+| 三层镜像 build + push | alibaba-cloud-csi-operator | 🔜 待实现（CSI operator 镜像发布）|
 
 ### P1 — 验证（需要环境）
 
@@ -694,16 +695,17 @@ ensureDiskDriver()
 
 ### 13.4 对当前实现的影响（必须修复清单）
 
-| 问题 | 严重性 | 修复内容 |
-|------|--------|---------|
-| CSIDriver 缺 `seLinuxMount: true` | 🔴 严重 | `ensureCSIDriver()` 加此字段，否则 RHCOS 上 SELinux 拒绝 mount |
-| 无 VolumeSnapshotClass | 🔴 严重 | 条件创建（先检查 CRD），加 `is-default-class: "true"` |
-| 无 StorageProfile patch | 🔴 严重 | CDI 无法识别阿里云驱动，OKV VM 启动失败 |
-| StorageClass 无 Block 变体 | 🟠 重要 | 新增 `alicloud-disk-essd-block` StorageClass + `virtDefault` 注解 |
-| StorageClass 无加密参数 | 🟡 建议 | 参数中加 `encrypted: "true"`（可选，由 CR spec 控制）|
-| NAS StorageClass 未实现 | 🔴 严重 | 热迁移依赖，P1 |
-| clone strategy 未设置 | 🟠 重要 | patch StorageProfile 时设 `csi-clone` |
-| CDI 上游无阿里云能力条目 | 🟡 长期 | 向 kubevirt/containerized-data-importer 提 PR |
+| 问题 | 严重性 | 修复内容 | 状态 |
+|------|--------|---------|------|
+| CSIDriver 缺 `seLinuxMount: true` | 🔴 严重 | `ensureDiskCSIDriver()` 加此字段，否则 RHCOS 上 SELinux 拒绝 mount | ✅ 已修复 |
+| 无 VolumeSnapshotClass | 🔴 严重 | 条件创建（NoMatchError 时跳过），加 `is-default-class: "true"` | ✅ 已修复 |
+| 无 StorageProfile patch | 🔴 严重 | `ensureStorageProfile()` patch claimPropertySets + cloneStrategy + snapshotClass | ✅ 已修复 |
+| StorageClass 无 Block 变体 | 🟠 重要 | per-SC `volumeMode` 字段 + install CR 加 `alicloud-disk-essd-block`（Block + virtDefault）| ✅ 已修复（2026-06-12）|
+| StorageClass 无加密参数 | 🟡 建议 | `DiskStorageClassSpec.Encrypted` → parameters `encrypted: "true"`（由 CR spec 控制）| ✅ 已实现 |
+| NAS StorageClass 未实现 | 🔴 严重 | NAS controller/DaemonSet/StorageClass(Immediate) 全实现；install CR 已启用 | ✅ 已修复 |
+| clone strategy 未设置 | 🟠 重要 | patch StorageProfile 时设 `csi-clone`（CR 可覆盖）| ✅ 已修复 |
+| isBlock 对所有 disk SC 硬编码 true | 🟠 重要 | 改 per-SC `volumeMode`：通用盘 RWO+Filesystem / VM 盘 RWO+Block，避免通用盘被误标 Block | ✅ 已修复（2026-06-12）|
+| CDI 上游无阿里云能力条目 | 🟡 长期 | 向 kubevirt/containerized-data-importer 提 PR（轨道 B，patch 为短期轨道 A）| 🔜 待提 PR |
 
 ---
 
