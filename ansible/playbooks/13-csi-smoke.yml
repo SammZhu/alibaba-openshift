@@ -15,10 +15,10 @@
 #                from it → the file written before the snapshot survives
 #   [nas-rwx]    RWX PVC on alicloud-nas-performance → two Pods mount it → one
 #                writes, the other reads the same file (shared, for live migration).
-#                SOFT check — the operator's NAS StorageClass does not yet set the
-#                dynamic-provisioning params (volumeAs=filesystem + vpc/vsw/zone), so
-#                the NAS PVC may stay Pending. Reported but does NOT fail the play.
-#                Disable with -e csi_smoke_nas=false.
+#                SOFT check — 08 applies a filesystem-mode NAS StorageClass from the
+#                cluster vpc/vSwitch/zone (state.yml); if those were absent when 08
+#                ran the SC is skipped and the PVC stays Pending. Reported but does
+#                NOT fail the play. Disable with -e csi_smoke_nas=false.
 #
 # Real cloud disks and a NAS filesystem ARE created and then deleted. The block in
 # `always:` tears everything down (namespace + wait for finalizers) so a re-run is
@@ -300,14 +300,16 @@
               [nas-rwx]    RWX shared across two Pods ............ {{ 'PASS' if r_nas_rwx | default(false) else ('SKIP' if not (csi_smoke_nas | default(true) | bool) else 'FAIL') }}   (soft)
               ==================================
 
-        - name: "[nas-rwx] note when NAS soft-check failed (expected until SC params land)"
+        - name: "[nas-rwx] note when NAS soft-check failed"
           ansible.builtin.debug:
             msg: >
-              NAS soft-check did not pass. Most likely the operator's NAS StorageClass
-              ({{ nas_sc }}) lacks dynamic-provisioning params: it needs
-              volumeAs=filesystem + vpcId/vSwitchId/zoneId/regionId/fileSystemType (or
-              a subpath `server`). Check: oc -n {{ ns }} describe pvc nas-rwx.
-              This is a known operator follow-up, not a cluster failure.
+              NAS soft-check did not pass. 08-deploy-post-install should have applied
+              a filesystem-mode NAS StorageClass ({{ nas_sc }}) from the cluster
+              vpc/vSwitch/zone. Check: `oc get sc {{ nas_sc }} -o yaml` (does it have
+              volumeAs=filesystem + vpcId/vSwitchId/zoneId?), then
+              `oc -n {{ ns }} describe pvc nas-rwx` and the csi-nas-controller logs
+              in kube-system. If the SC is missing, state.yml lacked the network IDs
+              when 08 ran (the apply task is gated on them).
           when:
             - csi_smoke_nas | default(true) | bool
             - not (r_nas_rwx | default(false))

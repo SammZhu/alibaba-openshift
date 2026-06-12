@@ -59,17 +59,19 @@ spec:
 
   # Phase 2: NAS (file storage) driver — ReadWriteMany, required for VM live migration.
   # Node RAM role has the nas:* permissions (mirror-stack) for dynamic filesystem-mode
-  # provisioning. NAS StorageProfile advertises RWX + Filesystem to CDI/OKV.
+  # provisioning.
+  #
+  # storageClasses is intentionally EMPTY: the operator deploys the NAS driver
+  # (CSIDriver + controller + node DaemonSet) but does NOT create a StorageClass.
+  # A dynamically-provisionable NAS SC needs filesystem-mode params that are
+  # cluster-network-specific (volumeAs=filesystem + vpcId/vSwitchId/zoneId), which
+  # the operator cannot know at reconcile time. 08-deploy-post-install applies the
+  # alicloud-nas-performance StorageClass directly, filled from the cluster's
+  # vpc/vSwitch/zone (state.yml). See docs/csi-driver-design.md §5.5.3 gap 2 — the
+  # operator-native version (CR carries the network) is tracked separately.
   nas:
     enabled: true
-    storageClasses:
-      - name: alicloud-nas-performance
-        storageType: Performance
-        mountProtocol: nfs
-        reclaimPolicy: Delete
-        allowVolumeExpansion: true
-        # Not virtDefault: the disk Block class is the OKV default; NAS is opt-in
-        # per-PVC for VMs that require live migration (RWX).
+    storageClasses: []
     storageProfile:
       patch: true
       cloneStrategy: csi-clone  # NAS supports csi-clone; no snapshot support yet

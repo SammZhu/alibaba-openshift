@@ -61,6 +61,11 @@
         # ImageDigestMirrorSet, which does NOT redirect tag pulls — see the ITMS
         # task in play 2).
         mirror_private_ip: "{{ mirror_private_ip | default('') }}"
+        # Cluster network (from state.yml) so play 2 can apply a filesystem-mode
+        # NAS StorageClass that dynamically provisions (needs vpc/vSwitch/zone).
+        nas_vpc_id: "{{ mirror_vpc_id | default('') }}"
+        nas_vsw_id: "{{ mirror_private_vsw_1 | default('') }}"
+        nas_zone_id: "{{ mirror_zone_id | default('') }}"
       no_log: true
 
 - name: Deploy post-install components (executed on the jump host)
@@ -292,6 +297,42 @@
           - "{{ jump_repo_root }}/alibaba-openshift/custom_manifests/04-csi-driver-cr.yaml"
       register: csi_cr
       changed_when: "'unchanged' not in csi_cr.stdout"
+
+    # ── NAS StorageClass (filesystem-mode dynamic provisioning) ───────────────
+    # The CR sets nas.storageClasses=[] so the operator deploys the NAS driver but
+    # creates no StorageClass — a provisionable NAS SC needs cluster-network params
+    # the operator can't know. Apply it here, filled from state.yml's vpc/vSwitch/
+    # zone. Gated on those being present, so it is a safe no-op if state lacks them
+    # (NAS just stays unprovisioned; the deploy never fails). StorageClass params
+    # are immutable, so this is created once; delete the SC to change params.
+    - name: Apply NAS StorageClass (filesystem-mode, dynamic provisioning)
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+      args:
+        stdin: |
+          apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: alicloud-nas-performance
+          provisioner: nasplugin.csi.alibabacloud.com
+          reclaimPolicy: Delete
+          allowVolumeExpansion: true
+          # Immediate: RWX NAS has no node affinity (unlike WaitForFirstConsumer disk).
+          volumeBindingMode: Immediate
+          parameters:
+            volumeAs: filesystem
+            fileSystemType: standard
+            storageType: Performance
+            regionId: "{{ region }}"
+            zoneId: "{{ nas_zone_id }}"
+            vpcId: "{{ nas_vpc_id }}"
+            vSwitchId: "{{ nas_vsw_id }}"
+      register: nas_sc
+      changed_when: "'unchanged' not in nas_sc.stdout"
+      when:
+        - nas_vpc_id | default('') | length > 0
+        - nas_vsw_id | default('') | length > 0
+        - nas_zone_id | default('') | length > 0
 
     # ── OADP / OSS backup (optional, opt-in via oadp_enabled) ─────────────────
     # Deploys the OADP operator (OLM Subscription from redhat-operators), then —

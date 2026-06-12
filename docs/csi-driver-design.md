@@ -1,7 +1,7 @@
 # Alibaba Cloud CSI Driver 集成设计
 
 **状态**：代码完成（env-free 全部实现，待集群 live 验证）
-**版本**：v0.9（live 层机制 13-csi-smoke.yml + 发现 NAS SC 未参数化动态供给的缺口）
+**版本**：v0.10（NAS 动态供给用 ansible 侧解掉：CR storageClasses 置空 + 08 直接建 filesystem 模式 SC）
 **日期**：2026-06-12
 **阶段**：Phase 1 扩展（存储支持）
 
@@ -20,6 +20,7 @@
 | v0.7 | 2026-06-12 | OKV 适配收口：OADP DPA `defaultPlugins` 加 `kubevirt`（VM/DataVolume 感知备份恢复）；新增 §5.5「OKV 部署前置条件与能力支持矩阵」——明确**硬前置=worker 必须裸金属（KVM/`/dev/kvm`）**、KubeVirt 能力×CSI 支持矩阵、已知缺口（NAS 快照未实现→NAS 盘 VM 无快照、共享块 P3、零 live 验证）|
 | v0.8 | 2026-06-12 | 核实 NAS 快照：kubernetes-sigs alibaba-cloud-csi-driver 的 NAS controller `ControllerGetCapabilities` 只有 `CREATE_DELETE_VOLUME`+`EXPAND_VOLUME`，**上游不支持 CSI 快照**（非本项目 TODO）。把 §5.5.3「待补」改为「已查清+对策」：NAS 盘走 OADP kopia 文件级备份；operator 删除误导性 `defaultNASSnapClassName` 死代码 + 在 `ensureNASDriver`/常量处注释固化原因。operator build/vet/test 绿（待发版） |
 | v0.9 | 2026-06-12 | **live 层机制落地**：新增 `13-csi-smoke.yml`(site-post 可选钩子)真建真删 disk(RWO FS + Block)/VolumeSnapshot+restore/NAS RWX，出 PASS/FAIL 报告 + always 清理 + §5.6 测试金字塔。**核实发现 NAS SC 缺口**(§5.5.3 缺口2):operator NAS SC 没 `volumeAs`→默认 subpath 需预建 server→动态供给 Pending;动态创建要 filesystem 模式参数(volumeAs/vpc/vsw/zone,集群相关)。故 live smoke 里 disk 三项硬断言、NAS 软检查。NAS SC 参数化为 operator 后续 fix |
+| v0.10 | 2026-06-12 | **NAS 动态供给解掉(不发 operator 新版)**:install CR `nas.storageClasses` 置空(operator 仍部署 NAS driver、不建 SC);**08 直接 apply filesystem 模式 NAS SC**,网络参数(`volumeAs=filesystem`/`vpcId`/`vSwitchId`/`zoneId`/`regionId`/`fileSystemType=standard`/`storageType=Performance`)从 state.yml 的 mirror_vpc_id/mirror_private_vsw_1/mirror_zone_id 填(08 play1 已 load_state,经 add_host 传给 play2)。任务门控网络 var 非空→缺则跳过不破坏 deploy。这样**明天 site 即可 live 验 NAS**(NAS driver v1.35.3 镜像早已 mirror,只多一个 SC 对象)。operator-native 版(网络从 CR 传)仍单独追踪 |
 
 ---
 
@@ -279,12 +280,16 @@ OpenShift Virtualization 要求 worker 节点暴露硬件虚拟化 `/dev/kvm`。
      `EnableCSI` + `kubevirt` 插件 + kopia；应用一致性用 qemu-guest-agent freeze/thaw 钩子。
    - **想要 NAS 盘 VM 的真·VM 快照**：只能等上游 NAS 驱动支持 CSI 快照（目前无），或对该类 VM 用
      disk 盘（牺牲热迁移）二选一。
-2. **NAS StorageClass 不是动态可供给的（operator 后续 fix）**。operator 的 NAS SC 只设
-   `mountType` + `storageType`，**没 `volumeAs`** → 上游驱动默认走 **subpath 模式,需要预建的
-   `server`(挂载点)** → 没有就一直 Pending。动态创建要 **filesystem 模式**:SC 需
-   `volumeAs=filesystem` + `fileSystemType` + `regionId`/`zoneId`/`vpcId`/`vSwitchId`(均集群相关,
-   得从 CR 传)。**对策(待做)**:`NASStorageClassSpec` 加这些字段 + ansible CR 从集群 facts 模板化。
-   在此之前 NAS RWX 只能手动建 SC 指定 `server`。live smoke 里 NAS 是软检查(见 §5.6)。
+2. **NAS StorageClass 动态供给 —— 已用 ansible 侧解掉(operator-native 版另行追踪)**。
+   根因:operator 的 NAS SC 只设 `mountType`+`storageType`,**没 `volumeAs`** → 上游驱动默认
+   subpath 模式需预建 `server` → NAS PVC 一直 Pending。动态创建要 **filesystem 模式**:
+   `volumeAs=filesystem` + `fileSystemType` + `regionId`/`zoneId`/`vpcId`/`vSwitchId`(集群相关)。
+   - **对策(已落地,无需发 operator 新版)**:install CR 把 `nas.storageClasses` 设**空**
+     (operator 仍部署 NAS driver,但不建 SC);**08-deploy-post-install 直接 apply 一个 filesystem
+     模式 NAS SC**,网络参数从 `state.yml` 的 `mirror_vpc_id`/`mirror_private_vsw_1`/
+     `mirror_zone_id`(CAPA worker 用的同一套)填。任务门控网络 var 非空 → 缺则跳过、deploy 不报错。
+   - **operator-native 版(让 operator 自己建,网络从 CR 传)**仍是更干净的终态,单独追踪
+     (NASStorageClassSpec 加字段)。届时 CR 改回带 storageClasses、08 不再代管。
 3. **共享块存储（RWX+Block）= 热迁移+块性能的理想解，但阿里云生态 P3 不成熟** → 现阶段热迁移
    只能用 NAS（Filesystem），牺牲 IOPS。
 4. **OKV VM 全链路零 live 验证** → 真起 OKV VM(裸金属)+ 热迁移 + （disk）VM 快照 + OADP 备份恢复,
