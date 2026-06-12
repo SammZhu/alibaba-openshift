@@ -22,28 +22,45 @@ instance (or frees one). No CAPA code is involved in the scaling itself.
    cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size: "5"
    ```
 3. **Scale-from-zero** needs the node shape a pool *would* create when it has 0
-   replicas (no live Node to copy). The clusterapi provider reads it from the
-   **infra template** (`AlibabaCloudMachineTemplate`) annotations:
+   replicas (no live Node to copy). The CAPA controller resolves this
+   automatically: it looks up `spec.template.spec.instanceType` via
+   `DescribeInstanceTypes` and writes the **CAPI scale-from-zero contract field**
+   `AlibabaCloudMachineTemplate.status.capacity` (cpu / memory / pods /
+   ephemeral-storage). The clusterapi provider reads `status.capacity` first — so
+   **you usually do NOT set capacity by hand** (it's always accurate + in sync with
+   the instanceType). As a fallback/override (older autoscaler, or a type
+   `DescribeInstanceTypes` can't resolve) the same template also accepts the
+   annotation form:
    ```
    capacity.cluster-autoscaler.kubernetes.io/cpu: "4"
    capacity.cluster-autoscaler.kubernetes.io/memory: "16Gi"
    capacity.cluster-autoscaler.kubernetes.io/ephemeral-disk: "40Gi"
    ```
 
-Both sets are emitted by `custom_manifests/capa-worker-machinedeployment.yaml`
-when you opt in (see below); they are absent by default so a non-autoscaled
-cluster keeps full manual control of `replicas`.
+The min/max node-group annotations are emitted by
+`custom_manifests/capa-worker-machinedeployment.yaml` when you opt in (see below);
+they are absent by default so a non-autoscaled cluster keeps full manual control of
+`replicas`. The capacity annotations are optional (status.capacity is preferred).
 
 ## 1. Enable the annotations on the pools
 
-Render the worker pools (Phase 12) with the autoscaler vars. The capacity MUST
-match `instance_type`:
+Render the worker pools (Phase 12) with the node-group bounds:
 
 ```
 ansible-playbook ansible/playbooks/12-capa-machinedeployment.yml \
   -e autoscale_enabled=true \
-  -e autoscale_min=0 -e autoscale_max=5 \
-  -e autoscale_cpu=4 -e autoscale_memory=16Gi
+  -e autoscale_min=0 -e autoscale_max=5
+  # capacity is auto-resolved into status.capacity by the controller; the
+  # autoscale_cpu / autoscale_memory vars below only emit the optional fallback
+  # annotations (older autoscaler versions):
+  # -e autoscale_cpu=4 -e autoscale_memory=16Gi
+```
+
+Confirm the controller populated capacity (needs the provider build with the
+template controller, v0.1.22+):
+```
+oc -n default get alibabacloudmachinetemplate caworkers-worker -o jsonpath='{.status.capacity}'
+# {"cpu":"4","ephemeral-storage":"40Gi","memory":"16Gi","pods":"110"}
 ```
 
 ### Capacity table (common ECS types)
