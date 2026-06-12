@@ -1,7 +1,7 @@
 # Alibaba Cloud CSI Driver 集成设计
 
 **状态**：代码完成（env-free 全部实现，待集群 live 验证）
-**版本**：v0.7（OADP DPA 加 kubevirt 插件 + OKV 前置/能力矩阵/已知缺口章节 §5.5）
+**版本**：v0.8（核实 NAS 上游无 CSI 快照→固化对策 OADP 文件级备份 + 删 operator 误导死代码）
 **日期**：2026-06-12
 **阶段**：Phase 1 扩展（存储支持）
 
@@ -18,6 +18,7 @@
 | v0.5 | 2026-06-12 | operator 代码已落地 v0.4 全部设计（seLinuxMount ✅、VolumeSnapshotClass ✅、StorageProfile patch ✅、NAS driver ✅）；新增 per-StorageClass `volumeMode` 字段（去掉 isBlock 硬编码，通用盘 Filesystem / VM 盘 Block 分离）；install CR(04-csi-driver-cr.yaml) 启用 snapshot + storageProfile + NAS。剩余仅集群 live 验证（#32-34 e2e）|
 | v0.6 | 2026-06-12 | OADP+OSS 备份链收口：05-oadp-dpa / 05-oadp-oss-credentials 改 `.j2` 由 `oadp_*` 变量参数化（bucket/region/internal-endpoint/prefix/AK-SK），08-deploy-post-install 加 opt-in 块（`oadp_enabled`，默认关；Secret 走 stdin 不落盘、`no_log`）；group_vars 加 OADP 段;气隙 build-mirror-tarball.sh 加 `OADP_MIRROR=true` 包过滤镜像（只拉 redhat-oadp-operator,非整 catalog）。剩 OSS bucket+RAM 用户实建 + live 备份/恢复验证 |
 | v0.7 | 2026-06-12 | OKV 适配收口：OADP DPA `defaultPlugins` 加 `kubevirt`（VM/DataVolume 感知备份恢复）；新增 §5.5「OKV 部署前置条件与能力支持矩阵」——明确**硬前置=worker 必须裸金属（KVM/`/dev/kvm`）**、KubeVirt 能力×CSI 支持矩阵、已知缺口（NAS 快照未实现→NAS 盘 VM 无快照、共享块 P3、零 live 验证）|
+| v0.8 | 2026-06-12 | 核实 NAS 快照：kubernetes-sigs alibaba-cloud-csi-driver 的 NAS controller `ControllerGetCapabilities` 只有 `CREATE_DELETE_VOLUME`+`EXPAND_VOLUME`，**上游不支持 CSI 快照**（非本项目 TODO）。把 §5.5.3「待补」改为「已查清+对策」：NAS 盘走 OADP kopia 文件级备份；operator 删除误导性 `defaultNASSnapClassName` 死代码 + 在 `ensureNASDriver`/常量处注释固化原因。operator build/vet/test 绿（待发版） |
 
 ---
 
@@ -188,8 +189,11 @@ allowVolumeExpansion: true
 
 ### 5.3 VolumeSnapshotClass
 
+**仅 disk（diskplugin）有快照类**。NAS（nasplugin）上游驱动不支持 CSI 快照
+（见 §5.5.3），operator 刻意不为 NAS 创建 VolumeSnapshotClass。
+
 ```yaml
-# VM 快照依赖 CSI VolumeSnapshotClass
+# VM 快照依赖 CSI VolumeSnapshotClass —— 仅 disk 盘
 apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshotClass
 metadata:
@@ -255,20 +259,28 @@ OpenShift Virtualization 要求 worker 节点暴露硬件虚拟化 `/dev/kvm`。
 |---|---|---|---|
 | 安装部署 VM（CDI→DataVolume） | SC + CDI 识别 | disk ESSD **Block+RWO**（essd-block，virtDefault）+ StorageProfile patch | ✅ Block 给裸块设备、无 qcow2 双层开销，OS 盘最优 |
 | 克隆 VM | cloneStrategy | `csi-clone`（零拷贝） | ✅ disk |
-| VM 快照（VirtualMachineSnapshot） | CSI VolumeSnapshotClass | disk ✅；**NAS ✗ 未实现** | ⚠️ 仅 disk 盘 VM 可快照；NAS 盘 VM 不行；在线一致性需 guest-agent freeze |
+| VM 快照（VirtualMachineSnapshot） | CSI VolumeSnapshotClass | disk ✅；**NAS ✗ 上游驱动不支持** | ⚠️ 仅 disk 盘 VM 可快照；NAS 盘 VM 用 OADP 文件级备份（见 5.5.3）；在线一致性需 guest-agent freeze |
 | **热迁移**（Live Migration） | VM 盘必须 **RWX** | disk RWO **✗ 不能热迁移**；**NAS 性能型 RWX+FS ✅** | ⚠️ 要热迁移的 VM 必须用 NAS 盘；NAS 是 qcow2-on-NFS，IOPS 低于块盘 |
 | 备份（OADP→OSS） | velero + VM 感知 | DPA：openshift+aws+**kubevirt** 插件、EnableCSI、kopia | ✅ 已加 kubevirt 插件（VM/DataVolume 感知、配合 guest-agent 冻结做应用一致） |
 | 恢复（Restore） | velero restore | 同上 | ✅ PVC/VM 资源恢复 |
 | 热插盘（hotplug） | attachRequired | disk `attachRequired=true` ✅ / NAS false | disk 支持热插 |
 
-### 5.5.3 已知缺口（待补）
+### 5.5.3 已知缺口与对策
 
-1. **NAS CSI 快照未实现** → 需热迁移（NAS 盘）的 VM 目前做不了 VolumeSnapshot/VM 快照。
-   补它要 operator 侧给 nasplugin 加 VolumeSnapshotClass，且阿里云 NAS 的 CSI 快照能力有限，
-   可能得退回 OADP 文件级备份。**待 operator 代码改动。**
+1. **NAS 盘无 CSI 快照 —— 上游驱动不支持（已核实，非本项目 TODO）**。kubernetes-sigs
+   alibaba-cloud-csi-driver 的 NAS controller `ControllerGetCapabilities` 只声明
+   `CREATE_DELETE_VOLUME` + `EXPAND_VOLUME`，**没有 `CREATE_DELETE_SNAPSHOT`、也没有
+   `CreateSnapshot/DeleteSnapshot` 方法**（master 源码核实）。所以给 nasplugin 建
+   VolumeSnapshotClass 是 footgun（VolumeSnapshot 会在驱动层失败）—— operator 已**刻意不创建**
+   NAS 快照类（`ensureNASDriver` 注释固化原因，删了误导性的 `defaultNASSnapClassName` 死代码）。
+   - **后果**：需热迁移（必须 NAS 盘）的 VM **做不了** VolumeSnapshot / VirtualMachineSnapshot。
+   - **对策（已落地）**：NAS 盘数据保护走 **OADP 文件级备份（kopia nodeAgent → OSS）**，DPA 已开
+     `EnableCSI` + `kubevirt` 插件 + kopia；应用一致性用 qemu-guest-agent freeze/thaw 钩子。
+   - **想要 NAS 盘 VM 的真·VM 快照**：只能等上游 NAS 驱动支持 CSI 快照（目前无），或对该类 VM 用
+     disk 盘（牺牲热迁移）二选一。
 2. **共享块存储（RWX+Block）= 热迁移+块性能的理想解，但阿里云生态 P3 不成熟** → 现阶段热迁移
    只能用 NAS（Filesystem），牺牲 IOPS。
-3. **全链路零 live 验证** → #32-34 e2e + 真起 OKV VM + 热迁移 + VM 快照 + OADP 备份恢复，
+3. **全链路零 live 验证** → #32-34 e2e + 真起 OKV VM + 热迁移 + （disk）VM 快照 + OADP 备份恢复，
    全在「待重装集群」backlog。代码/设计就绪 ≠ 实测通过。
 
 ---
