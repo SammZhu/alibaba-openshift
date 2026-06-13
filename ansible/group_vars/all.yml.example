@@ -152,6 +152,10 @@ mirror_init_password:   ""                    # leave empty to auto-generate
 # CSI (cross-node RWX) + cross-AZ. Set worker_zone_count: 3 for full 3-AZ spread.
 worker_zone_count:   2
 replicas_per_zone:   1
+# Drop known-bad AZs from worker placement (e.g. an AZ where the CSI disk-node gets
+# stuck on a per-AZ credential quirk). The zone IDs here are removed from the
+# candidate set before worker_zone_count picks. Leave empty unless you hit one.
+worker_exclude_zones: []         # e.g. ["cn-wulanchabu-c"]
 
 # ── State.yml fields written by ansible (DO NOT set manually) ────────────
 # Both architectures populate distinct fields so they do not collide:

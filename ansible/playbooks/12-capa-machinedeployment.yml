@@ -85,11 +85,17 @@
       register: _avail_q
       changed_when: false
 
+    # worker_exclude_zones drops known-bad AZs from worker placement (e.g. an AZ where
+    # nodes come up but a per-AZ infra/credential quirk keeps the CSI disk-node stuck —
+    # observed 2026-06-13 on cn-wulanchabu-c: NodeGetInfo sent unsigned ECS requests
+    # "Timestamp not supplied" only there). Operational band-aid; the real fix is in
+    # the driver credential init.
     - name: Derive the set of zones with stock of the worker instance type
       ansible.builtin.set_fact:
         _type_zones: >-
-          {{ (_avail_q.stdout | from_json).AvailableZones.AvailableZone | default([])
-             | selectattr('Status', 'equalto', 'Available') | map(attribute='ZoneId') | list }}
+          {{ ((_avail_q.stdout | from_json).AvailableZones.AvailableZone | default([])
+             | selectattr('Status', 'equalto', 'Available') | map(attribute='ZoneId') | list)
+             | difference(worker_exclude_zones | default([])) }}
 
     - name: Order supported zones with the mirror zone first
       ansible.builtin.set_fact:
