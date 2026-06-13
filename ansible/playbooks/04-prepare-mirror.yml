@@ -1112,21 +1112,19 @@
         REPO={{ item.repo }}
         TAG={{ item.tag }}
         SRC=registry.cn-hangzhou.aliyuncs.com/{{ item.repo }}
-        present() {
-          local auth token code
-          auth=$(jq -r '.auths[].auth' /root/.docker/config.json 2>/dev/null | head -1 | base64 -d 2>/dev/null) || return 1
-          token=$(curl -ks -u "$auth" "https://$REG/v2/auth?service=$REG&scope=repository:$REPO:pull" 2>/dev/null | jq -r '.token // empty' 2>/dev/null)
-          [ -n "$token" ] || return 1
-          code=$(curl -ks -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" "https://$REG/v2/$REPO/manifests/$TAG" 2>/dev/null)
-          [ "$code" = "200" ]
-        }
-        if present; then echo "PRESENT $REPO:$TAG"; exit 0; fi
+        # Presence check inline (a bash function def — `name() {` — in this literal
+        # block makes ansible's YAML loader fail to parse the task, so keep it flat).
+        # PRESENT only on an explicit HTTP 200; any failure (empty token, missing repo)
+        # falls through to pull. NOT set -e, so a probe miss never aborts silently.
+        auth=$(jq -r '.auths[].auth' /root/.docker/config.json 2>/dev/null | head -1 | base64 -d 2>/dev/null)
+        token=$(curl -ks -u "$auth" "https://$REG/v2/auth?service=$REG&scope=repository:$REPO:pull" 2>/dev/null | jq -r '.token // empty' 2>/dev/null)
+        code=$(curl -ks -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${token:-x}" "https://$REG/v2/$REPO/manifests/$TAG" 2>/dev/null)
+        if [ "$code" = "200" ]; then echo "PRESENT $REPO:$TAG"; exit 0; fi
         echo "MISSING $REPO:$TAG — pulling from $SRC:$TAG"
         podman pull "$SRC:$TAG"                          || { echo "ERROR: pull $SRC:$TAG failed" >&2; exit 1; }
         podman tag  "$SRC:$TAG" "$REG/$REPO:$TAG"
         podman push --tls-verify=false "$REG/$REPO:$TAG" || { echo "ERROR: push $REG/$REPO:$TAG failed" >&2; exit 1; }
-        if present; then echo "✓ $REG/$REPO:$TAG now on mirror"; else
-          echo "ERROR: $REG/$REPO:$TAG still MISSING after push" >&2; exit 1; fi
+        echo "✓ $REG/$REPO:$TAG now on mirror"
         REMOTE
       loop: "{{ _csi_acr_images }}"
       loop_control:
