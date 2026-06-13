@@ -82,6 +82,29 @@
     nas_wait_timeout: 120s
   tasks:
     - block:
+        # ── resolve a node-pullable image ──────────────────────────────────
+        # The default csi_smoke_image points at the in-cluster image registry, but
+        # the node CRI resolves DNS via the cloud VPC resolver and cannot resolve
+        # image-registry.openshift-image-registry.svc → ImagePullBackOff (observed
+        # 2026-06-14). Derive the release `cli` image instead: its pullspec is a
+        # quay.io/openshift-release-dev digest that the install-config IDMS redirects
+        # to the mirror, so the node pulls it air-gapped. `-e csi_smoke_image=...`
+        # still wins (extra-vars outrank set_fact); the play-var default is the
+        # fallback if this lookup fails (e.g. on a non-air-gapped cluster).
+        - name: Resolve a node-pullable test image from the release payload
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", adm, release, info, --image-for=cli]
+          register: _cli_img
+          changed_when: false
+          failed_when: false
+
+        - name: Use the release cli image when it resolved
+          ansible.builtin.set_fact:
+            csi_smoke_image: "{{ _cli_img.stdout | trim }}"
+          when:
+            - _cli_img.rc == 0
+            - (_cli_img.stdout | default('') | trim) | length > 0
+
         # ── namespace ──────────────────────────────────────────────────────
         - name: Create smoke namespace
           ansible.builtin.command:
