@@ -74,7 +74,11 @@
   vars_files:
     - "{{ playbook_dir }}/../vars/images.yml"
   vars:
-    csi_operator_img: quay.io/samzhu/alibaba-cloud-csi-operator:v1.35.3
+    # Operator image from the deploy-repo SSOT (vars/images.yml, auto-bumped by the
+    # csi-operator CI on each v* release). Was hardcoded to v1.35.3 (the DRIVER
+    # version, wrong) and never wired to images.yml, so the operator deployed at
+    # v1.35.3 regardless of the release — its pod specs never picked up code fixes.
+    csi_operator_img: "{{ csi_operator_image_repo }}:{{ csi_operator_image_tag }}"
     capi_provider_img: "{{ capa_image }}"
     kubeconfig_file: /root/kubeconfig
     # Repos live on the OPERATOR host (RHEL8, where ansible runs), NOT on the jump
