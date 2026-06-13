@@ -325,18 +325,26 @@ _pin_quay_public_image ALIBABA_CSI_CATALOG_IMAGE \
 # Aliyun ACR (cross-border), skip — 04-prepare-mirror pulls them on the mirror ECS
 # (in-region) as the reliable backstop. Keep these tags in sync with the operator
 # constants (internal/controller/alibabacloudcsidriver_controller.go).
-CSI_DRIVER_REGISTRY="${CSI_DRIVER_REGISTRY:-registry.cn-hangzhou.aliyuncs.com}"
-for _csi_img in \
-  acs/csi-plugin:v1.35.3 \
-  acs/csi-provisioner:v3.5.0 \
-  acs/csi-attacher:v4.3.0 \
-  acs/csi-resizer:v1.8.0 \
-  acs/csi-snapshotter:v6.3.0 \
-  acs/csi-node-driver-registrar:v2.8.0 \
-  acs/livenessprobe:v2.10.0 ; do
-  _cd_repo="${_csi_img%:*}"   # acs/csi-plugin  (mirror namespace, registry stripped)
-  _cd_tag="${_csi_img##*:}"   # v1.35.3
-  _cd_ref="${CSI_DRIVER_REGISTRY}/${_csi_img}"
+# Each entry is "<source-ref-to-pull>|<mirror-namespace-repo>:<tag>". csi-plugin is
+# Alibaba's own driver (acs/, bare tag). The sig-storage sidecars use upstream bare
+# semver, but Alibaba ACR (acs/) does NOT carry the operator's exact tags for
+# provisioner/attacher/resizer/snapshotter (it re-tags with -aliyun/commit suffixes
+# and a different cadence — no v4.3.0 attacher, no v1.8.0 resizer, no v6.3.0
+# snapshotter). Those exist at registry.k8s.io/sig-storage, so pull from there;
+# registrar+livenessprobe exist at acs/ with bare tags. The MIRROR namespace stays
+# acs/* either way so the operator refs + the 08 ITMS resolve unchanged.
+for _entry in \
+  "registry.cn-hangzhou.aliyuncs.com/acs/csi-plugin:v1.35.3|acs/csi-plugin:v1.35.3" \
+  "registry.k8s.io/sig-storage/csi-provisioner:v3.5.0|acs/csi-provisioner:v3.5.0" \
+  "registry.k8s.io/sig-storage/csi-attacher:v4.3.0|acs/csi-attacher:v4.3.0" \
+  "registry.k8s.io/sig-storage/csi-resizer:v1.8.0|acs/csi-resizer:v1.8.0" \
+  "registry.k8s.io/sig-storage/csi-snapshotter:v6.3.0|acs/csi-snapshotter:v6.3.0" \
+  "registry.cn-hangzhou.aliyuncs.com/acs/csi-node-driver-registrar:v2.8.0|acs/csi-node-driver-registrar:v2.8.0" \
+  "registry.cn-hangzhou.aliyuncs.com/acs/livenessprobe:v2.10.0|acs/livenessprobe:v2.10.0" ; do
+  _cd_ref="${_entry%%|*}"     # source ref to inspect/pull (full registry path)
+  _cd_mir="${_entry##*|}"     # acs/csi-plugin:v1.35.3  (mirror namespace ref)
+  _cd_repo="${_cd_mir%:*}"    # acs/csi-plugin
+  _cd_tag="${_cd_mir##*:}"    # v1.35.3
   echo "[2g/8] Pinning CSI driver image: $_cd_ref"
   _cd_digest=$(skopeo inspect --no-tags "docker://$_cd_ref" 2>/dev/null | jq -r .Digest)
   if [[ -z "$_cd_digest" || "$_cd_digest" == "null" ]]; then
