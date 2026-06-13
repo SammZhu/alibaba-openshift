@@ -297,12 +297,12 @@
       changed_when: false
 
     - name: Apply CSI driver CR
-      # File is read from the controller's repo (lookup runs on the operator host);
-      # piped to the jump host's oc via stdin.
+      # Rendered as a template (lookup runs on the operator host) so spec.ecsEndpoint
+      # picks up the cluster region from state.yml; piped to the jump host's oc.
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
       args:
-        stdin: "{{ lookup('file', deploy_repo + '/custom_manifests/04-csi-driver-cr.yaml') }}"
+        stdin: "{{ lookup('template', deploy_repo + '/custom_manifests/04-csi-driver-cr.yaml') }}"
       register: csi_cr
       changed_when: "'unchanged' not in csi_cr.stdout"
 

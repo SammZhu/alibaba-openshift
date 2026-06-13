@@ -13,6 +13,14 @@ metadata:
   name: cluster
   namespace: kube-system
 spec:
+{% if region is defined and region %}
+  # VPC-internal ECS API endpoint. On air-gapped / no-public-egress clusters the
+  # driver's default public endpoint (ecs.<region>.aliyuncs.com) times out and node
+  # registration fails (NodeGetInfo -> DescribeDisks i/o timeout). The VPC endpoint
+  # is reachable from inside the VPC on any cluster, so it is set whenever the region
+  # is known. Rendered by 08 via lookup('template') from state.yml's region.
+  ecsEndpoint: "ecs-vpc.{{ region }}.aliyuncs.com"
+{% endif %}
   # Phase 1: Disk (EBS / cloud disk) driver
   disk:
     enabled: true
