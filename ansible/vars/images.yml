@@ -24,4 +24,4 @@ capa_image: "{{ capa_image_repo }}:{{ capa_image_tag }}"
 # Keep in sync (outside ansible var loading, can't read this):
 #   - scripts/build-mirror-tarball.sh   CSI image tags
 csi_operator_image_repo: "quay.io/samzhu/alibaba-cloud-csi-operator"
-csi_operator_image_tag: "v0.1.0"
+csi_operator_image_tag: "v0.1.1"
