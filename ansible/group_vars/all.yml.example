@@ -144,6 +144,15 @@ mirror_data_disk_size:  200
 mirror_init_user:       "mirror-admin"
 mirror_init_password:   ""                    # leave empty to auto-generate
 
+# ── Worker pool sizing (Phase 12 multi-AZ MachineDeployments) ────────────
+# Cluster worker count = worker_zone_count * replicas_per_zone (one
+# MachineDeployment per AZ). Phase 12 is declarative: lowering these scales the
+# cluster DOWN on the next site-post run (reclaiming the ECS) — the same knob that
+# scaled it up. Defaults keep a lean master + 2-worker / 2-AZ footprint, enough for
+# CSI (cross-node RWX) + cross-AZ. Set worker_zone_count: 3 for full 3-AZ spread.
+worker_zone_count:   2
+replicas_per_zone:   1
+
 # ── State.yml fields written by ansible (DO NOT set manually) ────────────
 # Both architectures populate distinct fields so they do not collide:
 #

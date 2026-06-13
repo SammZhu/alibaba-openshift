@@ -25,7 +25,11 @@
   gather_facts: false
   vars:
     worker_instance_type: "ecs.g7.xlarge"
-    desired_zone_count: 3
+    # Number of AZs to spread workers across (one MachineDeployment per AZ, each
+    # with replicas_per_zone). Persist a different value in group_vars (worker_zone_count)
+    # to size the cluster — default 2 keeps a lean 2-AZ footprint (master + 2 workers)
+    # that still demonstrates cross-AZ spread + cross-node RWX; set 3 for full 3-AZ.
+    desired_zone_count: "{{ worker_zone_count | default(2) | int }}"
     worker_vsw_prefix: 24          # /24 per worker vSwitch
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
@@ -287,6 +291,26 @@
         replicas_per_zone: "{{ md_replicas_per_zone }}"
         bootstrap_secret: caworkers-bootstrap
 
+    # Reclaim worker pools for AZs that are no longer desired. The pre-clean below
+    # only deletes what is IN the current chain, so lowering worker_zone_count would
+    # otherwise leave the dropped AZ's MachineDeployment (and its ECS) orphaned. This
+    # makes the AZ count a real declarative knob — scale down the same way it scaled
+    # up. Targeted: only caworkers-* pools NOT in the desired key set.
+    - name: Reclaim worker pools for AZs no longer desired (declarative scale-down)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export KUBECONFIG=/root/kubeconfig
+        keep="{{ md_worker_zones | map(attribute='key') | map('regex_replace', '^', 'caworkers-') | join(' ') }}"
+        for md in $(oc -n {{ ns }} get machinedeployment -l cluster.x-k8s.io/cluster-name=caworkers -o name 2>/dev/null); do
+          name=${md##*/}
+          if ! printf ' %s ' $keep | grep -q " $name "; then
+            echo "reclaiming stale pool $name (AZ no longer desired)"
+            oc -n {{ ns }} delete machinedeployment "$name" --wait=true --timeout=300s --ignore-not-found
+          fi
+        done
+      changed_when: true
+      failed_when: false
+
     - name: Pre-clean any stale multi-AZ objects
       ansible.builtin.command:
         argv: [oc, "--kubeconfig", /root/kubeconfig, delete, -f, /root/caworkers-chain.yaml,
@@ -388,9 +412,33 @@
           until: _scaleup.rc == 0
           changed_when: false
 
+        - name: Scale pool 'a' back down to baseline (exercise declarative scale-DOWN + reclaim ECS)
+          # The scale-up above is a one-shot validation; don't leave the extra worker
+          # running. Scaling back to replicas_per_zone exercises declarative scale-DOWN
+          # (the same knob that grew the pool) and reclaims the ECS, so the cluster
+          # settles to exactly desired_zone_count * replicas_per_zone workers.
+          ansible.builtin.command:
+            argv: [oc, "--kubeconfig", /root/kubeconfig, -n, "{{ ns }}", scale, machinedeployment,
+                   caworkers-a, "--replicas={{ md_replicas_per_zone | int }}"]
+          changed_when: true
+
+        - name: Wait for pool 'a' to settle back to baseline (extra ECS terminated)
+          ansible.builtin.shell: |
+            set -euo pipefail
+            export KUBECONFIG=/root/kubeconfig
+            want={{ md_replicas_per_zone | int }}
+            ready=$(oc -n {{ ns }} get machinedeployment caworkers-a -o jsonpath='{.status.readyReplicas}')
+            echo "pool-a ready=${ready:-0} want=$want"
+            test "${ready:-0}" -le "$want"
+          register: _scaledown
+          retries: 60
+          delay: 20
+          until: _scaledown.rc == 0
+          changed_when: false
+
         - name: B2 PASS
           ansible.builtin.debug:
-            msg: "✓ B2: {{ md_worker_zones | length }} per-AZ MachineDeployments converged, workers spread across distinct zones, scale-up on pool-a succeeded (CSRs auto-approved by the controller)."
+            msg: "✓ B2: {{ md_worker_zones | length }} per-AZ MachineDeployments converged, workers spread across distinct zones, scale-up AND scale-down on pool-a succeeded (CSRs auto-approved); cluster settled to {{ (md_worker_zones | length) * (md_replicas_per_zone | int) }} workers."
 
       always:
         # Capture the pool state (#62 spread / #78 providerID->nodeRef / #69 MHC)
