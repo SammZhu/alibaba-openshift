@@ -374,6 +374,49 @@
         - teardown_target in ['mirror', 'both']
         - mirror_stack_id is defined and mirror_stack_id | length > 0
       block:
+        # CSI dynamically provisions NAS filesystems + mount targets in the cluster
+        # VPC (filesystem-mode NAS SC / live-migration RWX). They are NOT stack-
+        # managed and their mount targets sit in the mirror stack's vSwitch, so
+        # DeleteVSwitch / the mirror DeleteStack fail with DependencyViolation.Nas
+        # (observed 2026-06-14). Reclaim them first. NOTE: the NAS was created by the
+        # NODE RAM role (nas:*); the teardown RAM user ({{ aliyun_profile }}) must
+        # ALSO have nas:DescribeFileSystems / DeleteMountTarget / DeleteFileSystem or
+        # this is a no-op (best-effort) and you must delete the NAS from the console.
+        # The clean alternative is `oc delete pvc --all-namespaces` while the cluster
+        # is still up (CSI reclaims via the node role) — but teardown also runs after
+        # the cluster is gone, so this API sweep is the backstop.
+        - name: Reclaim CSI-orphaned NAS in the mirror VPC (mount targets block DeleteVSwitch)
+          ansible.builtin.shell: |
+            python3 - <<'PY'
+            import os, json, subprocess
+            vpc = os.environ["VPC"]; R = os.environ["R"]; P = os.environ["P"]
+            q = subprocess.run(["aliyun", "nas", "DescribeFileSystems", "--RegionId", R,
+                                "--PageSize", "100", "--profile", P],
+                               capture_output=True, text=True)
+            data = json.loads(q.stdout or "{}")
+            for fs in data.get("FileSystems", {}).get("FileSystem", []):
+                fsid = fs["FileSystemId"]
+                mts = [m for m in fs.get("MountTargets", {}).get("MountTarget", [])
+                       if m.get("VpcId") == vpc]
+                if not mts:
+                    continue
+                for m in mts:
+                    print("deleting NAS mount target", m["MountTargetDomain"], flush=True)
+                    subprocess.run(["aliyun", "nas", "DeleteMountTarget", "--RegionId", R,
+                                    "--FileSystemId", fsid, "--MountTargetDomain",
+                                    m["MountTargetDomain"], "--profile", P])
+                print("deleting NAS filesystem", fsid, "(may need mount targets fully gone)", flush=True)
+                subprocess.run(["aliyun", "nas", "DeleteFileSystem", "--RegionId", R,
+                                "--FileSystemId", fsid, "--profile", P])
+            PY
+          environment:
+            VPC: "{{ mirror_vpc_id }}"
+            R: "{{ region }}"
+            P: "{{ aliyun_profile }}"
+          changed_when: true
+          failed_when: false
+          when: mirror_vpc_id is defined and mirror_vpc_id | length > 0
+
         # Phase 12's ensure_vswitch creates capa-worker-<zone> vSwitches INSIDE the
         # mirror stack's VPC. They are NOT stack-managed, so once site-post's 12 has
         # run, DeleteStack on the mirror stack fails (the VPC still has vSwitches) —
