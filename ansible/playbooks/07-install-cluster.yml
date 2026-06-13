@@ -957,6 +957,46 @@
           kubeconfig_path: "{{ output_dir }}/auth/kubeconfig"
           kubeadmin_password_path: "{{ output_dir }}/auth/kubeadmin-password"
 
+    # The discovery ISO ECS image (openshift-<cluster>-iso) only exists to boot the
+    # nodes for the assisted install. Once the cluster is installed it is pure
+    # garbage (workers boot from a separate image), so reclaim it HERE — on success —
+    # instead of leaving it for teardown to (not) clean. On a FAILED install this is
+    # never reached, so the image is preserved for the retry (avoids re-ImportImage).
+    # DeleteImage does NOT cascade SnapshotForImage, so query backing snapshots →
+    # delete image → delete snapshots. Best-effort; 02's stale-image check re-imports
+    # if a later run needs it (state keeps ecs_image_id; it's invalidated when the
+    # cloud image is gone).
+    - name: ISO image reclaim (install succeeded — image no longer needed)
+      when: ecs_image_id is defined and ecs_image_id | length > 0
+      block:
+        - name: Look up the ISO image's backing snapshots (for cascade delete)
+          ansible.builtin.command:
+            argv: [aliyun, ecs, DescribeImages, --RegionId, "{{ region }}",
+                   --ImageId, "{{ ecs_image_id }}", --profile, "{{ aliyun_profile }}"]
+          register: _iso_img_desc
+          changed_when: false
+          failed_when: false
+
+        - name: Delete the discovery ISO ECS image
+          ansible.builtin.command:
+            argv: [aliyun, ecs, DeleteImage, --RegionId, "{{ region }}",
+                   --ImageId, "{{ ecs_image_id }}", --Force, "true",
+                   --profile, "{{ aliyun_profile }}"]
+          changed_when: true
+          failed_when: false
+
+        - name: Delete the ISO image's backing snapshots (DeleteImage does not cascade)
+          ansible.builtin.command:
+            argv: [aliyun, ecs, DeleteSnapshot, --SnapshotId, "{{ item }}",
+                   --Force, "true", --profile, "{{ aliyun_profile }}"]
+          loop: "{{ ((_iso_img_desc.stdout | default('{}') | from_json).Images.Image
+                    | default([]) | first | default({})).DiskDeviceMappings.DiskDeviceMapping
+                    | default([]) | map(attribute='SnapshotId') | list }}"
+          loop_control:
+            label: "{{ item }}"
+          changed_when: true
+          failed_when: false
+
     - name: Phase 04 done
       ansible.builtin.debug:
         msg: |
