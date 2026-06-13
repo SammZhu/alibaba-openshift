@@ -1087,28 +1087,49 @@
     - name: Ensure CSI driver + sidecar images are on mirror (pull from Aliyun ACR if missing)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
-        set -euo pipefail
+        # NOTE: deliberately NOT `set -e`. The presence probe (token fetch + manifest
+        # GET) can legitimately fail — e.g. querying the registry auth scope for a
+        # repository that does not exist yet returns a non-JSON body and `jq` errors.
+        # Under `set -e` that aborted the script BEFORE the pull/push branch, printing
+        # neither PRESENT nor "now on mirror", so ansible showed a deceptive "ok" and
+        # the image was SILENTLY SKIPPED — later ImagePullBackOff on the CSI
+        # controller/NAS pods (observed 2026-06-13: csi-provisioner/attacher/resizer/
+        # snapshotter never landed). Any probe failure must fall through to pull+push.
+        set -uo pipefail
         export HOME=/root
         REG={{ mirror_private_ip }}:8443
         REPO={{ item.repo }}
         TAG={{ item.tag }}
-        TOKEN=$(curl -ks -u "$(jq -r .auths[].auth /root/.docker/config.json | base64 -d)" \
-          "https://$REG/v2/auth?service=$REG&scope=repository:$REPO:pull" | jq -r .token)
-        if curl -ksf -H "Authorization: Bearer $TOKEN" "https://$REG/v2/$REPO/manifests/$TAG" > /dev/null; then
-          echo "PRESENT $REPO:$TAG"; exit 0
-        fi
-        echo "MISSING $REPO:$TAG — pulling from registry.cn-hangzhou.aliyuncs.com"
-        podman pull "registry.cn-hangzhou.aliyuncs.com/$REPO:$TAG"
-        podman tag  "registry.cn-hangzhou.aliyuncs.com/$REPO:$TAG" "$REG/$REPO:$TAG"
-        podman push --tls-verify=false "$REG/$REPO:$TAG"
-        echo "✓ $REG/$REPO:$TAG now on mirror"
+        SRC=registry.cn-hangzhou.aliyuncs.com
+
+        # PRESENT only on an explicit HTTP 200 for the manifest; every other outcome
+        # (bad/empty token, missing repo, transient error) returns non-zero -> push.
+        present() {
+          local auth token code
+          auth=$(jq -r '.auths[].auth' /root/.docker/config.json 2>/dev/null | head -1 | base64 -d 2>/dev/null) || return 1
+          token=$(curl -ks -u "$auth" "https://$REG/v2/auth?service=$REG&scope=repository:$REPO:pull" 2>/dev/null | jq -r '.token // empty' 2>/dev/null)
+          [ -n "$token" ] || return 1
+          code=$(curl -ks -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" "https://$REG/v2/$REPO/manifests/$TAG" 2>/dev/null)
+          [ "$code" = "200" ]
+        }
+
+        if present; then echo "PRESENT $REPO:$TAG"; exit 0; fi
+        echo "MISSING $REPO:$TAG — pulling from $SRC"
+        podman pull "$SRC/$REPO:$TAG"           || { echo "ERROR: pull $SRC/$REPO:$TAG failed" >&2; exit 1; }
+        podman tag  "$SRC/$REPO:$TAG" "$REG/$REPO:$TAG"
+        podman push --tls-verify=false "$REG/$REPO:$TAG" || { echo "ERROR: push $REG/$REPO:$TAG failed" >&2; exit 1; }
+        # Verify the push actually landed — don't trust podman's exit code alone.
+        if present; then echo "✓ $REG/$REPO:$TAG now on mirror"; else
+          echo "ERROR: $REG/$REPO:$TAG still MISSING after push" >&2; exit 1; fi
         REMOTE
       loop: "{{ _csi_driver_images }}"
       loop_control:
         label: "{{ item.repo }}:{{ item.tag }}"
       register: _csi_driver_pull
       changed_when: "'now on mirror' in (_csi_driver_pull.stdout | default(''))"
-      failed_when: false
+      # Surface a genuine pull/push failure (the script exits 1 + logs ERROR) instead
+      # of the old blanket `failed_when: false` that hid silent skips.
+      failed_when: "_csi_driver_pull.rc | default(0) != 0"
       when: mirror_private_ip | default('') | length > 0
 
     # ── CSI Operator (OLM bundle 3 images): same belt-and-suspenders pattern ──
