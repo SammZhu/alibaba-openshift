@@ -95,7 +95,7 @@
       ansible.builtin.set_fact:
         _target_zones: >-
           {{ (([mirror_zone_id] if mirror_zone_id in _type_zones else [])
-              + (_type_zones | difference([mirror_zone_id])))[:desired_zone_count] }}
+              + (_type_zones | difference([mirror_zone_id])))[:desired_zone_count | int] }}
 
     - name: Assert at least one usable worker zone was found
       ansible.builtin.assert:
