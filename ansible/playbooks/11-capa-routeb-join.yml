@@ -78,7 +78,9 @@
   vars:
     kc: "--kubeconfig /root/kubeconfig"
     ns: default
-    repo: /root/openshift-alibaba/alibaba-openshift
+    # Provider repo on the operator host (RHEL8); rendered via delegate_to: local.
+    # No checkout / git pull on the jump host.
+    capi_repo: "{{ playbook_dir }}/../../../openshift-capi-alicloud"
     # By default the CAPA controller (>= v0.1.9) auto-approves the worker's
     # kubelet CSRs (B1) — so this playbook only WAITS for Ready, which actually
     # exercises B1. Set -e routeb_manual_csr=true to fall back to approving the
@@ -89,23 +91,24 @@
       ansible.builtin.debug:
         msg: "image={{ rb_capa_image }} bootImage={{ rb_boot_image }} type={{ rb_instance_type }} sg={{ rb_sg }} vsw={{ rb_vsw }} zone={{ rb_zone }} cp={{ rb_cp_host }}"
 
-    - name: Refresh repo on the jump host
-      ansible.builtin.command:
-        argv: [git, -C, "{{ repo }}", pull, --ff-only]
-      changed_when: false
-      failed_when: false
-
     # ── Deploy the CAPA build under test (CRDs + webhooks + controller@digest) ──
-    - name: Apply CRDs + RBAC + controller + webhooks (config/ kustomize SSOT)
+    - name: Render CRDs + RBAC + controller + webhooks (config/ kustomize SSOT)
       # Single source: the provider repo's config/default kustomize base (CRDs +
       # namespace + RBAC + controller + webhooks, ordering handled by kustomize).
-      # The image here is the placeholder TAG; the next task swaps it for the mirror
-      # digest via `oc set image`.
-      ansible.builtin.shell: |
-        set -euo pipefail
-        export KUBECONFIG=/root/kubeconfig
-        oc kustomize {{ repo }}/../openshift-capi-alicloud/config/default \
-          | oc apply --server-side=true --force-conflicts -f -
+      # Rendered on the operator host (delegate_to: local); the image here is the
+      # placeholder TAG, swapped for the mirror digest by `oc set image` below.
+      ansible.builtin.command:
+        argv: [oc, kustomize, "{{ capi_repo }}/config/default"]
+      delegate_to: local
+      register: _rb_capa_rendered
+      changed_when: false
+
+    - name: Apply CRDs + RBAC + controller + webhooks
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, /root/kubeconfig, apply,
+               --server-side=true, --force-conflicts, -f, "-"]
+      args:
+        stdin: "{{ _rb_capa_rendered.stdout }}"
       changed_when: true
 
     - name: Ensure alibaba-creds secret exists

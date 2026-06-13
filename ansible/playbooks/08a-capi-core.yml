@@ -113,17 +113,13 @@
   gather_facts: false
   vars:
     kubeconfig_file: /root/kubeconfig
-    repo: /root/openshift-alibaba/alibaba-openshift
+    # Manifest lives on the operator host (RHEL8) where ansible runs; rendered
+    # there via delegate_to: local. No repo checkout / git pull on the jump host.
+    deploy_repo: "{{ playbook_dir }}/../.."
     capi_core_upstream: registry.k8s.io/cluster-api/cluster-api-controller
     capi_core_tag: v1.12.7
     capi_core_mirror_repo: cluster-api/cluster-api-controller
   tasks:
-    - name: Refresh repo on the jump host (for custom_manifests/cluster-api-core.yaml)
-      ansible.builtin.command:
-        argv: [git, -C, "{{ repo }}", pull, --ff-only]
-      changed_when: false
-      failed_when: false
-
     - name: Extract the cluster pull secret (mirror auth for oc image info)
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, openshift-config,
@@ -156,9 +152,12 @@
       changed_when: false
 
     - name: Render cluster-api-core.yaml with the digest-pinned image
+      # sed runs on the operator host (delegate_to: local) over the controller's
+      # manifest; the digest comes from _core_imginfo (resolved on the jump host).
       ansible.builtin.shell: >
         sed 's|image: {{ capi_core_upstream }}:.*|image: {{ capi_core_upstream }}@{{ (_core_imginfo.stdout | from_json).digest }}|'
-        '{{ repo }}/custom_manifests/cluster-api-core.yaml'
+        '{{ deploy_repo }}/custom_manifests/cluster-api-core.yaml'
+      delegate_to: local
       register: _core_rendered
       changed_when: false
 

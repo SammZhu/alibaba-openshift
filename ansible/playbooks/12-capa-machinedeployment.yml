@@ -198,17 +198,15 @@
   gather_facts: false
   vars:
     ns: default
-    repo: /root/openshift-alibaba/alibaba-openshift
+    # Provider repo on the operator host (RHEL8); CRDs are rendered there via
+    # delegate_to: local. No checkout / git pull on the jump host.
+    capi_repo: "{{ playbook_dir }}/../../../openshift-capi-alicloud"
+    deploy_repo: "{{ playbook_dir }}/../.."
     kc: "--kubeconfig /root/kubeconfig"
   tasks:
     - name: Show multi-AZ parameters
       ansible.builtin.debug:
         msg: "zones={{ md_worker_zones }} image={{ md_boot_image }} type={{ md_instance_type }} sg={{ md_sg }} cp={{ md_cp_host }} replicas/zone={{ md_replicas_per_zone }}"
-
-    - name: Refresh repo on the jump host
-      ansible.builtin.command: {argv: [git, -C, "{{ repo }}", pull, --ff-only]}
-      changed_when: false
-      failed_when: false
 
     - name: Verify the CAPA controller is deployed and Ready
       ansible.builtin.shell: |
@@ -217,11 +215,20 @@
         oc -n capa-system rollout status deploy/capa-controller-manager --timeout=120s
       changed_when: false
 
+    - name: Render provider CRDs from config/crd/bases SSOT (operator host)
+      # Concatenated on the operator host (delegate_to: local) into one multi-doc
+      # stream; applied on the jump host via stdin. No repo on the jump host.
+      ansible.builtin.shell: 'for f in "{{ capi_repo }}"/config/crd/bases/*.yaml; do echo "---"; cat "$f"; done'
+      delegate_to: local
+      register: _capi_crd_bases
+      changed_when: false
+
     - name: Ensure CRDs are current (from the provider repo config/crd/bases SSOT)
       ansible.builtin.command:
         argv: [oc, "--kubeconfig", /root/kubeconfig, apply, --server-side=true,
-               --force-conflicts, -f,
-               "{{ repo }}/../openshift-capi-alicloud/config/crd/bases/"]
+               --force-conflicts, -f, "-"]
+      args:
+        stdin: "{{ _capi_crd_bases.stdout }}"
       changed_when: true
 
     - name: Install CAPI core CRDs when missing
@@ -260,9 +267,9 @@
 
     # ── Render the multi-AZ chain from the repo template ────────────────────────
     # `template` reads src from the ANSIBLE CONTROLLER (the operator host running
-    # the playbook), not the jump host — so src must be the controller-side repo
-    # path ({{ playbook_dir }}/..), NOT {{ repo }} (which is the jump host's
-    # /root/openshift-alibaba checkout, used for the on-jumphost `git pull`/`oc`).
+    # the playbook), so src is the controller-side repo path ({{ playbook_dir }}/..).
+    # Like every render in this play, the repo is read on the operator host, never
+    # the jump host.
     - name: Render the multi-AZ MachineDeployment chain
       ansible.builtin.template:
         src: "{{ playbook_dir }}/../../custom_manifests/capa-worker-machinedeployment.yaml"
@@ -395,8 +402,12 @@
         # the worker ECS (by tag openshift-worker-pool=capa-multiaz) when the
         # cluster/mirror is torn down — see playbooks/99-teardown.yml.
         - name: Capture worker-pool verification report (read-only)
+          # Script is read from the controller's repo and piped to the jump host's
+          # bash via stdin (it runs oc against the cluster). No repo on the jump host.
           ansible.builtin.command:
-            argv: [bash, "{{ repo }}/scripts/verify-capi-pools.sh"]
+            argv: [bash, -s]
+          args:
+            stdin: "{{ lookup('file', deploy_repo + '/scripts/verify-capi-pools.sh') }}"
           environment:
             KUBECONFIG: /root/kubeconfig
           register: _pool_verify

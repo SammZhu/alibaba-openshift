@@ -77,21 +77,15 @@
     csi_operator_img: quay.io/samzhu/alibaba-cloud-csi-operator:v1.35.3
     capi_provider_img: "{{ capa_image }}"
     kubeconfig_file: /root/kubeconfig
-    # Repos live here on the jump host (NOT {{ playbook_dir }} — that resolves to
-    # the operator's path; these commands run on the jump host).
-    jump_repo_root: /root/openshift-alibaba
+    # Repos live on the OPERATOR host (RHEL8, where ansible runs), NOT on the jump
+    # host. Manifest rendering reads them via `delegate_to: local`; only `oc apply`
+    # (cluster I/O) runs on the jump host over SSH. The jump host carries no repo
+    # checkout and needs no `git pull` / GitHub access — the controller working
+    # tree is the single source, so an edit takes effect on the next run.
+    capi_repo: "{{ playbook_dir }}/../../../openshift-capi-alicloud"
+    csi_repo: "{{ playbook_dir }}/../../../alibaba-cloud-csi-operator"
+    deploy_repo: "{{ playbook_dir }}/../.."
   tasks:
-    - name: Best-effort refresh of the jump host's repos (idempotent; never fatal)
-      ansible.builtin.command:
-        argv: [git, -C, "{{ jump_repo_root }}/{{ item }}", pull, --ff-only]
-      loop:
-        - alibaba-openshift
-        - openshift-capi-alicloud
-        - alibaba-cloud-csi-operator
-      register: _git_pull
-      changed_when: "'Already up to date' not in (_git_pull.stdout | default(''))"
-      failed_when: false
-
     - name: Assert kubeconfig is present on the jump host
       ansible.builtin.stat:
         path: "{{ kubeconfig_file }}"
@@ -212,9 +206,12 @@
       # + controller + webhooks). The controller image is the only thing overridden:
       # sed swaps the placeholder TAG for {{ capi_provider_img }} (the mirror DIGEST
       # on air-gapped clusters, see the digest-pin block above).
+      # Rendered on the operator host (delegate_to: local) from the controller's
+      # repo checkout; only the apply below touches the cluster (on the jump host).
       ansible.builtin.shell: >
-        oc kustomize '{{ jump_repo_root }}/openshift-capi-alicloud/config/default'
+        oc kustomize '{{ capi_repo }}/config/default'
         | sed 's|image: quay.io/samzhu/openshift-capi-alicloud:.*|image: {{ capi_provider_img }}|'
+      delegate_to: local
       register: capa_rendered
       changed_when: false
 
@@ -243,7 +240,8 @@
 
     - name: Render CAPA metrics overlay (config/metrics)
       ansible.builtin.command:
-        argv: [oc, kustomize, "{{ jump_repo_root }}/openshift-capi-alicloud/config/metrics"]
+        argv: [oc, kustomize, "{{ capi_repo }}/config/metrics"]
+      delegate_to: local
       register: capa_metrics_rendered
       changed_when: false
       when: _servicemonitor_crd.rc == 0
@@ -261,15 +259,16 @@
       when: _servicemonitor_crd.rc == 0
 
     # ── CSI operator ──────────────────────────────────────────────────────
-    - name: Set CSI operator image in kustomize
-      ansible.builtin.command:
-        argv: [kustomize, edit, set, image, "controller={{ csi_operator_img }}"]
-        chdir: "{{ jump_repo_root }}/alibaba-cloud-csi-operator/config/manager"
-      changed_when: false
-
-    - name: Render CSI operator kustomize
-      ansible.builtin.command:
-        argv: [kustomize, build, "{{ jump_repo_root }}/alibaba-cloud-csi-operator/config/default"]
+    # Rendered on the operator host (delegate_to: local) with `oc kustomize`
+    # (RHEL8 has oc, not a standalone kustomize binary). The controller image is
+    # the only override: sed swaps the placeholder TAG for {{ csi_operator_img }}
+    # (the ITMS above redirects that tag pull to the mirror on air-gapped clusters).
+    # No `kustomize edit` — that would dirty the repo working tree.
+    - name: Render CSI operator kustomize (image override)
+      ansible.builtin.shell: >
+        oc kustomize '{{ csi_repo }}/config/default'
+        | sed 's|image: quay.io/samzhu/alibaba-cloud-csi-operator:.*|image: {{ csi_operator_img }}|'
+      delegate_to: local
       register: csi_rendered
       changed_when: false
 
@@ -294,14 +293,12 @@
       changed_when: false
 
     - name: Apply CSI driver CR
+      # File is read from the controller's repo (lookup runs on the operator host);
+      # piped to the jump host's oc via stdin.
       ansible.builtin.command:
-        argv:
-          - oc
-          - --kubeconfig
-          - "{{ kubeconfig_file }}"
-          - apply
-          - -f
-          - "{{ jump_repo_root }}/alibaba-openshift/custom_manifests/04-csi-driver-cr.yaml"
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+      args:
+        stdin: "{{ lookup('file', deploy_repo + '/custom_manifests/04-csi-driver-cr.yaml') }}"
       register: csi_cr
       changed_when: "'unchanged' not in csi_cr.stdout"
 
@@ -349,13 +346,9 @@
     # must already be in the private mirror (build-mirror-tarball.sh OADP_MIRROR=true).
     - name: Apply OADP operator Subscription
       ansible.builtin.command:
-        argv:
-          - oc
-          - --kubeconfig
-          - "{{ kubeconfig_file }}"
-          - apply
-          - -f
-          - "{{ jump_repo_root }}/alibaba-openshift/custom_manifests/05-oadp-subscription.yaml"
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+      args:
+        stdin: "{{ lookup('file', deploy_repo + '/custom_manifests/05-oadp-subscription.yaml') }}"
       register: oadp_sub
       changed_when: "'unchanged' not in oadp_sub.stdout"
       when: oadp_enabled | default(false) | bool
@@ -381,7 +374,7 @@
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
       args:
-        stdin: "{{ lookup('template', jump_repo_root + '/alibaba-openshift/custom_manifests/05-oadp-oss-credentials.yaml.j2') }}"
+        stdin: "{{ lookup('template', deploy_repo + '/custom_manifests/05-oadp-oss-credentials.yaml.j2') }}"
       register: oadp_creds
       changed_when: "'unchanged' not in oadp_creds.stdout"
       no_log: true
@@ -393,7 +386,7 @@
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
       args:
-        stdin: "{{ lookup('template', jump_repo_root + '/alibaba-openshift/custom_manifests/05-oadp-dpa.yaml.j2') }}"
+        stdin: "{{ lookup('template', deploy_repo + '/custom_manifests/05-oadp-dpa.yaml.j2') }}"
       register: oadp_dpa
       changed_when: "'unchanged' not in oadp_dpa.stdout"
       when:
