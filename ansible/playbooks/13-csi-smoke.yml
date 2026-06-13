@@ -29,15 +29,42 @@
 #
 # Override the test image if openshift/tools is not the imagestream you mirror:
 #   -e csi_smoke_image=image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
-- name: Phase 13 — CSI storage live smoke
+- name: Resolve jump host from state (Phase 13 runs standalone)
   hosts: local
   gather_facts: false
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: Assert the jump host IP is known
+      ansible.builtin.assert:
+        that: jump_host_ip | default('') | length > 0
+        fail_msg: >-
+          jump_host_ip is not in state.yml — run site-post (or Phase 08) first;
+          Phase 13 smokes the cluster via the jump host.
+
+    - name: Add the jump host to the inventory
+      ansible.builtin.add_host:
+        name: jumphost
+        ansible_host: "{{ jump_host_ip }}"
+        ansible_user: root
+        ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+        groups: deploy
+
+# The oc smoke runs ON the jump host (it reaches the private cluster API and carries
+# /root/kubeconfig); the operator box cannot reach the cluster API directly.
+- name: Phase 13 — CSI storage live smoke
+  hosts: jumphost
+  gather_facts: false
   vars:
-    kubeconfig_file: "{{ kubeconfig_file | default('/root/kubeconfig') }}"
+    # Plain values — overridable with -e (extra-vars outrank play vars). They must
+    # NOT be self-referential: "{{ kubeconfig_file | default(...) }}" recurses when
+    # the var is not passed via -e (observed 2026-06-14).
+    kubeconfig_file: /root/kubeconfig
     ns: csi-smoke
     # Air-gap-safe: the openshift/tools imagestream is populated from the mirrored
     # release payload, so it is present on any OpenShift cluster without extra mirroring.
-    csi_smoke_image: "{{ csi_smoke_image | default('image-registry.openshift-image-registry.svc:5000/openshift/tools:latest') }}"
+    csi_smoke_image: "image-registry.openshift-image-registry.svc:5000/openshift/tools:latest"
     disk_fs_sc: alicloud-disk-essd
     disk_block_sc: alicloud-disk-essd-block
     nas_sc: alicloud-nas-performance
