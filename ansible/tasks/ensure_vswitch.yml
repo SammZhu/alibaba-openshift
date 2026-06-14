@@ -46,3 +46,26 @@
   delay: 5
   until: (_vsw_attr.stdout | from_json).Status | default('') == 'Available'
   changed_when: false
+
+# Give the new vSwitch internet egress via the NAT gateway's SNAT table. Without
+# this the zone's nodes can't reach NTP, the clock drifts (observed +8h on
+# cn-wulanchabu-c), and the Alibaba SDK then rejects the "expired" STS creds so CSI
+# NodeGetInfo's DescribeDisks goes out unsigned (IllegalTimestamp) → disk-node
+# CrashLoop. _nat_snat_table_id / _nat_snat_ip are resolved once in phase-12.
+# Idempotent: a duplicate entry on re-run is tolerated.
+- name: "[{{ _tz }}] add a NAT SNAT entry for the new vSwitch (egress for NTP/SDK)"
+  when:
+    - not _tz_has_vsw
+    - _nat_snat_table_id | default('') | length > 0
+    - _nat_snat_ip | default('') | length > 0
+  ansible.builtin.command:
+    argv: [aliyun, vpc, CreateSnatEntry, --RegionId, "{{ region }}",
+           --SnatTableId, "{{ _nat_snat_table_id }}",
+           --SourceVSwitchId, "{{ (_vsw_create.stdout | from_json).VSwitchId }}",
+           --SnatIp, "{{ _nat_snat_ip }}"]
+  register: _snat_create
+  changed_when: '"already" not in (_snat_create.stderr | default("") | lower) and "duplicat" not in (_snat_create.stderr | default("") | lower)'
+  failed_when:
+    - _snat_create.rc != 0
+    - '"already" not in (_snat_create.stderr | default("") | lower)'
+    - '"duplicat" not in (_snat_create.stderr | default("") | lower)'

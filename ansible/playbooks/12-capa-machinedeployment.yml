@@ -153,6 +153,30 @@
       ansible.builtin.set_fact:
         _allocated_octets: []
 
+    # New per-zone vSwitches need a NAT SNAT entry or their nodes have NO egress.
+    # The mirror stack only created SNAT entries for the original a/b subnets, so a
+    # vSwitch ensure_vswitch creates (e.g. cn-wulanchabu-c) cannot reach the internet:
+    # chrony can't reach NTP, the node clock drifts (observed +8h on cn-wulanchabu-c),
+    # and the Alibaba SDK then rejects the "expired" STS creds so CSI's NodeGetInfo
+    # DescribeDisks goes out unsigned ("IllegalTimestamp") and disk-node CrashLoops.
+    # Resolve the NAT SNAT table + bound EIP so ensure_vswitch can add an entry per
+    # vSwitch it creates.
+    - name: Resolve the NAT gateway SNAT table + EIP (egress for new vSwitches)
+      ansible.builtin.command:
+        argv: [aliyun, vpc, DescribeNatGateways, --RegionId, "{{ region }}",
+               --VpcId, "{{ mirror_vpc_id }}", --profile, "{{ aliyun_profile }}"]
+      register: _nat_q
+      changed_when: false
+      failed_when: false
+
+    - name: Extract NAT SNAT table id + EIP (empty disables the SNAT step, best-effort)
+      vars:
+        _ngw: "{{ (_nat_q.stdout | default('{}') | from_json).NatGateways.NatGateway | default([]) }}"
+      ansible.builtin.set_fact:
+        _nat_snat_table_id: "{{ _ngw[0].SnatTableIds.SnatTableId[0] | default('') }}"
+        _nat_snat_ip: "{{ _ngw[0].IpLists.IpList[0].IpAddress | default('') }}"
+      when: _ngw | length > 0
+
     - name: Ensure a vSwitch per target zone
       ansible.builtin.include_tasks: ../tasks/ensure_vswitch.yml
       loop: "{{ _target_zones }}"
