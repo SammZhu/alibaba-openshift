@@ -800,6 +800,40 @@
           failed_when: false
           changed_when: true
 
+        # ── Orphan CSI disk-snapshot sweep ─────────────────────────────────
+        # 13-csi-smoke (any VolumeSnapshot) creates an ECS snapshot named
+        # snapshot-<uuid> via the external-snapshotter. If its DeleteSnapshot did not
+        # finish before the cluster went away (e.g. a PVC was still restoring from the
+        # snapshot, or the CSI controller was torn down first) the ECS snapshot leaks
+        # (observed 2026-06-13/14: two 20 GB snapshot-<uuid> orphans billing per GB).
+        # The deletionPolicy is already Delete; this is the teardown backstop. Match
+        # the external-snapshotter name pattern only — mirror snapshots are named
+        # <cluster>-mirror-* and the active pair is excluded for belt-and-suspenders.
+        - name: Orphan sweep — delete leaked CSI VolumeSnapshot ECS snapshots
+          ansible.builtin.shell: |
+            python3 - <<'PY'
+            import os, json, re, subprocess
+            R = os.environ["R"]; P = os.environ["P"]
+            keep = set(x for x in os.environ.get("KEEP", "").split(",") if x)
+            pat = re.compile(r"^snapshot-[0-9a-f]{8}-[0-9a-f-]{20,}$")
+            q = subprocess.run(["aliyun", "ecs", "DescribeSnapshots", "--RegionId", R,
+                                "--PageSize", "100", "--profile", P],
+                               capture_output=True, text=True)
+            for s in json.loads(q.stdout or "{}").get("Snapshots", {}).get("Snapshot", []):
+                name = s.get("SnapshotName") or ""
+                sid = s.get("SnapshotId")
+                if pat.match(name) and sid not in keep:
+                    print("deleting orphan CSI snapshot", sid, name, flush=True)
+                    subprocess.run(["aliyun", "ecs", "DeleteSnapshot", "--RegionId", R,
+                                    "--SnapshotId", sid, "--Force", "true", "--profile", P])
+            PY
+          environment:
+            R: "{{ region }}"
+            P: "{{ aliyun_profile }}"
+            KEEP: "{{ [mirror_snapshot_system_id | default(''), mirror_snapshot_data_id | default('')] | select | join(',') }}"
+          changed_when: true
+          failed_when: false
+
         # ── Orphan SnapshotForImage sweep ──────────────────────────────────
         # The cascade DeleteSnapshot tasks above only catch snapshots backing
         # images we delete in THIS teardown.  Snapshots whose parent image
