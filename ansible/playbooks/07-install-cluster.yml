@@ -34,6 +34,15 @@
       - folder: openshift
         name: 03-machineconfig-providerid-worker.yaml
         src: "{{ repo_root }}/custom_manifests/03-machineconfig-providerid-worker.yaml"
+      # Point chrony at Alibaba internal NTP (no internet egress needed) so every
+      # AZ keeps correct time — fixes the egress-less-subnet clock skew that broke
+      # CSI, the air-gap-safe way (see the MachineConfig headers).
+      - folder: openshift
+        name: 03-machineconfig-chrony-master.yaml
+        src: "{{ repo_root }}/custom_manifests/03-machineconfig-chrony-master.yaml"
+      - folder: openshift
+        name: 03-machineconfig-chrony-worker.yaml
+        src: "{{ repo_root }}/custom_manifests/03-machineconfig-chrony-worker.yaml"
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
     - ansible.builtin.include_tasks: ../tasks/path_defaults.yml

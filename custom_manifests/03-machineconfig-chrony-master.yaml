@@ -1,0 +1,25 @@
+---
+# MachineConfig: point chrony at Alibaba Cloud INTERNAL NTP (master nodes).
+# The internal NTP endpoints (ntp*.cloud.aliyuncs.com) are reachable from any
+# ECS inside the VPC WITHOUT internet egress — like IMDS 100.100.100.200. This
+# keeps every AZ's clock correct without a NAT egress path, which is air-gap-safe
+# and avoids the clock skew that broke CSI on an egress-less worker subnet
+# (cn-wulanchabu-c, observed 2026-06-14: +8h skew -> STS creds "expired" ->
+# unsigned DescribeDisks -> disk-node CrashLoop).
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  name: 50-chrony-aliyun-internal-master
+  labels:
+    machineconfiguration.openshift.io/role: master
+spec:
+  config:
+    ignition:
+      version: 3.4.0
+    storage:
+      files:
+        - path: /etc/chrony.conf
+          mode: 0644
+          overwrite: true
+          contents:
+            source: "data:text/plain;charset=utf-8;base64,IyBNYW5hZ2VkIGJ5IGFsaWJhYmEtb3BlbnNoaWZ0OiBzeW5jIHRpbWUgZnJvbSBBbGliYWJhIENsb3VkIGludGVybmFsIE5UUCwKIyByZWFjaGFibGUgaW5zaWRlIHRoZSBWUEMgd2l0aG91dCBpbnRlcm5ldCBlZ3Jlc3MgKGxpa2UgSU1EUyAxMDAuMTAwLjEwMC4yMDApLgojIFRoaXMgbGV0cyBldmVyeSBBWiBrZWVwIGNvcnJlY3QgdGltZSB3aXRob3V0IGEgTkFUIGVncmVzcyBwYXRoIOKAlCBhaXItZ2FwLXNhZmUKIyBhbmQgYXZvaWRzIHRoZSBjbG9jayBza2V3IHRoYXQgYnJva2UgQ1NJIG9uIGVncmVzcy1sZXNzIHdvcmtlciBzdWJuZXRzLgpzZXJ2ZXIgbnRwLmNsb3VkLmFsaXl1bmNzLmNvbSBpYnVyc3QKc2VydmVyIG50cDEuY2xvdWQuYWxpeXVuY3MuY29tIGlidXJzdApzZXJ2ZXIgbnRwMi5jbG91ZC5hbGl5dW5jcy5jb20gaWJ1cnN0CmRyaWZ0ZmlsZSAvdmFyL2xpYi9jaHJvbnkvZHJpZnQKbWFrZXN0ZXAgMS4wIDMKcnRjc3luYwpsb2dkaXIgL3Zhci9sb2cvY2hyb255Cg=="
