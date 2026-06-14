@@ -121,9 +121,15 @@
           register: _td_cluster_up
           changed_when: false
           failed_when: false
+          # The jump host may already be gone (a prior partial teardown deleted it) —
+          # treat that as "cluster not reachable" and fall through to the infra cleanup
+          # instead of aborting the whole teardown on UNREACHABLE.
+          ignore_unreachable: true
 
         - name: PVC reclaim (only when the cluster API answered)
-          when: _td_cluster_up.rc == 0
+          when:
+            - not (_td_cluster_up.unreachable | default(false))
+            - _td_cluster_up.rc | default(1) == 0
           block:
             - name: Delete LoadBalancer Services (free leaked NLB/SLB before DeleteStack)
               ansible.builtin.shell: |
@@ -530,18 +536,20 @@
           failed_when: false
           when: mirror_vpc_id is defined and mirror_vpc_id | length > 0
 
-# Phase 12's ensure_vswitch also adds a NAT SnatEntry (egress) for each
+        # Phase 12's ensure_vswitch also adds a NAT SnatEntry (egress) for each
         # capa-worker vSwitch it creates. Those entries are NOT stack-managed and keep
         # the NAT EIP in use, so the mirror DeleteStack fails deleting EIPAssociation
         # with "The removed ip address has been used by snat table" (observed
-        # 2026-06-14). Delete them before the vSwitches and DeleteStack.
-        - name: Remove leftover capa-worker NAT SnatEntries (Phase 12, not stack-managed)
+        # 2026-06-14). Clear the whole NAT SNAT table before DeleteStack to free the
+        # EIP. The stack's own a/b entries going first is harmless (ROS treats an
+        # already-deleted SnatEntry as DELETE_COMPLETE); deleting all — rather than
+        # matching by capa-worker vSwitch — also catches an ORPHANED entry whose
+        # vSwitch a prior partial teardown already removed.
+        - name: Clear NAT SNAT entries before DeleteStack (frees the EIP)
           ansible.builtin.shell: |
             python3 - <<'PY'
             import os, json, subprocess
             vpc = os.environ["VPC"]; R = os.environ["R"]; P = os.environ["P"]
-            capa_vsws = set(x for x in os.environ.get("CAPA_VSWS", "").split(",") if x)
-            capa_cidrs = set(x for x in os.environ.get("CAPA_CIDRS", "").split(",") if x)
             ng = subprocess.run(["aliyun", "vpc", "DescribeNatGateways", "--RegionId", R,
                                  "--VpcId", vpc, "--profile", P], capture_output=True, text=True)
             tables = []
@@ -551,26 +559,18 @@
                 q = subprocess.run(["aliyun", "vpc", "DescribeSnatTableEntries", "--RegionId", R,
                                     "--SnatTableId", tid, "--profile", P], capture_output=True, text=True)
                 for e in json.loads(q.stdout or "{}").get("SnatTableEntries", {}).get("SnatTableEntry", []):
-                    if e.get("SourceVSwitchId") in capa_vsws or e.get("SourceCIDR") in capa_cidrs:
-                        print("deleting leftover SNAT entry", e.get("SnatEntryId"),
-                              e.get("SourceCIDR"), flush=True)
-                        subprocess.run(["aliyun", "vpc", "DeleteSnatEntry", "--RegionId", R,
-                                        "--SnatTableId", tid, "--SnatEntryId", e["SnatEntryId"],
-                                        "--profile", P])
+                    print("deleting SNAT entry", e.get("SnatEntryId"), e.get("SourceCIDR"), flush=True)
+                    subprocess.run(["aliyun", "vpc", "DeleteSnatEntry", "--RegionId", R,
+                                    "--SnatTableId", tid, "--SnatEntryId", e["SnatEntryId"],
+                                    "--profile", P])
             PY
           environment:
             VPC: "{{ mirror_vpc_id }}"
             R: "{{ region }}"
             P: "{{ aliyun_profile }}"
-            CAPA_VSWS: "{{ _capa_vsws | map(attribute='VSwitchId') | join(',') }}"
-            CAPA_CIDRS: "{{ _capa_vsws | map(attribute='CidrBlock') | join(',') }}"
-          vars:
-            _capa_vsws: "{{ (_capa_vsw_q.stdout | default('{}') | from_json).VSwitches.VSwitch
-                            | default([]) | selectattr('VSwitchName', 'defined')
-                            | selectattr('VSwitchName', 'match', '^capa-worker-') | list }}"
           changed_when: true
           failed_when: false
-          when: _capa_vsw_q.stdout is defined
+          when: mirror_vpc_id is defined and mirror_vpc_id | length > 0
 
         - name: Delete each leftover capa-worker vSwitch (Phase 12, not stack-managed)
           ansible.builtin.command:
