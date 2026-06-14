@@ -90,6 +90,83 @@
         that: teardown_confirmed | bool or _confirm.user_input == 'yes'
         fail_msg: "Aborted"
 
+    # ── 0a. PVC-delete-first reclaim (PRIMARY NAS/disk cleanup) ──────────
+    # The clean way to reclaim CSI-provisioned NAS filesystems + cloud disks is to
+    # delete the PVCs WHILE THE CLUSTER IS STILL UP: the CSI controller then calls
+    # DeleteVolume using the NODE RAM role (which always has nas:* / ecs:*), so it
+    # works even when the teardown RAM user ({{ aliyun_profile }}) lacks nas:Delete.
+    # This must run BEFORE the worker-ECS delete / DeleteStack below (those kill the
+    # CSI controller + nodes). Best-effort + bounded: PVCs still mounted by running
+    # pods stay Terminating (pvc-protection) and are left to the aliyun NAS sweep +
+    # DeleteStack backstop in the mirror-stack block. Needs the jump host (the
+    # operator box cannot reach the private cluster API); skipped when the jump host
+    # IP is unknown or the cluster API is already gone.
+    - name: PVC-delete-first reclaim (primary path; backstop = NAS API sweep below)
+      when:
+        - teardown_target in ['cluster', 'both']
+        - jump_host_ip | default('') | length > 0
+      block:
+        - name: Add the jump host for oc access
+          ansible.builtin.add_host:
+            name: jumphost
+            ansible_host: "{{ jump_host_ip }}"
+            ansible_user: root
+            ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
+            ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+            groups: deploy
+
+        - name: Is the cluster API reachable via the jump host?
+          ansible.builtin.command: oc --kubeconfig /root/kubeconfig get nodes
+          delegate_to: jumphost
+          register: _td_cluster_up
+          changed_when: false
+          failed_when: false
+
+        - name: PVC reclaim (only when the cluster API answered)
+          when: _td_cluster_up.rc == 0
+          block:
+            - name: Delete LoadBalancer Services (free leaked NLB/SLB before DeleteStack)
+              ansible.builtin.shell: |
+                set -o pipefail
+                oc --kubeconfig /root/kubeconfig get svc -A \
+                  -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' \
+                | while read -r ns name; do
+                    [ -n "$ns" ] && oc --kubeconfig /root/kubeconfig -n "$ns" delete svc "$name" --wait=false
+                  done
+              args: { executable: /bin/bash }
+              delegate_to: jumphost
+              changed_when: true
+              failed_when: false
+
+            - name: Mark every PVC for deletion (CSI reclaims NAS/disk via the node role)
+              ansible.builtin.shell: |
+                set -o pipefail
+                oc --kubeconfig /root/kubeconfig get pvc -A \
+                  -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' \
+                | while read -r ns name; do
+                    [ -n "$ns" ] && oc --kubeconfig /root/kubeconfig -n "$ns" delete pvc "$name" --wait=false
+                  done
+              args: { executable: /bin/bash }
+              delegate_to: jumphost
+              changed_when: true
+              failed_when: false
+
+            - name: Wait (bounded ~3m) for PVs to drain as CSI DeleteVolume completes
+              ansible.builtin.command: oc --kubeconfig /root/kubeconfig get pv -o name
+              delegate_to: jumphost
+              register: _td_pv_left
+              changed_when: false
+              failed_when: false
+              retries: 18
+              delay: 10
+              until: _td_pv_left.stdout is defined and (_td_pv_left.stdout | trim | length) == 0
+
+            - name: Report PVs still bound after the window (left to the backstop)
+              ansible.builtin.debug:
+                msg: >-
+                  PVs remaining after PVC-delete-first (handled by the NAS API sweep /
+                  DeleteStack): {{ _td_pv_left.stdout_lines | default([]) | length }}
+
     # ── 0. CAPA worker-pool ECS cleanup (#62) ────────────────────────────
     # Phase 12's MachineDeployments create worker ECS DIRECTLY via CAPA (not ROS
     # stack-managed), inside the mirror VPC, tagged openshift-worker-pool=
@@ -382,9 +459,10 @@
         # NODE RAM role (nas:*); the teardown RAM user ({{ aliyun_profile }}) must
         # ALSO have nas:DescribeFileSystems / DeleteMountTarget / DeleteFileSystem or
         # this is a no-op (best-effort) and you must delete the NAS from the console.
-        # The clean alternative is `oc delete pvc --all-namespaces` while the cluster
-        # is still up (CSI reclaims via the node role) — but teardown also runs after
-        # the cluster is gone, so this API sweep is the backstop.
+        # This is the BACKSTOP. The PRIMARY reclaim is the PVC-delete-first block (0a
+        # above): `oc delete pvc` while the cluster is up, so CSI reclaims via the node
+        # role (no nas:Delete needed on the teardown user). This sweep catches what 0a
+        # could not: cluster already gone, or PVCs still pinned by running pods.
         - name: Reclaim CSI-orphaned NAS in the mirror VPC (mount targets block DeleteVSwitch)
           ansible.builtin.shell: |
             python3 - <<'PY'

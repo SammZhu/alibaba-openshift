@@ -61,7 +61,7 @@ Credentials and keys (paths can be overridden in `group_vars/all.yml`):
 | `~/work/alibabacloud/pull-secret.txt` | OCP image pulls | <https://console.redhat.com/openshift/install/pull-secret> |
 | `~/work/alibabacloud/offline-token` | refresh-token for AI API | <https://console.redhat.com/openshift/token> |
 | `~/work/alibabacloud/sshkey/20231118_ed25519{,.pub}` | SSH into ECS | `ssh-keygen -t ed25519` |
-| `aliyun configure` profile (`openshift-test` by default) | Aliyun OpenAPI calls | RAM user with full ECS / VPC / SLB / NLB / ROS / RAM / PVTZ / OSS |
+| `aliyun configure` profile (`openshift-test` by default) | Aliyun OpenAPI calls | RAM user with full ECS / VPC / SLB / NLB / ROS / RAM / PVTZ / OSS / NAS |
 
 Aliyun account requirements (00-preflight will fail with actionable
 messages if missing):
