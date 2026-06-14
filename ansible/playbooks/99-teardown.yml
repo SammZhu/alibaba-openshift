@@ -463,10 +463,10 @@
         # above): `oc delete pvc` while the cluster is up, so CSI reclaims via the node
         # role (no nas:Delete needed on the teardown user). This sweep catches what 0a
         # could not: cluster already gone, or PVCs still pinned by running pods.
-        - name: Reclaim CSI-orphaned NAS in the mirror VPC (mount targets block DeleteVSwitch)
+        - name: Reclaim CSI-orphaned NAS (mirror-VPC + orphaned filesystems)
           ansible.builtin.shell: |
             python3 - <<'PY'
-            import os, json, subprocess
+            import os, json, subprocess, time
             vpc = os.environ["VPC"]; R = os.environ["R"]; P = os.environ["P"]
             q = subprocess.run(["aliyun", "nas", "DescribeFileSystems", "--RegionId", R,
                                 "--PageSize", "100", "--profile", P],
@@ -474,18 +474,39 @@
             data = json.loads(q.stdout or "{}")
             for fs in data.get("FileSystems", {}).get("FileSystem", []):
                 fsid = fs["FileSystemId"]
-                mts = [m for m in fs.get("MountTargets", {}).get("MountTarget", [])
-                       if m.get("VpcId") == vpc]
-                if not mts:
+                all_mts = fs.get("MountTargets", {}).get("MountTarget", [])
+                mirror_mts = [m for m in all_mts if m.get("VpcId") == vpc]
+                other_mts = [m for m in all_mts if m.get("VpcId") != vpc]
+                # Mount targets in a DIFFERENT VPC -> belongs to another cluster, leave it.
+                if other_mts:
                     continue
-                for m in mts:
-                    print("deleting NAS mount target", m["MountTargetDomain"], flush=True)
+                # Delete this cluster's mount targets (they block DeleteVSwitch / the
+                # mirror DeleteStack with DependencyViolation.Nas).
+                for m in mirror_mts:
+                    print("deleting NAS mount target", m["MountTargetDomain"], "of", fsid, flush=True)
                     subprocess.run(["aliyun", "nas", "DeleteMountTarget", "--RegionId", R,
                                     "--FileSystemId", fsid, "--MountTargetDomain",
                                     m["MountTargetDomain"], "--profile", P])
-                print("deleting NAS filesystem", fsid, "(may need mount targets fully gone)", flush=True)
-                subprocess.run(["aliyun", "nas", "DeleteFileSystem", "--RegionId", R,
-                                "--FileSystemId", fsid, "--profile", P])
+                # Delete the filesystem. Two leak shapes land here: (a) FS whose mount
+                # targets we just deleted, and (b) ORPHANED FS with no mount targets at
+                # all -- a CSI DeleteVolume that removed the mount target but leaked the
+                # FS (observed from 13-csi-smoke nas-rwx; the old sweep's `if not mts:
+                # continue` skipped these). Mount-target deletion is async, so retry
+                # while DeleteFileSystem still reports a lingering mount target. (On a
+                # dedicated test account; an orphaned FS has no mount target so it is
+                # attached to nothing -- safe to delete.)
+                for _ in range(6):
+                    d = subprocess.run(["aliyun", "nas", "DeleteFileSystem", "--RegionId", R,
+                                        "--FileSystemId", fsid, "--profile", P],
+                                       capture_output=True, text=True)
+                    if d.returncode == 0:
+                        print("deleted NAS filesystem", fsid, flush=True)
+                        break
+                    if "ountTarget" in (d.stderr or ""):
+                        time.sleep(10); continue
+                    print("could not delete NAS filesystem", fsid, ":",
+                          (d.stderr or "").strip()[:160], flush=True)
+                    break
             PY
           environment:
             VPC: "{{ mirror_vpc_id }}"
