@@ -25,9 +25,16 @@
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
 # shellcheck source=lib/common.sh
-source "$LIB_DIR/common.sh"
-load_config
-state_load
+source "$LIB_DIR/common.sh"   # helpers only (log/ok/die/need/state_load)
+
+# Soft config: this spike only needs REGION + a working aliyun profile, so do
+# NOT hard-require the full scripts/config.sh (ansible users drive everything
+# from group_vars and have no config.sh).  Use it if present, else env/defaults.
+[ -f "$CONFIG_FILE" ] && { . "$CONFIG_FILE"; ok "loaded $CONFIG_FILE"; } || \
+  warn "no scripts/config.sh — using env/defaults (REGION, optional ZONE2/ALIBABA_CLOUD_PROFILE)"
+REGION="${REGION:-cn-wulanchabu}"
+[ -n "${ALIBABA_CLOUD_PROFILE:-}" ] && export ALIBABA_CLOUD_PROFILE
+state_load 2>/dev/null || true
 
 need aliyun
 need jq
