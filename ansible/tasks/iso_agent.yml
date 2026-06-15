@@ -203,9 +203,12 @@
   # pulling from quay.io (the mirror ECS does have NAT egress, so this works).
 
 # ── push the rendered install_dir to the mirror ECS data disk ────────────────
-- name: ABI — (re)create remote build dir on the mirror ECS data disk
+# Do NOT wipe the build dir: keep any already-built agent.x86_64.iso + .cache so
+# a re-run after a downstream failure resumes instead of repeating the slow
+# (~30 min) base-ISO extraction. Fresh configs are re-copied over the top below.
+- name: ABI — ensure remote build dir on the mirror ECS data disk
   ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'rm -rf {{ _m_build_dir }} && mkdir -p {{ _m_install_dir }} {{ _m_tmp }}'
+    {{ _ssh_root_mirror }} 'mkdir -p {{ _m_install_dir }} {{ _m_tmp }}'
   changed_when: true
 
 # tar-over-ssh (not scp): RHEL8's scp defaults to the SFTP protocol and rejects
@@ -229,9 +232,11 @@
 # -> the mirror, so the installer pulls the right release FROM the mirror.  The
 # mirror ECS trusts its own registry CA, so no extra trust flags are needed.
 - name: ABI — openshift-install agent create image (on mirror ECS, data disk)
-  ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'set -e; export TMPDIR={{ _m_tmp }} XDG_CACHE_HOME={{ _m_build_dir }}/.cache;
-      openshift-install agent create image --dir {{ _m_install_dir }} --log-level=info'
+  ansible.builtin.shell: |
+    {{ _ssh_root_mirror }} 'set -e
+    export TMPDIR={{ _m_tmp }} XDG_CACHE_HOME={{ _m_build_dir }}/.cache
+    if [ -f {{ _m_iso }} ]; then echo "agent ISO already present, skipping create (resume)"; exit 0; fi
+    openshift-install agent create image --dir {{ _m_install_dir }} --log-level=info'
   changed_when: true
   # LIVE-VERIFY: confirm the release override pullspec + that the installer
   # trusts the mirror CA (it is the mirror ECS's own registry, so the CA is in
@@ -241,38 +246,40 @@
 # All on the mirror ECS (no ignition round-trip through ansible — avoids quoting
 # hell): coreos-installer (podman) shows the agent ISO's embedded ignition, jq
 # additively merges our fragment via the scp'd abi-ign-merge.jq, embed --force.
+# NOTE: each remote command must be on ONE line. A YAML `>-` folded scalar keeps
+# a newline (not a space) before a MORE-indented continuation line, which split
+# the `podman run ... coreos-installer:release` from its `iso ignition ...`
+# subcommand and made coreos-installer print usage. Use a `|` literal block and
+# keep every podman/jq invocation unbroken on a single line.
 - name: ABI — inject clone-hook into the agent ISO embedded ignition (on mirror ECS)
-  ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'set -e; cd {{ _m_install_dir }};
-      podman run --rm -v {{ _m_install_dir }}:/d:z quay.io/coreos/coreos-installer:release
-        iso ignition show /d/agent.x86_64.iso > existing.ign;
-      jq -s -f abi-ign-merge.jq existing.ign agent-live-clonehook.ign > merged.ign;
-      podman run --rm -v {{ _m_install_dir }}:/d:z quay.io/coreos/coreos-installer:release
-        iso ignition embed --force --ignition-file /d/merged.ign /d/agent.x86_64.iso'
+  ansible.builtin.shell: |
+    {{ _ssh_root_mirror }} 'set -e
+    cd {{ _m_install_dir }}
+    podman run --rm -v {{ _m_install_dir }}:/d:z quay.io/coreos/coreos-installer:release iso ignition show /d/agent.x86_64.iso > existing.ign
+    jq -s -f abi-ign-merge.jq existing.ign agent-live-clonehook.ign > merged.ign
+    podman run --rm -v {{ _m_install_dir }}:/d:z quay.io/coreos/coreos-installer:release iso ignition embed --force --ignition-file /d/merged.ign /d/agent.x86_64.iso'
   changed_when: true
 
 # ── upload to OSS (internal endpoint) + ImportImage, from the mirror ECS ──────
 # aliyun on the mirror ECS authenticates via its instance RAM role (Instance
 # Principal) — no AK/SK on the box.  STS creds are read from IMDS for ossutil.
+# All remote aliyun commands use `|` literal blocks with each command on ONE
+# line — a `>-` folded scalar preserves newlines before more-indented lines,
+# which would split a single command across lines on the remote shell.
+# LIVE-VERIFY: `aliyun oss` (ossutil) STS-token flag (-t) + internal endpoint
+# reachability; and `aliyun ecs --mode EcsRamRole --ram-role-name` inline flags.
 - name: ABI — upload agent ISO to OSS via internal endpoint (mirror ECS RAM role)
-  ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'set -e;
-      RR=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/);
-      C=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/$RR);
-      AK=$(echo "$C" | jq -r .AccessKeyId); SK=$(echo "$C" | jq -r .AccessKeySecret);
-      TK=$(echo "$C" | jq -r .SecurityToken);
-      aliyun oss cp {{ _m_iso }} oss://{{ oss_bucket }}/{{ oss_object }} -f
-        -i "$AK" -k "$SK" -t "$TK" -e {{ _oss_internal_endpoint }}'
+  ansible.builtin.shell: |
+    {{ _ssh_root_mirror }} 'set -e
+    RR=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/)
+    C=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/$RR)
+    AK=$(echo "$C" | jq -r .AccessKeyId); SK=$(echo "$C" | jq -r .AccessKeySecret); TK=$(echo "$C" | jq -r .SecurityToken)
+    aliyun oss cp {{ _m_iso }} oss://{{ oss_bucket }}/{{ oss_object }} -f -i "$AK" -k "$SK" -t "$TK" -e {{ _oss_internal_endpoint }}'
   changed_when: true
-  # LIVE-VERIFY: `aliyun oss` (ossutil) STS-token flag (-t/--sts-token) +
-  # internal endpoint reachability from the mirror ECS.
 
 - name: ABI — adopt existing agent image by name (idempotent)
-  ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'aliyun ecs DescribeImages --RegionId {{ region }}
-      --ImageName openshift-{{ cluster_name }}-agent --mode EcsRamRole
-      --ram-role-name $(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/)
-      | jq -r ".Images.Image[0].ImageId // empty"'
+  ansible.builtin.shell: |
+    {{ _ssh_root_mirror }} 'aliyun ecs DescribeImages --RegionId {{ region }} --ImageName openshift-{{ cluster_name }}-agent --mode EcsRamRole --ram-role-name $(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/) | jq -r ".Images.Image[0].ImageId // empty"'
   register: _abi_img_lookup
   changed_when: false
 
@@ -282,15 +289,9 @@
   when: _abi_img_lookup.stdout | trim | length > 0
 
 - name: ABI — ImportImage the agent ISO (from the mirror ECS) when needed
-  ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'RR=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/);
-      aliyun ecs ImportImage --RegionId {{ region }} --mode EcsRamRole --ram-role-name "$RR"
-        --ImageName openshift-{{ cluster_name }}-agent
-        --OSType Linux --Platform CoreOS --Architecture x86_64 --BootMode UEFI
-        --DiskDeviceMapping.1.Format RAW
-        --DiskDeviceMapping.1.OSSBucket {{ oss_bucket }}
-        --DiskDeviceMapping.1.OSSObject {{ oss_object }}
-      | jq -r .ImageId'
+  ansible.builtin.shell: |
+    {{ _ssh_root_mirror }} 'RR=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/)
+    aliyun ecs ImportImage --RegionId {{ region }} --mode EcsRamRole --ram-role-name "$RR" --ImageName openshift-{{ cluster_name }}-agent --OSType Linux --Platform CoreOS --Architecture x86_64 --BootMode UEFI --DiskDeviceMapping.1.Format RAW --DiskDeviceMapping.1.OSSBucket {{ oss_bucket }} --DiskDeviceMapping.1.OSSObject {{ oss_object }} | jq -r .ImageId'
   register: _abi_import
   changed_when: true
   when: ecs_image_id is not defined or ecs_image_id | length == 0
@@ -301,10 +302,8 @@
   when: _abi_import is not skipped and (_abi_import.stdout | default('') | trim | length > 0)
 
 - name: ABI — poll agent image until Available (~15-30 min)
-  ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'aliyun ecs DescribeImages --RegionId {{ region }} --ImageId {{ ecs_image_id }}
-      --mode EcsRamRole --ram-role-name $(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/)
-      | jq -r ".Images.Image[0].Status // empty"'
+  ansible.builtin.shell: |
+    {{ _ssh_root_mirror }} 'aliyun ecs DescribeImages --RegionId {{ region }} --ImageId {{ ecs_image_id }} --mode EcsRamRole --ram-role-name $(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/) | jq -r ".Images.Image[0].Status // empty"'
   register: _abi_img_status
   changed_when: false
   retries: 60
