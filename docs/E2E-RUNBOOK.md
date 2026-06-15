@@ -30,12 +30,14 @@ Assumed configuration:
   documented and tested production path on China-region accounts)
 - `installation_method: Assisted` (this runbook covers the Assisted path via
   `site.yml`).  The **Agent-based Installer (ABI)** is also supported via
-  `site-agent.yml` (`installation_method: agent`) — fully air-gapped, no
-  assisted-service dependency.  Its env-free scaffolding is in place
-  (`tasks/iso_agent.yml`, `tasks/install_agent.yml`, `templates/{install,agent}-config.yaml.j2`,
-  `01-prepare-iso-agent.yml`, `07-install-cluster-agent.yml`); the instance
-  provisioning + static-NMState MAC harvest (`06a`/`06b`) and the live HA run
-  are pending the pre-created-ENI spike (see the SSOT/ABI plan §4/§7).
+  `site-agent.yml` (`installation_method: Agent-based`) — fully air-gapped, no
+  assisted-service dependency.  ABI uses **fixed-IP-via-DHCP** (the ROS stack
+  pins the master IPs, the VPC's cloud DHCP delivers them) with an empty
+  `agent-config` `hosts[]` — confirmed via `scripts/abi-eni-spike.sh` that this
+  is the clean Alibaba path (static NMState would force a MAC circular
+  dependency).  Phase order is the same as `site.yml` except the mirror runs
+  before the ISO build.  The clone-vdb-to-vda hook still needs wiring into the
+  agent ISO's live ignition before a live install completes (see iso_agent.yml).
 - compact 3-node (`compute_count: 0`) — workers schedule on masters
 
 ---

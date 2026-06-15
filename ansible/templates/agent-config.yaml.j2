@@ -1,46 +1,21 @@
 #jinja2: trim_blocks: True, lstrip_blocks: True
-# agent-config.yaml for the Agent-based Installer (installation_method=agent).
-# Rendered by ansible/tasks/iso_agent.yml.  hosts[] is populated from the MAC
-# addresses harvested in 06a (pre-created ENIs / instances) — each entry pins a
-# node to its fixed PrivateIpAddress via static NMState so the cluster comes up
-# on the exact IPs the ROS stack reserved.  rendezvousIP must be the master-1
-# fixed IP (same value the ROS stack passes as RendezvousIp).
+# agent-config.yaml for the Agent-based Installer (installation_method=Agent-based).
+# Rendered by ansible/tasks/iso_agent.yml.
+#
+# Network model (decided 2026-06-15 via scripts/abi-eni-spike.sh): on Alibaba
+# Cloud the VPC always delivers the node's fixed PrivateIpAddress over cloud
+# DHCP, so per-node static NMState is redundant AND would force a MAC
+# circular-dependency (the agent ISO would need each node's MAC before the
+# instances exist).  We therefore keep hosts[] EMPTY and let the ROS stack pin
+# the fixed IPs (RendezvousIp / Master2Ip / Master3Ip) which DHCP then hands to
+# the nodes.  rendezvousIP must equal master-1's fixed IP (the ROS RendezvousIp
+# parameter, fed from ansible rendezvous_ip — must live in the masters' subnet,
+# PrivateSubnetCidr2 / e.g. 10.0.32.0/20 for the default HA layout).  ABI
+# auto-assigns control-plane vs worker roles from the install-config replica
+# counts, so no per-host role pinning is needed for the compact 3-master layout.
 apiVersion: v1alpha1
 kind: AgentConfig
 metadata:
   name: {{ cluster_name }}
 rendezvousIP: {{ rendezvous_ip }}
-hosts:
-  {% for h in _agent_hosts %}
-  - hostname: {{ h.hostname }}
-    role: {{ h.role }}
-    interfaces:
-      - name: {{ _node_nic_name | default('eth0') }}
-        macAddress: {{ h.mac }}
-    rootDeviceHints:
-      deviceName: {{ _node_root_device | default('/dev/vda') }}
-    networkConfig:
-      interfaces:
-        - name: {{ _node_nic_name | default('eth0') }}
-          type: ethernet
-          state: up
-          mac-address: {{ h.mac }}
-          ipv4:
-            enabled: true
-            dhcp: false
-            address:
-              - ip: {{ h.ip }}
-                prefix-length: {{ _node_prefix_length | int }}
-      dns-resolver:
-        config:
-          server:
-            {% for s in _node_dns | default(['100.100.2.136', '100.100.2.138']) %}
-            - {{ s }}
-            {% endfor %}
-      routes:
-        config:
-          - destination: 0.0.0.0/0
-            next-hop-address: {{ _node_gateway }}
-            next-hop-interface: {{ _node_nic_name | default('eth0') }}
-            table-id: 254
-  {% endfor %}
+hosts: []

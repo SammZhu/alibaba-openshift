@@ -94,11 +94,13 @@ offline_token_file:   "{{ lookup('env', 'HOME') }}/.openshift/offline-token"
 output_dir:           "{{ lookup('env', 'HOME') }}/openshift-install/{{ cluster_name }}"
 
 # ── Installation method ──────────────────────────────────────────────────────
-# Assisted  → run via site.yml       (assisted-service REST API; tested path)
-# agent     → run via site-agent.yml (Agent-based / ABI; fully air-gapped).
-#             ABI ISO-build scaffolding is in place; instance provisioning
-#             (06a/06b static-NMState MAC harvest) + live HA validation pending
-#             the pre-created-ENI spike. Value is matched case-insensitively.
+# Assisted    → run via site.yml       (assisted-service REST API; tested path)
+# Agent-based → run via site-agent.yml (ABI; fully air-gapped, no assisted-service).
+#               ABI uses fixed-IP-via-DHCP (ROS pins the master IPs, cloud DHCP
+#               delivers them) with an empty agent-config hosts[] — no MAC harvest.
+#               For ABI HA, set rendezvous_ip to master-1's IP in the masters'
+#               subnet (PrivateSubnetCidr2, e.g. 10.0.32.5 — NOT the 10.0.16.5
+#               zone1 default). Value is matched case-insensitively.
 installation_method:  Assisted
 
 # ── Repo locations on the local machine ──────────────────────────────────────

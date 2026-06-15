@@ -6,12 +6,13 @@
 # Unlike the Assisted path (tasks/install_assisted.yml) there is NO host-role
 # assignment, NO manifest upload, and NO /actions/install trigger — the agent
 # ISO baked all of that in at 01 (iso_agent.yml) and the install auto-starts when
-# 06b boots the nodes.  We only wait for completion and harvest the kubeconfig.
+# 06 (cluster-stack) boots the nodes.  We only wait for completion and harvest
+# the kubeconfig.
 #
 # Runs on the operator host (RHEL8) — delegate_to: localhost — where
 # openshift-install and {{ install_dir }} live.
 
-- name: ABI — assert agent assets exist (01/06b ran)
+- name: ABI — assert agent assets exist (01/06 ran)
   ansible.builtin.stat:
     path: "{{ install_dir }}/.openshift_install_state.json"
   register: _abi_state
@@ -21,7 +22,7 @@
   ansible.builtin.fail:
     msg: >-
       {{ install_dir }}/.openshift_install_state.json not found — run 01
-      (iso_agent) and 06b (boot instances) first.
+      (iso_agent) and 06 (cluster-stack) first.
   when: not _abi_state.stat.exists
 
 # wait-for blocks until the milestone or its own timeout; bootstrap typically

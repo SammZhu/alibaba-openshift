@@ -12,9 +12,10 @@
 # "render only on the operator host" rule; openshift-install is a local binary.
 #
 # Prereqs produced by earlier ABI phases (site-agent.yml order):
-#   - 03/04/05 mirror  -> {{ output_dir }}/mirror-ca.crt   (when mirror_enabled)
-#   - 06a network/ENI  -> _agent_hosts (MAC->IP->role), _node_gateway,
-#                         dynamic_manifest_file (alibaba-ccm-config.yaml)
+#   - 03/04/05 mirror  -> {{ output_dir }}/mirror-ca.crt + mirror_vpc_id /
+#                         mirror_private_vsw_1 in state (when mirror_enabled)
+#   - group_vars       -> rendezvous_ip (master-1 fixed IP in the masters' subnet)
+# Network model is fixed-IP-via-DHCP with empty hosts[] — no MAC harvest.
 
 - name: ABI — assert openshift-install binary is present
   ansible.builtin.command: openshift-install version
@@ -97,32 +98,29 @@
     _mirror_ca_cert: "{{ _abi_mirror_ca_slurp.content | b64decode }}"
   when: mirror_enabled | default(false) | bool
 
-# ── node network facts for static NMState (provided by 06a) ──
-# 06a harvests these from the actual node subnet (masters live in
-# PrivateVSwitch2 / PrivateSubnetCidr2, not the mirror subnet), so prefix +
-# gateway come from there rather than being derived from private_subnet_cidr.
-- name: ABI — assert host inventory + network facts are present (set by 06a)
+# ── network model: fixed-IP-via-DHCP, empty hosts[] (no MAC harvest) ──
+# See agent-config.yaml.j2 header. rendezvous_ip must be master-1's fixed IP in
+# the masters' subnet (PrivateSubnetCidr2).  No 06a / MAC machinery needed.
+- name: ABI — assert rendezvous_ip is set
   ansible.builtin.assert:
     that:
-      - _agent_hosts is defined
-      - _agent_hosts | length > 0
-      - _node_gateway is defined and _node_gateway | length > 0
-      - _node_prefix_length is defined
+      - rendezvous_ip is defined and rendezvous_ip | length > 0
     fail_msg: >-
-      _agent_hosts / _node_gateway / _node_prefix_length not set. Run 06a
-      (network/ENI pre-create + MAC harvest) before this task. For an env-free
-      render test, pass them as extra-vars (mock MACs/IPs/gateway/prefix).
+      rendezvous_ip not set. It must be master-1's fixed private IP, inside the
+      masters' subnet (PrivateSubnetCidr2, e.g. 10.0.32.5 for the default HA
+      layout — note the group_vars default 10.0.16.5 is the zone1 subnet and is
+      wrong for the zone2 masters).
 
-- name: ABI — assert alibaba-ccm-config.yaml exists (from 06a stack output)
-  ansible.builtin.stat:
-    path: "{{ dynamic_manifest_file }}"
-  register: _abi_ccm_cfg
-  delegate_to: localhost
-
-- name: ABI — fail if alibaba-ccm-config.yaml missing
-  ansible.builtin.fail:
-    msg: "{{ dynamic_manifest_file }} not found — run 06a (cluster-stack network) first."
-  when: not _abi_ccm_cfg.stat.exists
+# CCM config (region/vpcid/zoneid/vswitchid) comes from the mirror-stack outputs
+# (in state after 03) — rendered here because ABI bakes manifests at 01, before
+# the cluster-stack (06) that the AI path would get this output from.
+- name: ABI — assert mirror-stack network facts present (mirror mode)
+  ansible.builtin.assert:
+    that:
+      - mirror_vpc_id is defined and mirror_vpc_id | length > 0
+      - mirror_private_vsw_1 is defined and mirror_private_vsw_1 | length > 0
+    fail_msg: "mirror-stack outputs missing — run 03-create-mirror-stack.yml before 01 in the ABI order."
+  when: mirror_enabled | default(false) | bool
 
 # ── (re)create a clean install_dir ──
 # `openshift-install agent create image` CONSUMES install-config.yaml +
@@ -189,12 +187,11 @@
     - 03-machineconfig-chrony-worker.yaml
   delegate_to: localhost
 
-- name: ABI — stage dynamic alibaba-ccm-config.yaml
-  ansible.builtin.copy:
-    src: "{{ dynamic_manifest_file }}"
+- name: ABI — render alibaba-ccm-config.yaml from mirror-stack outputs
+  ansible.builtin.template:
+    src: ../templates/alibaba-ccm-config.yaml.j2
     dest: "{{ install_dir }}/openshift/alibaba-ccm-config.yaml"
     mode: "0644"
-    remote_src: true
   delegate_to: localhost
 
 # ── relaxed container signature policy (cluster runtime) ───────────────────
@@ -256,5 +253,5 @@
   ansible.builtin.debug:
     msg: >-
       Agent ISO built at {{ iso_path }} ({{ agent_iso_built_at }}).
-      ⚠ 24h ignition-cert window: import (02) + boot instances (06b) must
+      ⚠ 24h ignition-cert window: import (02) + boot instances (06) must
       complete within ~24h or regenerate.

@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# abi-eni-spike.sh — answer the ONE open question that gates ABI 06a/06b
+# OUTCOME (2026-06-15): this spike confirmed a standalone ENI's MAC is known
+# pre-instance, but more importantly that Alibaba's VPC delivers the fixed
+# PrivateIpAddress over cloud DHCP — so ABI went with fixed-IP-via-DHCP + empty
+# agent-config hosts[] (no MAC harvest, no 06a/06b split).  This script is kept
+# as a diagnostic; the Option C/B1/B2 hints below are historical.
+#
+# abi-eni-spike.sh — answer the ONE open question that gated ABI 06a/06b
 # (plan §4/§7): on Alibaba Cloud, can a pre-created ENI carry a known MAC
 # BEFORE the instance exists, and can it be attached as the instance's PRIMARY
 # NIC?  This decides the static-NMState MAC-harvest mechanism:
