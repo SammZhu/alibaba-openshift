@@ -36,8 +36,6 @@
     _m_iso: /var/lib/quay-storage/agent-build/install/agent.x86_64.iso
     _oss_internal_endpoint: "oss-{{ region }}-internal.aliyuncs.com"
     oss_object: "agent-{{ cluster_name }}.iso"
-    # LIVE-VERIFY: exact mirrored release pullspec/tag oc-mirror v2 published.
-    _agent_release_image: "{{ mirror_private_ip }}:8443/openshift/release-images:{{ openshift_version }}-x86_64"
 
 - name: ABI — set _ssh_root_mirror
   ansible.builtin.set_fact:
@@ -215,11 +213,15 @@
   until: _abi_scp.rc == 0
   changed_when: true
 
-# ── build the agent ISO on the mirror ECS (release pulled from localhost:8443) ─
+# ── build the agent ISO on the mirror ECS (release pulled from the mirror) ────
+# Standard disconnected ABI: no RELEASE_IMAGE_OVERRIDE — the openshift-install
+# binary (version-pinned to {{ openshift_version }}) carries its release digest,
+# and install-config's imageDigestSources redirect quay.io/openshift-release-dev
+# -> the mirror, so the installer pulls the right release FROM the mirror.  The
+# mirror ECS trusts its own registry CA, so no extra trust flags are needed.
 - name: ABI — openshift-install agent create image (on mirror ECS, data disk)
   ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'set -e; export TMPDIR={{ _m_tmp }} XDG_CACHE_HOME={{ _m_build_dir }}/.cache
-      OPENSHIFT_INSTALL_RELEASE_IMAGE_OVERRIDE={{ _agent_release_image }};
+    {{ _ssh_root_mirror }} 'set -e; export TMPDIR={{ _m_tmp }} XDG_CACHE_HOME={{ _m_build_dir }}/.cache;
       openshift-install agent create image --dir {{ _m_install_dir }} --log-level=info'
   changed_when: true
   # LIVE-VERIFY: confirm the release override pullspec + that the installer
