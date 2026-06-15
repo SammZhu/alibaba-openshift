@@ -35,8 +35,11 @@
       loop_control:
         label: "{{ item.item }}"
 
-    - name: Verify offline token can mint an access token
+    # Assisted-Installer only — ABI (installation_method=Agent-based) has no
+    # assisted-service dependency, so it needs no offline token / sso.redhat.com.
+    - name: Verify offline token can mint an access token (Assisted only)
       ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+      when: installation_method | default('Assisted') | lower not in ['agent', 'agent-based']
 
     - name: Verify aliyun-cli profile + ECS read access
       ansible.builtin.command:
