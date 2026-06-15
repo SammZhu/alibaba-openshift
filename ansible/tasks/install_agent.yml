@@ -82,9 +82,17 @@
     new_state:
       kubeconfig_path: "{{ kubeconfig_path }}"
 
+# Method-agnostic post-install wiring (same as the AI 07 path does inline):
+# stage kubeconfig on the jump host (/root/kubeconfig — 08+ run oc there) and
+# rewrite the *.apps wildcard PrivateZone record to a real router node.  ABI's
+# `agent wait-for install-complete` already confirmed the cluster, so we do NOT
+# need AI 07's Phase-B AI-status poll — only this shared post-install step.
+- name: ABI — stage kubeconfig on jump host + rewrite *.apps DNS
+  ansible.builtin.include_tasks: ../tasks/post_install_apps_dns.yml
+
 - name: ABI — install complete
   ansible.builtin.debug:
     msg: >-
-      Agent-based install complete. kubeconfig at {{ output_dir }}/auth/kubeconfig.
-      (api.<cluster> resolves in-VPC; for oc from the operator host use the same
-      jump-host DNS path as the AI flow.)
+      Agent-based install complete. kubeconfig at {{ output_dir }}/auth/kubeconfig
+      and on the jump host at /root/kubeconfig; *.apps DNS rewritten. 08+ (site-post)
+      run oc on the jump host as usual.
