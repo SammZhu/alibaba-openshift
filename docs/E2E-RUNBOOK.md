@@ -36,8 +36,11 @@ Assumed configuration:
   `agent-config` `hosts[]` — confirmed via `scripts/abi-eni-spike.sh` that this
   is the clean Alibaba path (static NMState would force a MAC circular
   dependency).  Phase order is the same as `site.yml` except the mirror runs
-  before the ISO build.  The clone-vdb-to-vda hook still needs wiring into the
-  agent ISO's live ignition before a live install completes (see iso_agent.yml).
+  before the ISO build.  The clone-vdb-to-vda hook is injected into the agent
+  ISO's live ignition via coreos-installer (show -> jq-merge -> embed --force),
+  so the operator host needs `coreos-installer` + `jq` + `openshift-install`.
+  Note `agent create image` pulls the release locally, so the operator host must
+  reach the mirror registry (or upstream).  Live HA validation pending.
 - compact 3-node (`compute_count: 0`) — workers schedule on masters
 
 ---
