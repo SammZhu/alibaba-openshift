@@ -138,6 +138,41 @@
     dest: "{{ install_dir }}/abi-ign-merge.jq"
     mode: "0644"
 
+# Registry config (mirror auth) + ICSP so the clone-hook step can `oc image
+# extract` the version-matched coreos-installer from the release's
+# machine-os-images (the FCOS coreos-installer:release fails on the RHCOS-9.6
+# ISO). Rendered locally + tar'd to the mirror ECS with install_dir.
+- name: ABI — compute mirror auth for the oc registry-config (clone-hook)
+  ansible.builtin.set_fact:
+    _abi_mirror_auth_b64: "{{ ((mirror_init_user | default('mirror-admin')) + ':' + mirror_init_password) | b64encode }}"
+  no_log: true
+  when: abi_clone_hook_enabled | default(true) | bool
+
+- name: ABI — render oc registry-config + ICSP for matched coreos-installer extract
+  ansible.builtin.copy:
+    dest: "{{ install_dir }}/{{ item.name }}"
+    content: "{{ item.content }}"
+    mode: "0600"
+  loop:
+    - name: abi-rc.json
+      content: '{"auths":{"{{ mirror_private_ip }}:8443":{"auth":"{{ _abi_mirror_auth_b64 }}"}}}'
+    - name: abi-icsp.yaml
+      content: |
+        apiVersion: operator.openshift.io/v1alpha1
+        kind: ImageContentSourcePolicy
+        metadata:
+          name: m
+        spec:
+          repositoryDigestMirrors:
+          - source: quay.io/openshift-release-dev/ocp-release
+            mirrors: ["{{ mirror_private_ip }}:8443/openshift/release-images"]
+          - source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
+            mirrors: ["{{ mirror_private_ip }}:8443/openshift/release"]
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+  when: abi_clone_hook_enabled | default(true) | bool
+
 - name: ABI — render CCM manifest + alibaba-ccm-config into openshift/
   ansible.builtin.template:
     src: "{{ item.src }}"
@@ -243,27 +278,26 @@
   # local trust); add registries.conf/--insecure handling here if needed.
 
 # ── inject the Alibaba clone-vdb-to-vda hook into the agent ISO live ignition ──
-# coreos-installer (podman) shows the agent ISO's embedded ignition, jq additively
-# merges our fragment via the scp'd abi-ign-merge.jq, embed --force.
-# Each remote command stays on ONE line (a YAML `>-` folded scalar would keep a
-# newline before a more-indented line and split the command).
-#
-# ⚠ GATED by abi_clone_hook_enabled (default true).  The FCOS
-# quay.io/coreos/coreos-installer:release (0.26.0) can READ the agent ISO but
-# `iso ignition embed` fails with "kargs don't match at all offsets" on the
-# RHCOS-9.6 *minimal* agent ISO (version skew; the matched coreos-installer is
-# not shipped as a loose binary in agent-installer-utils).  Set
-# abi_clone_hook_enabled=false to skip injection and first confirm whether ABI's
-# minimal ISO even needs the clone hook (it boots its rootfs from RAM, unlike the
-# AI full discovery ISO that pins /dev/vda) before investing in a matched
-# coreos-installer.  See the build-notes / plan.
-- name: ABI — inject clone-hook into the agent ISO embedded ignition (on mirror ECS)
+# The FCOS quay.io/coreos/coreos-installer:release (0.26.0) READS the agent ISO
+# but `iso ignition embed` fails "kargs don't match" on the RHCOS-9.6 minimal
+# agent ISO (version skew).  Fix: extract the VERSION-MATCHED coreos-installer
+# (0.24.0) — it ships as a loose binary inside the release's machine-os-images —
+# and run that binary INSIDE the FCOS container so it picks up libssl.so.3
+# (RHCOS9-built, won't run bare on the RHEL8 mirror ECS).  Then show -> jq merge
+# -> embed --force.  Each remote command stays on ONE line.  Gated by
+# abi_clone_hook_enabled (default true).
+- name: ABI — inject clone-hook with version-matched coreos-installer (on mirror ECS)
   ansible.builtin.shell: |
     {{ _ssh_root_mirror }} 'set -e
     cd {{ _m_install_dir }}
-    podman run --rm -v {{ _m_install_dir }}:/d:z quay.io/coreos/coreos-installer:release iso ignition show /d/agent.x86_64.iso > existing.ign
+    mkdir -p ci
+    REL={{ mirror_private_ip }}:8443/openshift/release-images:{{ openshift_version }}-x86_64
+    MOS=$(oc adm release info --image-for=machine-os-images --filter-by-os=linux/amd64 --insecure=true --icsp-file=abi-icsp.yaml $REL --registry-config=abi-rc.json)
+    test -x ci/usr/bin/coreos-installer || oc image extract $MOS --path=/usr/bin/coreos-installer:ci/ --confirm --insecure=true --icsp-file=abi-icsp.yaml --registry-config=abi-rc.json
+    chmod +x ci/usr/bin/coreos-installer
+    podman run --rm -v {{ _m_install_dir }}/ci/usr/bin/coreos-installer:/ci:z -v {{ _m_install_dir }}:/d:z --entrypoint /ci quay.io/coreos/coreos-installer:release iso ignition show /d/agent.x86_64.iso > existing.ign
     jq -s -f abi-ign-merge.jq existing.ign agent-live-clonehook.ign > merged.ign
-    podman run --rm -v {{ _m_install_dir }}:/d:z quay.io/coreos/coreos-installer:release iso ignition embed --force --ignition-file /d/merged.ign /d/agent.x86_64.iso'
+    podman run --rm -v {{ _m_install_dir }}/ci/usr/bin/coreos-installer:/ci:z -v {{ _m_install_dir }}:/d:z --entrypoint /ci quay.io/coreos/coreos-installer:release iso ignition embed --force --ignition-file /d/merged.ign /d/agent.x86_64.iso'
   changed_when: true
   when: abi_clone_hook_enabled | default(true) | bool
 
