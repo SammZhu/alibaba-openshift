@@ -35,8 +35,11 @@
       loop_control:
         label: "{{ item.item }}"
 
-    - name: Verify offline token can mint an access token
+    # Assisted-Installer only — ABI (installation_method=Agent-based) has no
+    # assisted-service dependency, so it needs no offline token / sso.redhat.com.
+    - name: Verify offline token can mint an access token (Assisted only)
       ansible.builtin.include_tasks: ../tasks/assisted_token.yml
+      when: installation_method | default('Assisted') | lower not in ['agent', 'agent-based']
 
     - name: Verify aliyun-cli profile + ECS read access
       ansible.builtin.command:
@@ -113,7 +116,11 @@
             [{'zone': zone,  'type': jump_host_type | default(''),       'role': 'jump host'}]
               if (enable_jump_host | default(false) | bool) else []
           ) + (
-            [{'zone': zone,  'type': mirror_instance_type | default(''), 'role': 'mirror registry'}]
+            [{'zone': zone,
+              'type': (mirror_instance_type
+                       if (mirror_instance_type | default('') | length > 0)
+                       else (mirror_instance_type_fresh | default('ecs.g7.xlarge'))),
+              'role': 'mirror registry'}]
               if (mirror_enabled | default(false) | bool) else []
           ) }}
 

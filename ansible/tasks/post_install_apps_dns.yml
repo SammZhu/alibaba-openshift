@@ -1,0 +1,123 @@
+---
+# tasks/post_install_apps_dns.yml — method-agnostic post-install steps:
+#   1. stage kubeconfig on the jump host (/root/kubeconfig) — 08+ run oc there,
+#      and the router discovery below needs in-VPC oc access.
+#   2. rewrite the *.apps wildcard PrivateZone record from the bogon placeholder
+#      (cluster-stack IngressVip) to a node actually running router-default, so
+#      the console/ingress operators converge.
+#
+# This is the same logic the Assisted path runs inline in 07-install-cluster.yml
+# (it operates on the running cluster + Alibaba PrivateZone, independent of how
+# the cluster was installed).  It is included by the ABI path (install_agent.yml)
+# so ABI gets the same post-install wiring WITHOUT modifying the AI 07 playbook.
+# Runs on the operator host (hosts: local): aliyun uses {{ aliyun_profile }};
+# oc runs over ssh on the jump host (inside the VPC).
+
+- name: post-dns — wait for jump host cloud-init to finish (userdata.done marker)
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ ssh_priv_key_file }}"
+      - -o
+      - StrictHostKeyChecking=no
+      - -o
+      - ConnectTimeout=5
+      - "root@{{ jump_host_ip }}"
+      - test -f /var/log/userdata.done
+  register: _pd_jump_ready
+  changed_when: false
+  failed_when: false
+  retries: 30
+  delay: 10
+  until: _pd_jump_ready.rc == 0
+  when: jump_host_ip | default('') | length > 0
+
+- name: post-dns — copy kubeconfig to the jump host (/root/kubeconfig for oc)
+  ansible.builtin.command:
+    argv:
+      - scp
+      - -i
+      - "{{ ssh_priv_key_file }}"
+      - -o
+      - StrictHostKeyChecking=no
+      - "{{ output_dir }}/auth/kubeconfig"
+      - "root@{{ jump_host_ip }}:/root/kubeconfig"
+  register: _pd_scp_kc
+  changed_when: _pd_scp_kc.rc == 0
+  when: jump_host_ip | default('') | length > 0
+
+- name: post-dns — discover hostIPs of router-default pods (via jump host, in VPC)
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ ssh_priv_key_file }}"
+      - -o
+      - StrictHostKeyChecking=no
+      - -o
+      - ConnectTimeout=10
+      - "root@{{ jump_host_ip }}"
+      - "oc --kubeconfig=/root/kubeconfig -n openshift-ingress get pods -l ingresscontroller.operator.openshift.io/deployment-ingresscontroller=default -o jsonpath='{.items[*].status.hostIP}'"
+  register: _pd_router_ips
+  changed_when: false
+  retries: 30
+  delay: 15
+  until: ((_pd_router_ips.stdout | default('')).split() | length) > 0
+  when: jump_host_ip | default('') | length > 0
+
+- name: post-dns — resolve *.apps target IP (first router hostIP)
+  ansible.builtin.set_fact:
+    _pd_apps_target_ip: "{{ ((_pd_router_ips.stdout | default('')).split() | first | default('')) | trim }}"
+
+- name: post-dns — fail loudly if no router pod hostIP discovered
+  ansible.builtin.fail:
+    msg: |
+      Could not discover any router-default pod hostIP via the jump host.
+      Without it the *.apps DNS rewrite would silently skip and console/ingress
+      stay Degraded.  Check: ssh root@{{ jump_host_ip }} \
+        oc --kubeconfig=/root/kubeconfig -n openshift-ingress get pods
+  when: _pd_apps_target_ip | length == 0
+
+- name: post-dns — query *.apps PrivateZone record id
+  ansible.builtin.command:
+    argv:
+      - aliyun
+      - pvtz
+      - DescribeZoneRecords
+      - --ZoneId
+      - "{{ forward_zone_id }}"
+      - --Keyword
+      - apps
+      - --SearchMode
+      - LIKE
+      - --profile
+      - "{{ aliyun_profile }}"
+  register: _pd_apps_rec_query
+  changed_when: false
+
+- name: post-dns — extract *.apps record id
+  ansible.builtin.set_fact:
+    _pd_apps_record_id: >-
+      {{ ((_pd_apps_rec_query.stdout | from_json).Records.Record | default([])
+          | selectattr('Rr','equalto','*.apps') | list | first).RecordId }}
+
+- name: post-dns — UpdateZoneRecord *.apps → {{ _pd_apps_target_ip }}
+  ansible.builtin.command:
+    argv:
+      - aliyun
+      - pvtz
+      - UpdateZoneRecord
+      - --RecordId
+      - "{{ _pd_apps_record_id }}"
+      - --Rr
+      - "*.apps"
+      - --Type
+      - A
+      - --Value
+      - "{{ _pd_apps_target_ip }}"
+      - --Ttl
+      - "60"
+      - --profile
+      - "{{ aliyun_profile }}"
+  changed_when: true

@@ -50,17 +50,26 @@
           - mirror_init_user is defined and mirror_init_user | length > 0
           - mirror_init_password is defined and mirror_init_password | length > 0
           - jump_host_ip is defined and jump_host_ip | length > 0
-          - cluster_id is defined and cluster_id | length > 0
-          - infra_env_id is defined and infra_env_id | length > 0
           - oss_bucket is defined and oss_bucket | length > 0
           - mirror_oss_object is defined and mirror_oss_object | length > 0
         fail_msg: |
           Required state is missing.  This playbook runs AFTER Phase 03 (mirror-stack) and
           requires:
             - mirror_enabled=true in group_vars
-            - Phase 03 (mirror-stack) completed (state.yml has mirror_private_ip / jump_host_ip
-              / cluster_id / infra_env_id)
+            - Phase 03 (mirror-stack) completed (state.yml has mirror_private_ip / jump_host_ip)
             - mirror_oss_object / oss_bucket configured
+
+    # Assisted-Installer only: the install-config PATCH (Step 11) targets the AI
+    # cluster created in Phase 01.  ABI has no assisted cluster (it bakes the
+    # mirror CA into install-config at agent-ISO build time), so these are not
+    # required and Step 11 is skipped for installation_method=Agent-based.
+    - name: Sanity — AI cluster/infra-env state present (Assisted only)
+      ansible.builtin.assert:
+        that:
+          - cluster_id is defined and cluster_id | length > 0
+          - infra_env_id is defined and infra_env_id | length > 0
+        fail_msg: "Phase 01 (Assisted) must run before 04 for the install-config PATCH (cluster_id / infra_env_id)."
+      when: installation_method | default('Assisted') | lower not in ['agent', 'agent-based']
 
     # ── Step 1: wait for ECS bootstrap signal ────────────────────────────────
     # Cloud-init wrote /var/lib/mirror-bootstrap-ready when the host is
@@ -1391,6 +1400,19 @@
       vars:
         new_state:
           mirror_ca_cert_path: "{{ output_dir }}/mirror-ca.crt"
+
+    # ── ABI stops here: the mirror is ready and its CA is fetched/saved above.
+    # ABI bakes the CA into install-config at agent-ISO build time (tasks/
+    # iso_agent.yml), so it does NOT PATCH an assisted cluster.  Step 11 below is
+    # Assisted-only (needs the cluster_id/infra_env_id from Phase 01).
+    - name: Mirror prepare done (ABI — AI install-config PATCH skipped)
+      ansible.builtin.debug:
+        msg: "Mirror ready + CA at {{ output_dir }}/mirror-ca.crt; ABI bakes it into install-config at build time."
+      when: installation_method | default('Assisted') | lower in ['agent', 'agent-based']
+
+    - name: End play for ABI before the Assisted-only install-config PATCH
+      ansible.builtin.meta: end_play
+      when: installation_method | default('Assisted') | lower in ['agent', 'agent-based']
 
     # ── Step 11: PATCH AI cluster install-config + infra-env trust bundle ───
     - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
