@@ -141,11 +141,26 @@ Parameters:
     Type: String
     Default: 10.0.32.5
     Description: |
-      Agent-based only.  Fixed private IP for the rendezvous node.
+      Agent-based only.  Fixed private IP for the rendezvous node (master-1).
       Must live inside the VSwitch matching the master placement (all
       3 masters live in PrivateVSwitch2 / zone2 by default, so the
       rendezvous IP must fall within PrivateSubnetCidr2 — typically
       10.0.32.0/20).
+
+  Master2Ip:
+    Type: String
+    Default: 10.0.32.6
+    Description: |
+      Agent-based only.  Fixed private IP for master-2 (must be in the
+      same VSwitch/subnet as RendezvousIp — PrivateSubnetCidr2).  The
+      ABI static-NMState host inventory (agent-config.yaml hosts[]) pins
+      each master to its fixed IP, so all masters need a reserved address.
+
+  Master3Ip:
+    Type: String
+    Default: 10.0.32.7
+    Description: |
+      Agent-based only.  Fixed private IP for master-3 (PrivateSubnetCidr2).
 
   IngressVip:
     Type: String
@@ -520,6 +535,7 @@ Resources:
           Size: !Ref InstallDiskSize
           DiskName: !Sub '${ClusterName}-master-2-install'
       AllocatePublicIP: false
+      PrivateIpAddress: !If [IsAgentBased, !Ref Master2Ip, !Ref 'ALIYUN::NoValue']
       RamRoleName: !Ref NodeRamRoleName
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
@@ -543,6 +559,7 @@ Resources:
           Size: !Ref InstallDiskSize
           DiskName: !Sub '${ClusterName}-master-3-install'
       AllocatePublicIP: false
+      PrivateIpAddress: !If [IsAgentBased, !Ref Master3Ip, !Ref 'ALIYUN::NoValue']
       RamRoleName: !Ref NodeRamRoleName
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'

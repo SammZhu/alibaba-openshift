@@ -28,8 +28,14 @@ Assumed configuration:
 
 - `mirror_enabled: true` (disconnected/restricted-network path — the
   documented and tested production path on China-region accounts)
-- `installation_method: Assisted` (Agent-based works in principle, not the
-  path tested by this runbook)
+- `installation_method: Assisted` (this runbook covers the Assisted path via
+  `site.yml`).  The **Agent-based Installer (ABI)** is also supported via
+  `site-agent.yml` (`installation_method: agent`) — fully air-gapped, no
+  assisted-service dependency.  Its env-free scaffolding is in place
+  (`tasks/iso_agent.yml`, `tasks/install_agent.yml`, `templates/{install,agent}-config.yaml.j2`,
+  `01-prepare-iso-agent.yml`, `07-install-cluster-agent.yml`); the instance
+  provisioning + static-NMState MAC harvest (`06a`/`06b`) and the live HA run
+  are pending the pre-created-ENI spike (see the SSOT/ABI plan §4/§7).
 - compact 3-node (`compute_count: 0`) — workers schedule on masters
 
 ---

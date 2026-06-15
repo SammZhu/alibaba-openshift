@@ -1,0 +1,51 @@
+#jinja2: trim_blocks: True, lstrip_blocks: True
+# install-config.yaml for the Agent-based Installer (installation_method=agent).
+# Rendered by ansible/tasks/iso_agent.yml on the operator host, then consumed by
+# `openshift-install agent create image`.  Field-for-field equivalent to the
+# Assisted-Installer path: the cluster-object payload in 01-prepare-iso.yml
+# (platform.external / topology / pullSecret / sshKey) PLUS the install-config
+# overrides that the AI path applies via PATCH in 04-prepare-mirror.yml
+# (imageDigestSources + additionalTrustBundle).  Keep the two in sync.
+apiVersion: v1
+metadata:
+  name: {{ cluster_name }}
+baseDomain: {{ base_domain }}
+networking:
+  clusterNetwork:
+    - cidr: 10.128.0.0/14
+      hostPrefix: 23
+  networkType: OVNKubernetes
+  machineNetwork:
+    - cidr: {{ vpc_cidr }}
+  serviceNetwork:
+    - 172.30.0.0/16
+compute:
+  - architecture: amd64
+    hyperthreading: Enabled
+    name: worker
+    replicas: {{ _eff_compute_count | int }}
+controlPlane:
+  architecture: amd64
+  hyperthreading: Enabled
+  name: master
+  replicas: {{ _eff_control_plane_count | int }}
+platform:
+  external:
+    platformName: AlibabaCloud
+    cloudControllerManager: External
+{% if mirror_enabled | default(false) | bool %}
+# Mirror redirect — identical source->mirror mapping as the AI install-config
+# PATCH (04-prepare-mirror.yml: oc-mirror v2 publishes exactly these two repos).
+imageDigestSources:
+  - source: quay.io/openshift-release-dev/ocp-release
+    mirrors:
+      - {{ mirror_private_ip }}:8443/openshift/release-images
+  - source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
+    mirrors:
+      - {{ mirror_private_ip }}:8443/openshift/release
+additionalTrustBundlePolicy: Always
+additionalTrustBundle: |
+{{ _mirror_ca_cert | indent(2, true) }}
+{% endif %}
+pullSecret: '{{ _pull_secret_effective }}'
+sshKey: '{{ _ssh_pub_key }}'

@@ -1,0 +1,23 @@
+---
+# MachineConfig: relaxed container signature policy (Agent-based Installer).
+# Mirrors the policy.json that the Assisted-Installer path injects via discovery
+# ignition (ansible/files/policy.json).  Lets nodes pull unsigned mirrored
+# content from the in-VPC registry.  Safe — the mirror contents are controlled.
+# Rendered per role by tasks/iso_agent.yml (_mc_role = master|worker).
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  name: 99-alibaba-signature-policy-{{ _mc_role }}
+  labels:
+    machineconfiguration.openshift.io/role: {{ _mc_role }}
+spec:
+  config:
+    ignition:
+      version: 3.4.0
+    storage:
+      files:
+        - path: /etc/containers/policy.json
+          mode: 0644
+          overwrite: true
+          contents:
+            source: "data:application/json;base64,{{ lookup('file', repo_root + '/ansible/files/policy.json') | b64encode }}"

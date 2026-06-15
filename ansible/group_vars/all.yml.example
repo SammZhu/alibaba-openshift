@@ -93,7 +93,12 @@ offline_token_file:   "{{ lookup('env', 'HOME') }}/.openshift/offline-token"
 # ── Output directory (kubeconfig, ISO, etc.) ─────────────────────────────────
 output_dir:           "{{ lookup('env', 'HOME') }}/openshift-install/{{ cluster_name }}"
 
-# ── Installation method (only Assisted is automated today) ───────────────────
+# ── Installation method ──────────────────────────────────────────────────────
+# Assisted  → run via site.yml       (assisted-service REST API; tested path)
+# agent     → run via site-agent.yml (Agent-based / ABI; fully air-gapped).
+#             ABI ISO-build scaffolding is in place; instance provisioning
+#             (06a/06b static-NMState MAC harvest) + live HA validation pending
+#             the pre-created-ENI spike. Value is matched case-insensitively.
 installation_method:  Assisted
 
 # ── Repo locations on the local machine ──────────────────────────────────────

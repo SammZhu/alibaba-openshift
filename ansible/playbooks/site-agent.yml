@@ -1,0 +1,32 @@
+---
+# Convenience wrapper: bring up the CLUSTER via the Agent-based Installer
+# (installation_method=agent).  ABI counterpart of site.yml (Assisted).
+#
+# Why the order differs from site.yml: ABI bakes the FULL install-config —
+# including the mirror CA (additionalTrustBundle) + imageDigestSources — into
+# the agent ISO at creation time.  The AI path can build the ISO first and PATCH
+# the mirror config in later via the assisted-service API (04), but ABI cannot,
+# so the mirror (03/04/05) MUST run BEFORE the ISO is built (01).  And because
+# static-NMState needs each node's MAC before the ISO is built, the cluster
+# network + ENIs are pre-created and MACs harvested (06a) before 01, with the
+# instances created afterwards (06b) once the agent image exists.
+#
+#   00            preflight (asserts openshift-install binary in agent mode)
+#   03/04/05      mirror (no-op if mirror_enabled=false) — provides mirror CA
+#   06a           cluster network + ENI pre-create + MAC harvest
+#   01-agent      render install-config/agent-config + agent create image
+#   02            import agent ISO -> ECS custom image
+#   06b           create instances (attach ENIs, boot agent image) -> auto-install
+#   07-agent      wait-for install-complete + harvest kubeconfig
+#
+# Post-install worker plane (08+) is the shared site-post.yml, unchanged — it
+# reads kubeconfig from {{ output_dir }}/auth, the same place 07-agent writes it.
+- ansible.builtin.import_playbook: 00-preflight.yml
+- ansible.builtin.import_playbook: 03-create-mirror-stack.yml   # no-op if mirror_enabled=false
+- ansible.builtin.import_playbook: 04-prepare-mirror.yml        # no-op if mirror_enabled=false
+- ansible.builtin.import_playbook: 05-verify-mirror.yml         # no-op if mirror_enabled=false
+- ansible.builtin.import_playbook: 06a-create-network.yml       # ABI: network + ENIs + MAC harvest
+- ansible.builtin.import_playbook: 01-prepare-iso-agent.yml     # ABI: build agent ISO
+- ansible.builtin.import_playbook: 02-import-image.yml
+- ansible.builtin.import_playbook: 06b-create-instances.yml     # ABI: instances boot agent image
+- ansible.builtin.import_playbook: 07-install-cluster-agent.yml

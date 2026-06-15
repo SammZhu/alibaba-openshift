@@ -1,0 +1,260 @@
+---
+# tasks/iso_agent.yml — Agent-based Installer (installation_method=agent) ISO build.
+#
+# Included by 01-prepare-iso.yml when installation_method == 'agent'.  Replaces
+# the entire Assisted-Installer flow (tasks/iso_assisted.yml) with the local
+# `openshift-install agent create image` workflow:
+#   1. render install-config.yaml + agent-config.yaml into {{ install_dir }}
+#   2. stage custom manifests into {{ install_dir }}/openshift
+#   3. openshift-install agent create image  ->  {{ iso_path }}
+#
+# Runs on the operator host (RHEL8) — delegate_to: localhost — per the
+# "render only on the operator host" rule; openshift-install is a local binary.
+#
+# Prereqs produced by earlier ABI phases (site-agent.yml order):
+#   - 03/04/05 mirror  -> {{ output_dir }}/mirror-ca.crt   (when mirror_enabled)
+#   - 06a network/ENI  -> _agent_hosts (MAC->IP->role), _node_gateway,
+#                         dynamic_manifest_file (alibaba-ccm-config.yaml)
+
+- name: ABI — assert openshift-install binary is present
+  ansible.builtin.command: openshift-install version
+  register: _oi_version
+  changed_when: false
+  delegate_to: localhost
+
+- name: ABI — resolve effective control-plane / compute counts per cluster_topology
+  ansible.builtin.set_fact:
+    _eff_control_plane_count: "{{ 1 if (cluster_topology | default('ha')) == 'sno' else (control_plane_count | int) }}"
+    _eff_compute_count: "{{ 0 if (cluster_topology | default('ha')) == 'sno' else (compute_count | int) }}"
+
+# ── pull secret (+ mirror auth augment) — mirrors 01-prepare-iso.yml AI block ──
+- name: ABI — read pull secret
+  ansible.builtin.slurp:
+    src: "{{ pull_secret_file }}"
+  register: _abi_pull_slurp
+  delegate_to: localhost
+  no_log: true
+
+- name: ABI — read SSH public key
+  ansible.builtin.slurp:
+    src: "{{ ssh_pub_key_file }}"
+  register: _abi_ssh_slurp
+  delegate_to: localhost
+
+- name: ABI — set ssh public key fact
+  ansible.builtin.set_fact:
+    _ssh_pub_key: "{{ _abi_ssh_slurp.content | b64decode | trim }}"
+
+- name: ABI — parse pull secret (mirror mode)
+  ansible.builtin.set_fact:
+    _abi_pull_parsed: "{{ _abi_pull_slurp.content | b64decode | from_json }}"
+  when: mirror_enabled | default(false) | bool
+  no_log: true
+
+# In ABI ordering 03-create-mirror-stack runs BEFORE this and persists
+# mirror_init_password to state (load_state promotes it to a top-level fact);
+# resolve-or-generate here mirrors 01/03 so the auth matches the live registry.
+- name: ABI — resolve mirror init password from state (mirror mode)
+  ansible.builtin.set_fact:
+    _mirror_init_password_resolved: >-
+      {{ mirror_init_password
+         if (mirror_init_password | default('') | length > 0)
+         else lookup('password', '/dev/null length=20 chars=ascii_letters,digits') }}
+  when: mirror_enabled | default(false) | bool
+  no_log: true
+
+- name: ABI — augment pull secret with mirror auth (mirror mode)
+  ansible.builtin.set_fact:
+    _pull_secret_effective: >-
+      {{ (_abi_pull_parsed
+          | combine({'auths':
+              _abi_pull_parsed.auths
+              | combine({ (mirror_private_ip + ':8443'): {
+                  'auth': ((mirror_init_user | default('mirror-admin')) + ':' + _mirror_init_password_resolved) | b64encode,
+                  'email': 'mirror-registry@localhost'
+                }})
+          }))
+         | to_json }}
+  when: mirror_enabled | default(false) | bool
+  no_log: true
+
+- name: ABI — use raw pull secret (non-mirror mode)
+  ansible.builtin.set_fact:
+    _pull_secret_effective: "{{ _abi_pull_slurp.content | b64decode | trim }}"
+  when: not (mirror_enabled | default(false) | bool)
+  no_log: true
+
+# ── mirror CA cert (additionalTrustBundle) — staged by 04-prepare-mirror.yml ──
+- name: ABI — slurp mirror CA cert (mirror mode)
+  ansible.builtin.slurp:
+    src: "{{ output_dir }}/mirror-ca.crt"
+  register: _abi_mirror_ca_slurp
+  delegate_to: localhost
+  when: mirror_enabled | default(false) | bool
+
+- name: ABI — set mirror CA cert fact (mirror mode)
+  ansible.builtin.set_fact:
+    _mirror_ca_cert: "{{ _abi_mirror_ca_slurp.content | b64decode }}"
+  when: mirror_enabled | default(false) | bool
+
+# ── node network facts for static NMState (provided by 06a) ──
+# 06a harvests these from the actual node subnet (masters live in
+# PrivateVSwitch2 / PrivateSubnetCidr2, not the mirror subnet), so prefix +
+# gateway come from there rather than being derived from private_subnet_cidr.
+- name: ABI — assert host inventory + network facts are present (set by 06a)
+  ansible.builtin.assert:
+    that:
+      - _agent_hosts is defined
+      - _agent_hosts | length > 0
+      - _node_gateway is defined and _node_gateway | length > 0
+      - _node_prefix_length is defined
+    fail_msg: >-
+      _agent_hosts / _node_gateway / _node_prefix_length not set. Run 06a
+      (network/ENI pre-create + MAC harvest) before this task. For an env-free
+      render test, pass them as extra-vars (mock MACs/IPs/gateway/prefix).
+
+- name: ABI — assert alibaba-ccm-config.yaml exists (from 06a stack output)
+  ansible.builtin.stat:
+    path: "{{ dynamic_manifest_file }}"
+  register: _abi_ccm_cfg
+  delegate_to: localhost
+
+- name: ABI — fail if alibaba-ccm-config.yaml missing
+  ansible.builtin.fail:
+    msg: "{{ dynamic_manifest_file }} not found — run 06a (cluster-stack network) first."
+  when: not _abi_ccm_cfg.stat.exists
+
+# ── (re)create a clean install_dir ──
+# `openshift-install agent create image` CONSUMES install-config.yaml +
+# agent-config.yaml (moves them into .openshift_install_state.json), so we render
+# fresh every run and keep .bak copies under output_dir for re-runs/debug.
+- name: ABI — reset install_dir
+  ansible.builtin.file:
+    path: "{{ install_dir }}"
+    state: "{{ item }}"
+    mode: "0755"
+  loop: [absent, directory]
+  delegate_to: localhost
+
+- name: ABI — create install_dir/openshift
+  ansible.builtin.file:
+    path: "{{ install_dir }}/openshift"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+
+- name: ABI — render install-config.yaml + agent-config.yaml
+  ansible.builtin.template:
+    src: "../templates/{{ item }}.j2"
+    dest: "{{ install_dir }}/{{ item }}"
+    mode: "0600"
+  loop:
+    - install-config.yaml
+    - agent-config.yaml
+  delegate_to: localhost
+  no_log: true
+
+- name: ABI — keep backup copies of the rendered configs (agent create consumes originals)
+  ansible.builtin.copy:
+    src: "{{ install_dir }}/{{ item }}"
+    dest: "{{ output_dir }}/{{ item }}.bak"
+    mode: "0600"
+    remote_src: true
+  loop:
+    - install-config.yaml
+    - agent-config.yaml
+  delegate_to: localhost
+  no_log: true
+
+# ── stage custom manifests into install_dir/openshift ──
+# ABI applies every file under <install_dir>/openshift/ to the cluster (both the
+# AI "manifests"-folder and "openshift"-folder items collapse here).
+- name: ABI — render CCM manifest (per-cluster substitution)
+  ansible.builtin.template:
+    src: "{{ repo_root }}/custom_manifests/01-alibaba-ccm.yaml.j2"
+    dest: "{{ install_dir }}/openshift/01-alibaba-ccm.yaml"
+    mode: "0644"
+  delegate_to: localhost
+
+- name: ABI — stage static custom manifests
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/custom_manifests/{{ item }}"
+    dest: "{{ install_dir }}/openshift/{{ item }}"
+    mode: "0644"
+  loop:
+    - 00-ovn-mtu.yaml
+    - 03-machineconfig-providerid-master.yaml
+    - 03-machineconfig-providerid-worker.yaml
+    - 03-machineconfig-chrony-master.yaml
+    - 03-machineconfig-chrony-worker.yaml
+  delegate_to: localhost
+
+- name: ABI — stage dynamic alibaba-ccm-config.yaml
+  ansible.builtin.copy:
+    src: "{{ dynamic_manifest_file }}"
+    dest: "{{ install_dir }}/openshift/alibaba-ccm-config.yaml"
+    mode: "0644"
+    remote_src: true
+  delegate_to: localhost
+
+# ── relaxed container signature policy (cluster runtime) ───────────────────
+# policy.json relaxes signature verification so nodes can pull unsigned mirrored
+# content at runtime.  This is a legitimate post-pivot MachineConfig (applies to
+# cluster nodes), unlike the clone hook below.
+- name: ABI — generate relaxed signature-policy MachineConfigs
+  ansible.builtin.template:
+    src: ../templates/mc-alibaba-signature-policy.yaml.j2
+    dest: "{{ install_dir }}/openshift/99-alibaba-signature-policy-{{ item }}.yaml"
+    mode: "0644"
+  vars:
+    _mc_role: "{{ item }}"
+  loop: [master, worker]
+  delegate_to: localhost
+
+# ── Alibaba clone hook (clone-vdb-to-vda) — DEFERRED, see plan §5 ──────────
+# ⚠ The AI path injects clone-vdb-to-vda (.sh + .service) via the discovery-ISO
+# ignition so it runs in the LIVE agent phase (ExecStop fires at shutdown, just
+# BEFORE the post-install reboot — Before=shutdown.target).  A MachineConfig
+# only applies AFTER the node joins the cluster (post-pivot) = far too late, so
+# it CANNOT replace this hook.  The clone hook must be injected into the agent
+# ISO's live ignition instead.  openshift-install does not expose agent-ISO live
+# ignition via agent-config.yaml, so the mechanism (boot-artifact ignition merge
+# vs. a wrapped ISO post-process) is the #1 item for the live-HA spike.  Until
+# resolved, the agent ISO will boot but the Alibaba disk clone will not happen,
+# so a live install will not complete — env-free ISO build is unaffected.
+- name: ABI — WARN clone hook not yet wired into agent ISO (live blocker, plan §5)
+  ansible.builtin.debug:
+    msg: >-
+      clone-vdb-to-vda is NOT yet injected into the agent ISO live ignition.
+      env-free ISO build is fine, but a LIVE install will not complete until the
+      spike wires it in (see tasks/iso_agent.yml comment + plan §5).
+
+# ── build the agent ISO ──
+- name: ABI — openshift-install agent create image
+  ansible.builtin.command:
+    cmd: openshift-install agent create image --dir {{ install_dir }}
+  args:
+    creates: "{{ install_dir }}/agent.x86_64.iso"
+  delegate_to: localhost
+
+- name: ABI — record ISO build timestamp (24h ignition-cert window, plan §5)
+  ansible.builtin.set_fact:
+    agent_iso_built_at: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+
+- name: ABI — point iso_path at the generated agent ISO
+  ansible.builtin.set_fact:
+    iso_path: "{{ install_dir }}/agent.x86_64.iso"
+
+- name: ABI — persist iso_path + build timestamp to state
+  ansible.builtin.include_tasks: ../tasks/save_state.yml
+  vars:
+    new_state:
+      iso_path: "{{ iso_path }}"
+      agent_iso_built_at: "{{ agent_iso_built_at }}"
+
+- name: ABI — ISO ready
+  ansible.builtin.debug:
+    msg: >-
+      Agent ISO built at {{ iso_path }} ({{ agent_iso_built_at }}).
+      ⚠ 24h ignition-cert window: import (02) + boot instances (06b) must
+      complete within ~24h or regenerate.

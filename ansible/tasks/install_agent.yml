@@ -1,0 +1,79 @@
+---
+# tasks/install_agent.yml — Agent-based Installer (installation_method=agent)
+# install monitoring.  Included by 07-install-cluster.yml when
+# installation_method == 'agent'.
+#
+# Unlike the Assisted path (tasks/install_assisted.yml) there is NO host-role
+# assignment, NO manifest upload, and NO /actions/install trigger — the agent
+# ISO baked all of that in at 01 (iso_agent.yml) and the install auto-starts when
+# 06b boots the nodes.  We only wait for completion and harvest the kubeconfig.
+#
+# Runs on the operator host (RHEL8) — delegate_to: localhost — where
+# openshift-install and {{ install_dir }} live.
+
+- name: ABI — assert agent assets exist (01/06b ran)
+  ansible.builtin.stat:
+    path: "{{ install_dir }}/.openshift_install_state.json"
+  register: _abi_state
+  delegate_to: localhost
+
+- name: ABI — fail if agent install state missing
+  ansible.builtin.fail:
+    msg: >-
+      {{ install_dir }}/.openshift_install_state.json not found — run 01
+      (iso_agent) and 06b (boot instances) first.
+  when: not _abi_state.stat.exists
+
+# wait-for blocks until the milestone or its own timeout; bootstrap typically
+# ~20-40 min, install-complete longer.  async/poll guards against an ansible
+# SSH/connection cap on the long-running command.
+- name: ABI — wait for bootstrap-complete
+  ansible.builtin.command:
+    cmd: openshift-install agent wait-for bootstrap-complete --dir {{ install_dir }} --log-level=info
+  delegate_to: localhost
+  async: 3600
+  poll: 30
+  changed_when: false
+
+- name: ABI — wait for install-complete
+  ansible.builtin.command:
+    cmd: openshift-install agent wait-for install-complete --dir {{ install_dir }} --log-level=info
+  delegate_to: localhost
+  async: 5400
+  poll: 30
+  changed_when: false
+
+# ── harvest credentials to the same location the AI path uses ──
+# (07 AI downloads to {{ output_dir }}/auth/kubeconfig; 08+ read from there.)
+- name: ABI — ensure output auth dir exists
+  ansible.builtin.file:
+    path: "{{ output_dir }}/auth"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+
+- name: ABI — copy kubeconfig + kubeadmin-password to output_dir/auth
+  ansible.builtin.copy:
+    src: "{{ install_dir }}/auth/{{ item }}"
+    dest: "{{ output_dir }}/auth/{{ item }}"
+    mode: "0600"
+    remote_src: true
+  loop:
+    - kubeconfig
+    - kubeadmin-password
+  delegate_to: localhost
+
+- name: ABI — set kubeconfig_path fact
+  ansible.builtin.set_fact:
+    kubeconfig_path: "{{ output_dir }}/auth/kubeconfig"
+
+- name: ABI — persist kubeconfig_path to state
+  ansible.builtin.include_tasks: ../tasks/save_state.yml
+  vars:
+    new_state:
+      kubeconfig_path: "{{ kubeconfig_path }}"
+
+- name: ABI — install complete
+  ansible.builtin.debug:
+    msg: >-
+      Agent-based install complete. kubeconfig at {{ output_dir }}/auth/kubeconfig.

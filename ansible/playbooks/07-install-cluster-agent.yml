@@ -1,0 +1,22 @@
+---
+# Phase 07 (Agent-based) — wait for the agent-based install to complete and
+# harvest the kubeconfig.  ABI counterpart of 07-install-cluster.yml (Assisted).
+#
+# No host-role assignment / manifest upload / install trigger — all baked into
+# the agent ISO at Phase 01 (iso_agent.yml); the install auto-starts when 06b
+# boots the nodes.  Invoked by site-agent.yml after 06b.
+- name: Install OpenShift via Agent-based Installer
+  hosts: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
+
+    - name: Assert installation_method is agent
+      ansible.builtin.assert:
+        that: installation_method | default('assisted') | lower in ['agent', 'agent-based']
+        fail_msg: >-
+          07-install-cluster-agent.yml is for installation_method=agent.
+          Use 07-install-cluster.yml (via site.yml) for the Assisted Installer.
+
+    - ansible.builtin.include_tasks: ../tasks/install_agent.yml
