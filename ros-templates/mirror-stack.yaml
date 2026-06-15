@@ -484,16 +484,32 @@ Resources:
     Type: ALIYUN::RAM::ManagedPolicy
     Properties:
       PolicyName: !Sub '${ClusterName}-mirror-policy'
-      Description: Read-only OSS access for mirror-registry tarball download
+      Description: OSS access for mirror tarball + Agent-based ISO upload/import
       PolicyDocument:
         Version: '1'
         Statement:
           - Effect: Allow
             Action:
+              # Read: mirror-registry tarball download (restore fast-path).
               - oss:GetObject
               - oss:HeadObject
               - oss:ListObjects
               - oss:ListBuckets
+              # Write: Agent-based Installer uploads the agent ISO to OSS from
+              # the mirror ECS (in-VPC, internal endpoint) before ImportImage.
+              - oss:PutObject
+              - oss:DeleteObject
+            Resource: ['*']
+          - Effect: Allow
+            Action:
+              # Agent-based Installer imports the uploaded ISO as a custom ECS
+              # image directly from the mirror ECS (Instance Principal), so the
+              # whole build->upload->import flow stays inside the VPC.
+              - ecs:ImportImage
+              - ecs:DescribeImages
+              - ecs:DescribeTasks
+              - ecs:DeleteImage
+              - ecs:CancelTask
             Resource: ['*']
 
   MirrorRamAttach:

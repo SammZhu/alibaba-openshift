@@ -11,21 +11,22 @@
 # them in later via the assisted-service API).
 #
 #   00            preflight
-#   03/04/05      mirror (no-op if mirror_enabled=false) — provides mirror CA
-#   01-agent      render install-config/agent-config + agent create image
-#   02            import agent ISO -> ECS custom image
+#   03/04/05      mirror (REQUIRED for ABI) — the agent ISO is built ON the
+#                 mirror ECS, so the mirror must be up first
+#   01-agent      ON the mirror ECS: build agent ISO (empty hosts[]) + inject
+#                 clone-hook + upload to OSS + ImportImage -> ecs_image_id
+#                 (no separate Phase 02 — import is folded in here)
 #   06            cluster-stack: instances boot the agent image -> auto-install
 #                 (06 already passes InstallationMethod + RendezvousIp; IsAgentBased
 #                  pins the fixed master IPs that DHCP then hands to the nodes)
-#   07-agent      wait-for install-complete + harvest kubeconfig
+#   07-agent      ON the mirror ECS: wait-for install-complete + scp kubeconfig back
 #
 # Post-install worker plane (08+) is the shared site-post.yml, unchanged — it
 # reads kubeconfig from {{ output_dir }}/auth, the same place 07-agent writes it.
 - ansible.builtin.import_playbook: 00-preflight.yml
-- ansible.builtin.import_playbook: 03-create-mirror-stack.yml   # no-op if mirror_enabled=false
-- ansible.builtin.import_playbook: 04-prepare-mirror.yml        # no-op if mirror_enabled=false
-- ansible.builtin.import_playbook: 05-verify-mirror.yml         # no-op if mirror_enabled=false
-- ansible.builtin.import_playbook: 01-prepare-iso-agent.yml     # ABI: build agent ISO (empty hosts[])
-- ansible.builtin.import_playbook: 02-import-image.yml
+- ansible.builtin.import_playbook: 03-create-mirror-stack.yml
+- ansible.builtin.import_playbook: 04-prepare-mirror.yml
+- ansible.builtin.import_playbook: 05-verify-mirror.yml
+- ansible.builtin.import_playbook: 01-prepare-iso-agent.yml     # build + import on the mirror ECS
 - ansible.builtin.import_playbook: 06-create-cluster-stack.yml  # instances boot the agent image
 - ansible.builtin.import_playbook: 07-install-cluster-agent.yml

@@ -1,68 +1,76 @@
 ---
-# tasks/install_agent.yml — Agent-based Installer (installation_method=agent)
-# install monitoring.  Included by 07-install-cluster.yml when
-# installation_method == 'agent'.
+# tasks/install_agent.yml — Agent-based Installer (installation_method=Agent-based)
+# install monitoring, ON THE MIRROR ECS.  Included by 07-install-cluster-agent.yml.
 #
-# Unlike the Assisted path (tasks/install_assisted.yml) there is NO host-role
-# assignment, NO manifest upload, and NO /actions/install trigger — the agent
-# ISO baked all of that in at 01 (iso_agent.yml) and the install auto-starts when
-# 06 (cluster-stack) boots the nodes.  We only wait for completion and harvest
-# the kubeconfig.
-#
-# Runs on the operator host (RHEL8) — delegate_to: localhost — where
-# openshift-install and {{ install_dir }} live.
+# The agent assets (install_dir with auth/ + .openshift_install_state.json) live
+# on the mirror ECS where 01 (iso_agent.yml) built them, and the mirror ECS is
+# in-VPC so it resolves the cluster's PrivateZone (api.<cluster>.<domain>) and
+# can run `openshift-install agent wait-for`.  We wait there, then scp the
+# kubeconfig back to {{ output_dir }}/auth on the operator host (same location
+# the AI path uses, so 08+ are unchanged).  No host-role assignment / manifest
+# upload / install trigger — all baked into the agent ISO at 01; the install
+# auto-starts when 06 (cluster-stack) boots the nodes.
 
-- name: ABI — assert agent assets exist (01/06 ran)
-  ansible.builtin.stat:
-    path: "{{ install_dir }}/.openshift_install_state.json"
-  register: _abi_state
-  delegate_to: localhost
+- name: ABI — set mirror ECS ssh connection facts
+  ansible.builtin.set_fact:
+    _ssh_common_args: "-i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes"
+    _ssh_proxy_args: "-o ProxyCommand='ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}'"
+    _m_install_dir: /var/lib/quay-storage/agent-build/install
 
-- name: ABI — fail if agent install state missing
-  ansible.builtin.fail:
-    msg: >-
-      {{ install_dir }}/.openshift_install_state.json not found — run 01
-      (iso_agent) and 06 (cluster-stack) first.
-  when: not _abi_state.stat.exists
+- name: ABI — set _ssh_root_mirror
+  ansible.builtin.set_fact:
+    _ssh_root_mirror: "ssh {{ _ssh_common_args }} {{ _ssh_proxy_args }} root@{{ mirror_private_ip }}"
 
-# wait-for blocks until the milestone or its own timeout; bootstrap typically
-# ~20-40 min, install-complete longer.  async/poll guards against an ansible
-# SSH/connection cap on the long-running command.
-- name: ABI — wait for bootstrap-complete
-  ansible.builtin.command:
-    cmd: openshift-install agent wait-for bootstrap-complete --dir {{ install_dir }} --log-level=info
-  delegate_to: localhost
+- name: ABI — assert agent assets exist on the mirror ECS (01/06 ran)
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'test -f {{ _m_install_dir }}/.openshift_install_state.json'
+  changed_when: false
+
+# wait-for blocks until the milestone or its own timeout; bootstrap ~20-40 min,
+# install-complete longer.  async/poll guards the long-running ssh command.
+- name: ABI — wait for bootstrap-complete (on mirror ECS)
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'openshift-install agent wait-for bootstrap-complete --dir {{ _m_install_dir }} --log-level=info'
   async: 3600
   poll: 30
   changed_when: false
 
-- name: ABI — wait for install-complete
-  ansible.builtin.command:
-    cmd: openshift-install agent wait-for install-complete --dir {{ install_dir }} --log-level=info
-  delegate_to: localhost
+- name: ABI — wait for install-complete (on mirror ECS)
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'openshift-install agent wait-for install-complete --dir {{ _m_install_dir }} --log-level=info'
   async: 5400
   poll: 30
   changed_when: false
 
-# ── harvest credentials to the same location the AI path uses ──
-# (07 AI downloads to {{ output_dir }}/auth/kubeconfig; 08+ read from there.)
-- name: ABI — ensure output auth dir exists
+# ── harvest credentials back to the operator host (same path the AI path uses) ──
+- name: ABI — ensure local output auth dir exists
   ansible.builtin.file:
     path: "{{ output_dir }}/auth"
     state: directory
     mode: "0700"
-  delegate_to: localhost
 
-- name: ABI — copy kubeconfig + kubeadmin-password to output_dir/auth
-  ansible.builtin.copy:
-    src: "{{ install_dir }}/auth/{{ item }}"
-    dest: "{{ output_dir }}/auth/{{ item }}"
-    mode: "0600"
-    remote_src: true
+- name: ABI — scp kubeconfig + kubeadmin-password back from the mirror ECS
+  ansible.builtin.command:
+    argv:
+      - scp
+      - -i
+      - "{{ ssh_priv_key_file }}"
+      - -o
+      - StrictHostKeyChecking=no
+      - -o
+      - UserKnownHostsFile=/dev/null
+      - -o
+      - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
+      - "root@{{ mirror_private_ip }}:{{ _m_install_dir }}/auth/{{ item }}"
+      - "{{ output_dir }}/auth/{{ item }}"
   loop:
     - kubeconfig
     - kubeadmin-password
-  delegate_to: localhost
+  register: _abi_kc_scp
+  retries: 3
+  delay: 10
+  until: _abi_kc_scp.rc == 0
+  changed_when: true
 
 - name: ABI — set kubeconfig_path fact
   ansible.builtin.set_fact:
@@ -78,3 +86,5 @@
   ansible.builtin.debug:
     msg: >-
       Agent-based install complete. kubeconfig at {{ output_dir }}/auth/kubeconfig.
+      (api.<cluster> resolves in-VPC; for oc from the operator host use the same
+      jump-host DNS path as the AI flow.)
