@@ -180,13 +180,17 @@
 
 # `openshift-install agent create image` shells out to `oc` to extract the base
 # RHCOS ISO + agent artifacts from the (mirrored) release payload — without it
-# the build fails with `exec: "oc": executable file not found`.
-- name: ABI — ensure version-pinned oc on the mirror ECS
+# the build fails with `exec: "oc"... not found`.  Use the RHEL8 client build:
+# the default openshift-client-linux.tar.gz is linked against newer glibc
+# (GLIBC_2.33/2.34) and won't run on Alibaba Cloud Linux 3 / RHEL8 (glibc 2.32).
+# Guard on `oc version` actually running (not just present) so a previously
+# installed incompatible oc gets replaced.
+- name: ABI — ensure version-pinned RHEL8 oc on the mirror ECS
   ansible.builtin.shell: >-
     {{ _ssh_root_mirror }} 'set -e;
-      command -v oc >/dev/null 2>&1 ||
+      oc version --client >/dev/null 2>&1 ||
       ( cd /var/lib/quay-storage &&
-        curl -sL -o oc.tgz https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ openshift_version }}/openshift-client-linux.tar.gz &&
+        curl -sL -o oc.tgz https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ openshift_version }}/openshift-client-linux-amd64-rhel8.tar.gz &&
         tar -xzf oc.tgz oc kubectl && install -m0755 oc kubectl /usr/local/bin/ && rm -f oc.tgz oc kubectl )'
   changed_when: true
 
