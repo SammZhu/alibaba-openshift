@@ -17,11 +17,16 @@
 #   - group_vars       -> rendezvous_ip (master-1 fixed IP in the masters' subnet)
 # Network model is fixed-IP-via-DHCP with empty hosts[] — no MAC harvest.
 
-- name: ABI — assert openshift-install binary is present
-  ansible.builtin.command: openshift-install version
-  register: _oi_version
+- name: ABI — assert required binaries are present (openshift-install, coreos-installer, jq)
+  ansible.builtin.command: "{{ item }}"
   changed_when: false
   delegate_to: localhost
+  loop:
+    - openshift-install version          # builds the agent ISO
+    - coreos-installer --version          # injects the clone-hook live ignition
+    - jq --version                        # merges the ignition fragment
+  loop_control:
+    label: "{{ item.split() | first }}"
 
 - name: ABI — resolve effective control-plane / compute counts per cluster_topology
   ansible.builtin.set_fact:
@@ -196,8 +201,8 @@
 
 # ── relaxed container signature policy (cluster runtime) ───────────────────
 # policy.json relaxes signature verification so nodes can pull unsigned mirrored
-# content at runtime.  This is a legitimate post-pivot MachineConfig (applies to
-# cluster nodes), unlike the clone hook below.
+# content at runtime.  This is a post-pivot MachineConfig (applies to cluster
+# nodes); the clone hook below is the opposite — it must run in the LIVE agent.
 - name: ABI — generate relaxed signature-policy MachineConfigs
   ansible.builtin.template:
     src: ../templates/mc-alibaba-signature-policy.yaml.j2
@@ -207,24 +212,6 @@
     _mc_role: "{{ item }}"
   loop: [master, worker]
   delegate_to: localhost
-
-# ── Alibaba clone hook (clone-vdb-to-vda) — DEFERRED, see plan §5 ──────────
-# ⚠ The AI path injects clone-vdb-to-vda (.sh + .service) via the discovery-ISO
-# ignition so it runs in the LIVE agent phase (ExecStop fires at shutdown, just
-# BEFORE the post-install reboot — Before=shutdown.target).  A MachineConfig
-# only applies AFTER the node joins the cluster (post-pivot) = far too late, so
-# it CANNOT replace this hook.  The clone hook must be injected into the agent
-# ISO's live ignition instead.  openshift-install does not expose agent-ISO live
-# ignition via agent-config.yaml, so the mechanism (boot-artifact ignition merge
-# vs. a wrapped ISO post-process) is the #1 item for the live-HA spike.  Until
-# resolved, the agent ISO will boot but the Alibaba disk clone will not happen,
-# so a live install will not complete — env-free ISO build is unaffected.
-- name: ABI — WARN clone hook not yet wired into agent ISO (live blocker, plan §5)
-  ansible.builtin.debug:
-    msg: >-
-      clone-vdb-to-vda is NOT yet injected into the agent ISO live ignition.
-      env-free ISO build is fine, but a LIVE install will not complete until the
-      spike wires it in (see tasks/iso_agent.yml comment + plan §5).
 
 # ── build the agent ISO ──
 - name: ABI — openshift-install agent create image
@@ -241,6 +228,51 @@
 - name: ABI — point iso_path at the generated agent ISO
   ansible.builtin.set_fact:
     iso_path: "{{ install_dir }}/agent.x86_64.iso"
+
+# ── inject the Alibaba clone-vdb-to-vda hook into the agent ISO's LIVE ignition ──
+# The agent ISO already carries an embedded ignition (the agent bootstrap
+# config), so we can't just `embed` ours — we show the existing one, merge our
+# clone-hook fragment (storage.files + systemd.units) with jq, and re-embed with
+# --force.  This is the ABI equivalent of the AI path's infra-env
+# ignition_config_override; it runs the disk clone in the LIVE agent environment
+# (a MachineConfig would be post-pivot = too late).  See agent-live-clonehook.ign.j2.
+- name: ABI — render clone-hook live ignition fragment
+  ansible.builtin.template:
+    src: ../templates/agent-live-clonehook.ign.j2
+    dest: "{{ install_dir }}/agent-live-clonehook.ign"
+    mode: "0600"
+  delegate_to: localhost
+
+- name: ABI — show the agent ISO's existing embedded ignition
+  ansible.builtin.command: coreos-installer iso ignition show {{ iso_path }}
+  register: _abi_existing_ign
+  changed_when: false
+  delegate_to: localhost
+
+- name: ABI — save existing ignition to a file
+  ansible.builtin.copy:
+    content: "{{ _abi_existing_ign.stdout }}"
+    dest: "{{ install_dir }}/agent-existing.ign"
+    mode: "0600"
+  delegate_to: localhost
+
+- name: ABI — merge clone-hook into the existing live ignition (jq, additive)
+  ansible.builtin.shell: >-
+    jq -s '.[0] as $b | .[1] as $a | $b
+      | .storage = (.storage // {})
+      | .storage.files = ((.storage.files // []) + ($a.storage.files // []))
+      | .systemd = (.systemd // {})
+      | .systemd.units = ((.systemd.units // []) + ($a.systemd.units // []))'
+    {{ install_dir }}/agent-existing.ign {{ install_dir }}/agent-live-clonehook.ign
+    > {{ install_dir }}/agent-merged.ign
+  args:
+    executable: /bin/bash
+  changed_when: true
+  delegate_to: localhost
+
+- name: ABI — embed the merged ignition back into the agent ISO (force overwrite)
+  ansible.builtin.command: coreos-installer iso ignition embed --force --ignition-file {{ install_dir }}/agent-merged.ign {{ iso_path }}
+  delegate_to: localhost
 
 - name: ABI — persist iso_path + build timestamp to state
   ansible.builtin.include_tasks: ../tasks/save_state.yml

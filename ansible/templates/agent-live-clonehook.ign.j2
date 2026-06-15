@@ -1,0 +1,25 @@
+{
+  "ignition": { "version": "3.4.0" },
+  "comment": "ABI clone-vdb-to-vda hook for the LIVE agent environment. Merged into the agent ISO's embedded ignition by tasks/iso_agent.yml (coreos-installer iso ignition show -> jq merge -> embed -f). Equivalent of the AI path's infra-env ignition_config_override. Alibaba ECS has no CD-ROM, so the agent ISO becomes /dev/vda content (busy); the agent installs RHCOS to /dev/vdb and this systemd unit clones vdb -> vda at shutdown, just before the post-install reboot (ExecStop, Before=shutdown.target). See ansible/files/clone-vdb-to-vda.* and docs/bootstrap-reboot.md.",
+  "storage": {
+    "files": [
+      {
+        "path": "/usr/local/bin/clone-vdb-to-vda.sh",
+        "mode": 493,
+        "overwrite": true,
+        "contents": {
+          "source": "data:text/plain;base64,{{ lookup('file', repo_root + '/ansible/files/clone-vdb-to-vda.sh') | b64encode }}"
+        }
+      }
+    ]
+  },
+  "systemd": {
+    "units": [
+      {
+        "name": "clone-vdb-to-vda.service",
+        "enabled": true,
+        "contents": {{ lookup('file', repo_root + '/ansible/files/clone-vdb-to-vda.service') | to_json }}
+      }
+    ]
+  }
+}
