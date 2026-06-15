@@ -243,14 +243,20 @@
   # local trust); add registries.conf/--insecure handling here if needed.
 
 # ── inject the Alibaba clone-vdb-to-vda hook into the agent ISO live ignition ──
-# All on the mirror ECS (no ignition round-trip through ansible — avoids quoting
-# hell): coreos-installer (podman) shows the agent ISO's embedded ignition, jq
-# additively merges our fragment via the scp'd abi-ign-merge.jq, embed --force.
-# NOTE: each remote command must be on ONE line. A YAML `>-` folded scalar keeps
-# a newline (not a space) before a MORE-indented continuation line, which split
-# the `podman run ... coreos-installer:release` from its `iso ignition ...`
-# subcommand and made coreos-installer print usage. Use a `|` literal block and
-# keep every podman/jq invocation unbroken on a single line.
+# coreos-installer (podman) shows the agent ISO's embedded ignition, jq additively
+# merges our fragment via the scp'd abi-ign-merge.jq, embed --force.
+# Each remote command stays on ONE line (a YAML `>-` folded scalar would keep a
+# newline before a more-indented line and split the command).
+#
+# ⚠ GATED by abi_clone_hook_enabled (default true).  The FCOS
+# quay.io/coreos/coreos-installer:release (0.26.0) can READ the agent ISO but
+# `iso ignition embed` fails with "kargs don't match at all offsets" on the
+# RHCOS-9.6 *minimal* agent ISO (version skew; the matched coreos-installer is
+# not shipped as a loose binary in agent-installer-utils).  Set
+# abi_clone_hook_enabled=false to skip injection and first confirm whether ABI's
+# minimal ISO even needs the clone hook (it boots its rootfs from RAM, unlike the
+# AI full discovery ISO that pins /dev/vda) before investing in a matched
+# coreos-installer.  See the build-notes / plan.
 - name: ABI — inject clone-hook into the agent ISO embedded ignition (on mirror ECS)
   ansible.builtin.shell: |
     {{ _ssh_root_mirror }} 'set -e
@@ -259,6 +265,15 @@
     jq -s -f abi-ign-merge.jq existing.ign agent-live-clonehook.ign > merged.ign
     podman run --rm -v {{ _m_install_dir }}:/d:z quay.io/coreos/coreos-installer:release iso ignition embed --force --ignition-file /d/merged.ign /d/agent.x86_64.iso'
   changed_when: true
+  when: abi_clone_hook_enabled | default(true) | bool
+
+- name: ABI — WARN clone-hook injection skipped
+  ansible.builtin.debug:
+    msg: >-
+      clone-vdb-to-vda hook NOT injected (abi_clone_hook_enabled=false). The
+      agent ISO will boot without it — confirm whether the ABI minimal ISO needs
+      it (node disk install on /dev/vda) before relying on this path.
+  when: not (abi_clone_hook_enabled | default(true) | bool)
 
 # ── upload to OSS (internal endpoint) + ImportImage, from the mirror ECS ──────
 # aliyun on the mirror ECS authenticates via its instance RAM role (Instance
