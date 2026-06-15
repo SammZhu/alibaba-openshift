@@ -178,6 +178,18 @@
         tar -xzf oi.tgz openshift-install && install -m0755 openshift-install /usr/local/bin/ && rm -f oi.tgz openshift-install )'
   changed_when: true
 
+# `openshift-install agent create image` shells out to `oc` to extract the base
+# RHCOS ISO + agent artifacts from the (mirrored) release payload — without it
+# the build fails with `exec: "oc": executable file not found`.
+- name: ABI — ensure version-pinned oc on the mirror ECS
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'set -e;
+      command -v oc >/dev/null 2>&1 ||
+      ( cd /var/lib/quay-storage &&
+        curl -sL -o oc.tgz https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ openshift_version }}/openshift-client-linux.tar.gz &&
+        tar -xzf oc.tgz oc kubectl && install -m0755 oc kubectl /usr/local/bin/ && rm -f oc.tgz oc kubectl )'
+  changed_when: true
+
 - name: ABI — ensure coreos-installer is runnable via podman on the mirror ECS
   ansible.builtin.shell: >-
     {{ _ssh_root_mirror }} 'podman image exists quay.io/coreos/coreos-installer:release ||
