@@ -1,0 +1,325 @@
+---
+# tasks/iso_agent.yml — Agent-based Installer (installation_method=Agent-based)
+# ISO build, ON THE MIRROR ECS (inside the VPC).
+#
+# Why the mirror ECS: `openshift-install agent create image` pulls the OCP
+# release locally to assemble the agent ISO.  The mirror ECS already hosts the
+# release at localhost:8443 (fastest, trusts its own CA), has podman (for
+# coreos-installer), NAT egress (to fetch the pinned installer), a 200 GB data
+# disk with ~90 GB free, and a RAM role with OSS+ImportImage perms — so the whole
+# build -> clone-hook inject -> OSS upload -> ImportImage flow stays in-VPC.  The
+# RHEL8 operator host only RENDERS the configs (per the render-on-operator rule)
+# and orchestrates over ssh; nothing but the rendered install_dir is copied to
+# the mirror ECS (no repo, no git).  All build scratch goes on the data disk
+# ({{ _m_build_dir }}), never the 40 GB system disk.
+#
+# Included by 01-prepare-iso-agent.yml when installation_method == 'agent'.
+# Prereqs (site-agent.yml order): 03/04/05 mirror ran -> state has
+# mirror_private_ip / jump_host_ip / mirror CA at {{ output_dir }}/mirror-ca.crt
+# / mirror_vpc_id / mirror_private_vsw_1; group_vars has rendezvous_ip.
+
+- name: ABI — resolve effective control-plane / compute counts per cluster_topology
+  ansible.builtin.set_fact:
+    _eff_control_plane_count: "{{ 1 if (cluster_topology | default('ha')) == 'sno' else (control_plane_count | int) }}"
+    _eff_compute_count: "{{ 0 if (cluster_topology | default('ha')) == 'sno' else (compute_count | int) }}"
+
+# ── ssh/scp to the mirror ECS via the jump host (same pattern as 04) ──────────
+- name: ABI — set mirror ECS ssh/scp connection facts
+  ansible.builtin.set_fact:
+    _ssh_keepalive: "-o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes"
+    _ssh_common_args: "-i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes"
+    _ssh_proxy_args: "-o ProxyCommand='ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}'"
+    # All build artifacts live on the 200 GB data disk, never the 40 GB system disk.
+    _m_build_dir: /var/lib/quay-storage/agent-build
+    _m_install_dir: /var/lib/quay-storage/agent-build/install
+    _m_tmp: /var/lib/quay-storage/agent-build/tmp
+    _m_iso: /var/lib/quay-storage/agent-build/install/agent.x86_64.iso
+    _oss_internal_endpoint: "oss-{{ region }}-internal.aliyuncs.com"
+    oss_object: "agent-{{ cluster_name }}.iso"
+    # LIVE-VERIFY: exact mirrored release pullspec/tag oc-mirror v2 published.
+    _agent_release_image: "{{ mirror_private_ip }}:8443/openshift/release-images:{{ openshift_version }}-x86_64"
+
+- name: ABI — set _ssh_root_mirror
+  ansible.builtin.set_fact:
+    _ssh_root_mirror: "ssh {{ _ssh_common_args }} {{ _ssh_proxy_args }} root@{{ mirror_private_ip }}"
+
+- name: ABI — assert prerequisites
+  ansible.builtin.assert:
+    that:
+      - mirror_enabled | default(false) | bool
+      - mirror_private_ip is defined and mirror_private_ip | length > 0
+      - jump_host_ip is defined and jump_host_ip | length > 0
+      - rendezvous_ip is defined and rendezvous_ip | length > 0
+      - mirror_vpc_id is defined and mirror_vpc_id | length > 0
+      - mirror_private_vsw_1 is defined and mirror_private_vsw_1 | length > 0
+    fail_msg: >-
+      ABI build needs a running mirror (03/04/05) + jump host + rendezvous_ip.
+      mirror_enabled must be true (the agent ISO is built on the mirror ECS).
+
+# ── pull secret (+ mirror auth) + ssh key + mirror CA — for rendering ────────
+- name: ABI — read pull secret + ssh public key
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop:
+    - "{{ pull_secret_file }}"
+    - "{{ ssh_pub_key_file }}"
+  register: _abi_slurps
+  no_log: true
+
+- name: ABI — set ssh key + parse pull secret
+  ansible.builtin.set_fact:
+    _ssh_pub_key: "{{ _abi_slurps.results[1].content | b64decode | trim }}"
+    _abi_pull_parsed: "{{ _abi_slurps.results[0].content | b64decode | from_json }}"
+  no_log: true
+
+- name: ABI — resolve mirror init password from state
+  ansible.builtin.set_fact:
+    _mirror_init_password_resolved: >-
+      {{ mirror_init_password
+         if (mirror_init_password | default('') | length > 0)
+         else lookup('password', '/dev/null length=20 chars=ascii_letters,digits') }}
+  no_log: true
+
+- name: ABI — augment pull secret with mirror auth
+  ansible.builtin.set_fact:
+    _pull_secret_effective: >-
+      {{ (_abi_pull_parsed
+          | combine({'auths':
+              _abi_pull_parsed.auths
+              | combine({ (mirror_private_ip + ':8443'): {
+                  'auth': ((mirror_init_user | default('mirror-admin')) + ':' + _mirror_init_password_resolved) | b64encode,
+                  'email': 'mirror-registry@localhost'
+                }})
+          }))
+         | to_json }}
+  no_log: true
+
+- name: ABI — slurp mirror CA cert
+  ansible.builtin.slurp:
+    src: "{{ output_dir }}/mirror-ca.crt"
+  register: _abi_mirror_ca_slurp
+
+- name: ABI — set mirror CA cert fact
+  ansible.builtin.set_fact:
+    _mirror_ca_cert: "{{ _abi_mirror_ca_slurp.content | b64decode }}"
+
+# ── render configs + manifests into a LOCAL staging dir on the operator host ──
+# (render-on-operator rule); this dir is then scp'd to the mirror ECS.
+- name: ABI — reset local staging install_dir
+  ansible.builtin.file:
+    path: "{{ install_dir }}"
+    state: "{{ item }}"
+    mode: "0755"
+  loop: [absent, directory]
+
+- name: ABI — create local install_dir/openshift
+  ansible.builtin.file:
+    path: "{{ install_dir }}/openshift"
+    state: directory
+    mode: "0755"
+
+- name: ABI — render install-config.yaml + agent-config.yaml
+  ansible.builtin.template:
+    src: "../templates/{{ item }}.j2"
+    dest: "{{ install_dir }}/{{ item }}"
+    mode: "0600"
+  loop:
+    - install-config.yaml
+    - agent-config.yaml
+  no_log: true
+
+- name: ABI — render clone-hook live ignition fragment
+  ansible.builtin.template:
+    src: ../templates/agent-live-clonehook.ign.j2
+    dest: "{{ install_dir }}/agent-live-clonehook.ign"
+    mode: "0600"
+
+- name: ABI — stage the ignition-merge jq script (scp'd with install_dir)
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/ansible/files/abi-ign-merge.jq"
+    dest: "{{ install_dir }}/abi-ign-merge.jq"
+    mode: "0644"
+
+- name: ABI — render CCM manifest + alibaba-ccm-config into openshift/
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ install_dir }}/openshift/{{ item.dest }}"
+    mode: "0644"
+  loop:
+    - { src: "{{ repo_root }}/custom_manifests/01-alibaba-ccm.yaml.j2", dest: 01-alibaba-ccm.yaml }
+    - { src: ../templates/alibaba-ccm-config.yaml.j2, dest: alibaba-ccm-config.yaml }
+
+- name: ABI — render relaxed signature-policy MachineConfigs
+  ansible.builtin.template:
+    src: ../templates/mc-alibaba-signature-policy.yaml.j2
+    dest: "{{ install_dir }}/openshift/99-alibaba-signature-policy-{{ item }}.yaml"
+    mode: "0644"
+  vars:
+    _mc_role: "{{ item }}"
+  loop: [master, worker]
+
+- name: ABI — stage static custom manifests into openshift/
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/custom_manifests/{{ item }}"
+    dest: "{{ install_dir }}/openshift/{{ item }}"
+    mode: "0644"
+  loop:
+    - 00-ovn-mtu.yaml
+    - 03-machineconfig-providerid-master.yaml
+    - 03-machineconfig-providerid-worker.yaml
+    - 03-machineconfig-chrony-master.yaml
+    - 03-machineconfig-chrony-worker.yaml
+
+# ── provision build tools on the mirror ECS (data disk; has NAT egress) ───────
+- name: ABI — ensure version-pinned openshift-install on the mirror ECS
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'set -e;
+      command -v openshift-install >/dev/null 2>&1 ||
+      ( cd /var/lib/quay-storage &&
+        curl -sL -o oi.tgz https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ openshift_version }}/openshift-install-linux.tar.gz &&
+        tar -xzf oi.tgz openshift-install && install -m0755 openshift-install /usr/local/bin/ && rm -f oi.tgz openshift-install )'
+  changed_when: true
+
+- name: ABI — ensure coreos-installer is runnable via podman on the mirror ECS
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'podman image exists quay.io/coreos/coreos-installer:release ||
+      podman pull quay.io/coreos/coreos-installer:release'
+  changed_when: true
+  # LIVE-VERIFY: in a strict air-gap, mirror this image via oc-mirror instead of
+  # pulling from quay.io (the mirror ECS does have NAT egress, so this works).
+
+# ── push the rendered install_dir to the mirror ECS data disk ────────────────
+- name: ABI — (re)create remote build dir on the mirror ECS data disk
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'rm -rf {{ _m_build_dir }} && mkdir -p {{ _m_install_dir }} {{ _m_tmp }}'
+  changed_when: true
+
+- name: ABI — scp rendered install_dir to the mirror ECS (via jump host)
+  ansible.builtin.command:
+    argv:
+      - scp
+      - -r
+      - -i
+      - "{{ ssh_priv_key_file }}"
+      - -o
+      - StrictHostKeyChecking=no
+      - -o
+      - UserKnownHostsFile=/dev/null
+      - -o
+      - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
+      - "{{ install_dir }}/."
+      - "root@{{ mirror_private_ip }}:{{ _m_install_dir }}/"
+  register: _abi_scp
+  retries: 3
+  delay: 10
+  until: _abi_scp.rc == 0
+  changed_when: true
+
+# ── build the agent ISO on the mirror ECS (release pulled from localhost:8443) ─
+- name: ABI — openshift-install agent create image (on mirror ECS, data disk)
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'set -e; export TMPDIR={{ _m_tmp }} XDG_CACHE_HOME={{ _m_build_dir }}/.cache
+      OPENSHIFT_INSTALL_RELEASE_IMAGE_OVERRIDE={{ _agent_release_image }};
+      openshift-install agent create image --dir {{ _m_install_dir }} --log-level=info'
+  changed_when: true
+  # LIVE-VERIFY: confirm the release override pullspec + that the installer
+  # trusts the mirror CA (it is the mirror ECS's own registry, so the CA is in
+  # local trust); add registries.conf/--insecure handling here if needed.
+
+# ── inject the Alibaba clone-vdb-to-vda hook into the agent ISO live ignition ──
+# All on the mirror ECS (no ignition round-trip through ansible — avoids quoting
+# hell): coreos-installer (podman) shows the agent ISO's embedded ignition, jq
+# additively merges our fragment via the scp'd abi-ign-merge.jq, embed --force.
+- name: ABI — inject clone-hook into the agent ISO embedded ignition (on mirror ECS)
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'set -e; cd {{ _m_install_dir }};
+      podman run --rm -v {{ _m_install_dir }}:/d:z quay.io/coreos/coreos-installer:release
+        iso ignition show /d/agent.x86_64.iso > existing.ign;
+      jq -s -f abi-ign-merge.jq existing.ign agent-live-clonehook.ign > merged.ign;
+      podman run --rm -v {{ _m_install_dir }}:/d:z quay.io/coreos/coreos-installer:release
+        iso ignition embed --force --ignition-file /d/merged.ign /d/agent.x86_64.iso'
+  changed_when: true
+
+# ── upload to OSS (internal endpoint) + ImportImage, from the mirror ECS ──────
+# aliyun on the mirror ECS authenticates via its instance RAM role (Instance
+# Principal) — no AK/SK on the box.  STS creds are read from IMDS for ossutil.
+- name: ABI — upload agent ISO to OSS via internal endpoint (mirror ECS RAM role)
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'set -e;
+      RR=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/);
+      C=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/$RR);
+      AK=$(echo "$C" | jq -r .AccessKeyId); SK=$(echo "$C" | jq -r .AccessKeySecret);
+      TK=$(echo "$C" | jq -r .SecurityToken);
+      aliyun oss cp {{ _m_iso }} oss://{{ oss_bucket }}/{{ oss_object }} -f
+        -i "$AK" -k "$SK" -t "$TK" -e {{ _oss_internal_endpoint }}'
+  changed_when: true
+  # LIVE-VERIFY: `aliyun oss` (ossutil) STS-token flag (-t/--sts-token) +
+  # internal endpoint reachability from the mirror ECS.
+
+- name: ABI — adopt existing agent image by name (idempotent)
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'aliyun ecs DescribeImages --RegionId {{ region }}
+      --ImageName openshift-{{ cluster_name }}-agent --mode EcsRamRole
+      --ram-role-name $(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/)
+      | jq -r ".Images.Image[0].ImageId // empty"'
+  register: _abi_img_lookup
+  changed_when: false
+
+- name: ABI — set ecs_image_id from adopted image
+  ansible.builtin.set_fact:
+    ecs_image_id: "{{ _abi_img_lookup.stdout | trim }}"
+  when: _abi_img_lookup.stdout | trim | length > 0
+
+- name: ABI — ImportImage the agent ISO (from the mirror ECS) when needed
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'RR=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/);
+      aliyun ecs ImportImage --RegionId {{ region }} --mode EcsRamRole --ram-role-name "$RR"
+        --ImageName openshift-{{ cluster_name }}-agent
+        --OSType Linux --Platform CoreOS --Architecture x86_64 --BootMode UEFI
+        --DiskDeviceMapping.1.Format RAW
+        --DiskDeviceMapping.1.OSSBucket {{ oss_bucket }}
+        --DiskDeviceMapping.1.OSSObject {{ oss_object }}
+      | jq -r .ImageId'
+  register: _abi_import
+  changed_when: true
+  when: ecs_image_id is not defined or ecs_image_id | length == 0
+
+- name: ABI — capture imported agent image id
+  ansible.builtin.set_fact:
+    ecs_image_id: "{{ _abi_import.stdout | trim }}"
+  when: _abi_import is not skipped and (_abi_import.stdout | default('') | trim | length > 0)
+
+- name: ABI — poll agent image until Available (~15-30 min)
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'aliyun ecs DescribeImages --RegionId {{ region }} --ImageId {{ ecs_image_id }}
+      --mode EcsRamRole --ram-role-name $(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/)
+      | jq -r ".Images.Image[0].Status // empty"'
+  register: _abi_img_status
+  changed_when: false
+  retries: 60
+  delay: 30
+  until: _abi_img_status.stdout | trim == 'Available'
+
+# ── record outputs + tidy scratch ───────────────────────────────────────────
+- name: ABI — record ISO build timestamp (24h ignition-cert window)
+  ansible.builtin.set_fact:
+    agent_iso_built_at: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+
+- name: ABI — persist ecs_image_id + build timestamp to state
+  ansible.builtin.include_tasks: ../tasks/save_state.yml
+  vars:
+    new_state:
+      ecs_image_id: "{{ ecs_image_id }}"
+      agent_iso_built_at: "{{ agent_iso_built_at }}"
+
+- name: ABI — free build scratch on the mirror ECS data disk (keep disk lean)
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'rm -rf {{ _m_build_dir }}/.cache {{ _m_tmp }} {{ _m_install_dir }}/agent.x86_64.iso'
+  changed_when: true
+  ignore_errors: true
+
+- name: ABI — agent image ready
+  ansible.builtin.debug:
+    msg: >-
+      Agent image imported: {{ ecs_image_id }} (built {{ agent_iso_built_at }}).
+      ⚠ 24h ignition-cert window: boot instances (06) within ~24h or rebuild.

@@ -1,0 +1,24 @@
+#jinja2: trim_blocks: True, lstrip_blocks: True
+# alibaba-cloud-config ConfigMap — consumed by Alibaba CCM v2.x.
+# ABI counterpart of the cluster-stack DynamicCustomManifest output (the AI path
+# gets this from the ROS stack at 06 and uploads it at 07).  For ABI the manifest
+# must be baked into the agent ISO at 01, which runs BEFORE 06, so we render it
+# here from the mirror-stack outputs (in state after 03) + group_vars — the same
+# values the ROS output would have used (region / vpcid / zoneid / vswitchid).
+# No AccessKeyID/Secret — CCM authenticates via the ECS node RAM role + IMDSv2.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alibaba-cloud-config
+  namespace: alibaba-cloud-controller-manager
+data:
+  cloud.conf: |
+    {
+      "Global": {
+        "clusterID": "{{ cluster_name }}",
+        "region": "{{ region }}",
+        "vpcid": "{{ mirror_vpc_id }}",
+        "zoneid": "{{ mirror_zone_id | default(zone) }}",
+        "vswitchid": "{{ mirror_private_vsw_1 }}"
+      }
+    }

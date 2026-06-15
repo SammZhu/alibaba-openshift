@@ -28,8 +28,21 @@ Assumed configuration:
 
 - `mirror_enabled: true` (disconnected/restricted-network path — the
   documented and tested production path on China-region accounts)
-- `installation_method: Assisted` (Agent-based works in principle, not the
-  path tested by this runbook)
+- `installation_method: Assisted` (this runbook covers the Assisted path via
+  `site.yml`).  The **Agent-based Installer (ABI)** is also supported via
+  `site-agent.yml` (`installation_method: Agent-based`) — fully air-gapped, no
+  assisted-service dependency.  ABI uses **fixed-IP-via-DHCP** (the ROS stack
+  pins the master IPs, the VPC's cloud DHCP delivers them) with an empty
+  `agent-config` `hosts[]` — confirmed via `scripts/abi-eni-spike.sh` that this
+  is the clean Alibaba path (static NMState would force a MAC circular
+  dependency).  The agent ISO is built **on the mirror ECS** (in-VPC): the
+  operator host only renders the configs and orchestrates over ssh; the mirror
+  ECS runs `openshift-install agent create image` (release pulled from its own
+  localhost:8443), injects the clone-vdb-to-vda hook into the live ignition via
+  coreos-installer (podman: show -> jq-merge -> embed --force), then uploads the
+  ISO to OSS (internal endpoint) + `ImportImage` via its instance RAM role — all
+  in-VPC.  So the **mirror** must be up before ABI runs; the operator host needs
+  only ssh/scp + jq.  Live HA validation pending.
 - compact 3-node (`compute_count: 0`) — workers schedule on masters
 
 ---

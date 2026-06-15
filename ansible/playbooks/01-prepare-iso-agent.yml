@@ -1,0 +1,25 @@
+---
+# Phase 01 (Agent-based) — render install-config + agent-config and build the
+# agent ISO locally with `openshift-install agent create image`.
+#
+# ABI counterpart of 01-prepare-iso.yml (which is Assisted-only).  Invoked by
+# site-agent.yml AFTER 03/04/05 (mirror), so the mirror CA + mirror-stack
+# network outputs are available.  Network model is fixed-IP-via-DHCP with an
+# empty agent-config hosts[] (no MAC harvest).  The Assisted playbook is left
+# untouched (zero AI regression).
+- name: Prepare OpenShift agent ISO (Agent-based Installer)
+  hosts: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
+    - ansible.builtin.include_tasks: ../tasks/mirror_defaults.yml
+
+    - name: Assert installation_method is agent
+      ansible.builtin.assert:
+        that: installation_method | default('assisted') | lower in ['agent', 'agent-based']
+        fail_msg: >-
+          01-prepare-iso-agent.yml is for installation_method=agent.
+          Use 01-prepare-iso.yml (via site.yml) for the Assisted Installer.
+
+    - ansible.builtin.include_tasks: ../tasks/iso_agent.yml

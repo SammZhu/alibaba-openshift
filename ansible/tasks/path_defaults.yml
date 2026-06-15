@@ -29,3 +29,12 @@
   ansible.builtin.set_fact:
     dynamic_manifest_file: "{{ output_dir }}/alibaba-ccm-config.yaml"
   when: dynamic_manifest_file is not defined or dynamic_manifest_file | length == 0
+
+# Agent-based Installer working directory (installation_method=agent).  Holds
+# the rendered install-config.yaml + agent-config.yaml + openshift/ manifests,
+# and after `openshift-install agent create image` the auth/ creds + ISO.
+# Both 01 (iso_agent) and 07 (install_agent) read this.
+- name: Normalize install_dir (re-derive when state cleared it)
+  ansible.builtin.set_fact:
+    install_dir: "{{ output_dir }}/agent-install"
+  when: install_dir is not defined or install_dir | length == 0

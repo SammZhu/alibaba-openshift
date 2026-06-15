@@ -1,0 +1,21 @@
+#jinja2: trim_blocks: True, lstrip_blocks: True
+# agent-config.yaml for the Agent-based Installer (installation_method=Agent-based).
+# Rendered by ansible/tasks/iso_agent.yml.
+#
+# Network model (decided 2026-06-15 via scripts/abi-eni-spike.sh): on Alibaba
+# Cloud the VPC always delivers the node's fixed PrivateIpAddress over cloud
+# DHCP, so per-node static NMState is redundant AND would force a MAC
+# circular-dependency (the agent ISO would need each node's MAC before the
+# instances exist).  We therefore keep hosts[] EMPTY and let the ROS stack pin
+# the fixed IPs (RendezvousIp / Master2Ip / Master3Ip) which DHCP then hands to
+# the nodes.  rendezvousIP must equal master-1's fixed IP (the ROS RendezvousIp
+# parameter, fed from ansible rendezvous_ip — must live in the masters' subnet,
+# PrivateSubnetCidr2 / e.g. 10.0.32.0/20 for the default HA layout).  ABI
+# auto-assigns control-plane vs worker roles from the install-config replica
+# counts, so no per-host role pinning is needed for the compact 3-master layout.
+apiVersion: v1alpha1
+kind: AgentConfig
+metadata:
+  name: {{ cluster_name }}
+rendezvousIP: {{ rendezvous_ip }}
+hosts: []
