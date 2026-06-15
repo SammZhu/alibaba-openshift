@@ -38,14 +38,47 @@ INSTANCE_TYPE="${SPIKE_INSTANCE_TYPE:-ecs.g7.xlarge}"
 VSWITCH_ID="${SPIKE_VSWITCH_ID:-${PRIVATE_VSWITCH_2_ID:-${PRIVATE_VSWITCH_ID:-}}}"
 SG_ID="${SPIKE_SG_ID:-${CONTROL_PLANE_SG_ID:-${JUMP_HOST_SG_ID:-}}}"
 IMAGE_ID="${SPIKE_IMAGE_ID:-${ECS_IMAGE_ID:-}}"
+VSW_CIDR=""
 
-[ -n "$VSWITCH_ID" ] || die "Set SPIKE_VSWITCH_ID (a private VSwitch id in the region)."
-[ -n "$SG_ID" ]      || die "Set SPIKE_SG_ID (a security group id in the same VPC)."
-[ -n "$IMAGE_ID" ]   || die "Set SPIKE_IMAGE_ID (any bootable ECS image id for the DryRun)."
+# ── Auto-discover anything not supplied (so the spike is a one-liner) ─────────
+if [ -z "$VSWITCH_ID" ]; then
+  log "No SPIKE_VSWITCH_ID — discovering a VSwitch in $REGION${ZONE2:+ (prefer zone $ZONE2)} ..."
+  vsw_json="$(aliyun vpc DescribeVSwitches --RegionId "$REGION" --PageSize 50)"
+  # prefer one in ZONE2 (where masters live); else take the first available.
+  read -r VSWITCH_ID VSW_CIDR _vpc < <(echo "$vsw_json" | jq -r --arg z "${ZONE2:-}" '
+    (.VSwitches.VSwitch | map(select($z=="" or .ZoneId==$z)) | .[0])
+    // (.VSwitches.VSwitch[0])
+    | "\(.VSwitchId) \(.CidrBlock) \(.VpcId)"')
+  [ -n "$VSWITCH_ID" ] && [ "$VSWITCH_ID" != null ] \
+    || die "No VSwitch found in $REGION. Create one (or a mirror-stack) first, or set SPIKE_VSWITCH_ID."
+  SG_VPC="$_vpc"
+  ok "VSwitch: $VSWITCH_ID ($VSW_CIDR, vpc $SG_VPC)"
+else
+  read -r VSW_CIDR SG_VPC < <(aliyun vpc DescribeVSwitches --RegionId "$REGION" --VSwitchId "$VSWITCH_ID" \
+    | jq -r '.VSwitches.VSwitch[0] | "\(.CidrBlock) \(.VpcId)"')
+fi
 
-# Default test IP = <PRIVATE_SUBNET_CIDR_2 network>.250 (unlikely to collide).
+if [ -z "$SG_ID" ]; then
+  log "No SPIKE_SG_ID — discovering a security group in vpc ${SG_VPC:-<any>} ..."
+  SG_ID="$(aliyun ecs DescribeSecurityGroups --RegionId "$REGION" ${SG_VPC:+--VpcId "$SG_VPC"} --PageSize 50 \
+    | jq -r '.SecurityGroups.SecurityGroup[0].SecurityGroupId // empty')"
+  [ -n "$SG_ID" ] || die "No security group in vpc $SG_VPC. Set SPIKE_SG_ID."
+  ok "SecurityGroup: $SG_ID"
+fi
+
+if [ -z "$IMAGE_ID" ]; then
+  log "No SPIKE_IMAGE_ID — discovering a public Linux x86_64 image ..."
+  IMAGE_ID="$(aliyun ecs DescribeImages --RegionId "$REGION" --ImageOwnerAlias system \
+    --OSType linux --Architecture x86_64 --PageSize 10 \
+    | jq -r '.Images.Image[0].ImageId // empty')"
+  [ -n "$IMAGE_ID" ] || die "No system image found. Set SPIKE_IMAGE_ID."
+  ok "Image: $IMAGE_ID"
+fi
+
+# Test IP: a high host inside the CHOSEN VSwitch CIDR (avoids the
+# subnet-mismatch footgun); fall back to PRIVATE_SUBNET_CIDR_2 / 10.0.32.0/20.
 if [ -z "${SPIKE_TEST_IP:-}" ]; then
-  base="$(echo "${PRIVATE_SUBNET_CIDR_2:-10.0.32.0/20}" | cut -d/ -f1 | cut -d. -f1-3)"
+  base="$(echo "${VSW_CIDR:-${PRIVATE_SUBNET_CIDR_2:-10.0.32.0/20}}" | cut -d/ -f1 | cut -d. -f1-3)"
   SPIKE_TEST_IP="${base}.250"
 fi
 TEST_IP="$SPIKE_TEST_IP"
