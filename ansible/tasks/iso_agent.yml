@@ -337,11 +337,14 @@
       ecs_image_id: "{{ ecs_image_id }}"
       agent_iso_built_at: "{{ agent_iso_built_at }}"
 
-- name: ABI — free build scratch on the mirror ECS data disk (keep disk lean)
+- name: ABI — free transient scratch on the mirror ECS (keep ISO + .cache)
   ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'rm -rf {{ _m_build_dir }}/.cache {{ _m_tmp }} {{ _m_install_dir }}/agent.x86_64.iso'
+    {{ _ssh_root_mirror }} 'rm -rf {{ _m_tmp }}'
   changed_when: true
   ignore_errors: true
+  # Keep agent.x86_64.iso (resume + clone-hook re-embed) and .cache (the
+  # extracted coreos live ISO — source of the version-matched coreos-installer,
+  # and it speeds up rebuilds). The 200 GB data disk has room.
 
 - name: ABI — agent image ready
   ansible.builtin.debug:
