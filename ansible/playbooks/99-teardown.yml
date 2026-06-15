@@ -74,13 +74,18 @@
         prompt: |
 
           Split-architecture teardown for cluster '{{ cluster_name }}':
+            installation_method      = {{ installation_method | default('Assisted') }}
             target                   = {{ teardown_target }}
             teardown_preserves_ai    = {{ teardown_preserves_ai }}
             delete_mirror_snapshots  = {{ delete_mirror_snapshots }}
             cluster_stack_id = {{ cluster_stack_id | default('(none)') }}
             mirror_stack_id  = {{ mirror_stack_id  | default('(none)') }}
-            ai cluster_id    = {{ cluster_id       | default('(none)') }}
             ecs_image_id     = {{ ecs_image_id     | default('(none)') }}
+          {% if installation_method | default('Assisted') | lower not in ['agent', 'agent-based'] %}
+            ai cluster_id    = {{ cluster_id       | default('(none)') }}
+          {% else %}
+            (Agent-based: no assisted cluster — assisted API steps are skipped)
+          {% endif %}
 
           Type 'yes' to proceed
       register: _confirm
@@ -359,8 +364,15 @@
         or
         (teardown_target == 'cluster' and (cluster_includes_ai | bool))
       block:
+        # Assisted-only: ABI (installation_method=Agent-based) has no assisted
+        # cluster / infra-env and no assisted-service to call, so skip these
+        # three regardless of any stale cluster_id/infra_env_id left in state.
+        # The ECS-image cascade-delete below still runs for ABI (the agent image
+        # is a real custom ECS image that must be cleaned up).
         - ansible.builtin.include_tasks: ../tasks/assisted_token.yml
-          when: cluster_id is defined and cluster_id | length > 0
+          when:
+            - cluster_id is defined and cluster_id | length > 0
+            - installation_method | default('Assisted') | lower not in ['agent', 'agent-based']
 
         - name: AI — delete cluster
           ansible.builtin.uri:
@@ -368,7 +380,9 @@
             method: DELETE
             headers: { Authorization: "Bearer {{ ai_access_token }}" }
             status_code: [202, 204, 404]
-          when: cluster_id is defined and cluster_id | length > 0
+          when:
+            - cluster_id is defined and cluster_id | length > 0
+            - installation_method | default('Assisted') | lower not in ['agent', 'agent-based']
           failed_when: false
 
         - name: AI — delete infra-env
@@ -377,7 +391,9 @@
             method: DELETE
             headers: { Authorization: "Bearer {{ ai_access_token }}" }
             status_code: [202, 204, 404]
-          when: infra_env_id is defined and infra_env_id | length > 0
+          when:
+            - infra_env_id is defined and infra_env_id | length > 0
+            - installation_method | default('Assisted') | lower not in ['agent', 'agent-based']
           failed_when: false
 
         # aliyun `DeleteImage --Force=true` does NOT cascade-delete the
