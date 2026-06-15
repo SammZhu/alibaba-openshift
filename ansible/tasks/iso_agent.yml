@@ -178,7 +178,7 @@
 # the mirror).  `openshift-install agent create image` shells out to `oc` to
 # extract the base ISO + agent artifacts, so both binaries are required.
 - name: ABI — assert operator host has openshift-install + oc to ship
-  ansible.builtin.command: "{{ item }} version --client"
+  ansible.builtin.shell: "command -v {{ item }}"
   changed_when: false
   loop:
     - openshift-install
