@@ -192,21 +192,14 @@
     {{ _ssh_root_mirror }} 'rm -rf {{ _m_build_dir }} && mkdir -p {{ _m_install_dir }} {{ _m_tmp }}'
   changed_when: true
 
-- name: ABI — scp rendered install_dir to the mirror ECS (via jump host)
-  ansible.builtin.command:
-    argv:
-      - scp
-      - -r
-      - -i
-      - "{{ ssh_priv_key_file }}"
-      - -o
-      - StrictHostKeyChecking=no
-      - -o
-      - UserKnownHostsFile=/dev/null
-      - -o
-      - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
-      - "{{ install_dir }}/."
-      - "root@{{ mirror_private_ip }}:{{ _m_install_dir }}/"
+# tar-over-ssh (not scp): RHEL8's scp defaults to the SFTP protocol and rejects
+# the `dir/.` copy-contents syntax ("unexpected filename: ."). tar streams the
+# whole install_dir (incl. the openshift/ subdir) through the same proxied ssh.
+- name: ABI — copy rendered install_dir to the mirror ECS (tar over ssh, via jump host)
+  ansible.builtin.shell: >-
+    tar -C {{ install_dir }} -czf - . | {{ _ssh_root_mirror }} 'tar -C {{ _m_install_dir }} -xzf -'
+  args:
+    executable: /bin/bash
   register: _abi_scp
   retries: 3
   delay: 10
