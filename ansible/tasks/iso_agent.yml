@@ -326,6 +326,22 @@
     aliyun oss cp {{ _m_iso }} oss://{{ oss_bucket }}/{{ oss_object }} -f --access-key-id="$AK" --access-key-secret="$SK" --sts-token="$TK" --region={{ region }} --endpoint={{ _oss_internal_endpoint }}'
   changed_when: true
 
+# Air-gap: upload the minimal ISO's rootfs to OSS (public-read) so nodes fetch
+# it from the OSS INTERNAL endpoint in-VPC (agent-config bootArtifactsBaseURL)
+# instead of the public rhcos.mirror.openshift.com. Key MUST be
+# agent.x86_64-rootfs.img (the URL openshift-install bakes into the kargs).
+- name: ABI — upload boot-artifacts rootfs to OSS public-read (in-VPC rootfs source)
+  ansible.builtin.shell: |
+    {{ _ssh_root_mirror }} 'set -e
+    ROOTFS=$(ls {{ _m_install_dir }}/boot-artifacts/*rootfs*.img 2>/dev/null | head -1)
+    test -n "$ROOTFS" || { echo "no rootfs in boot-artifacts (bootArtifactsBaseURL not honored?)"; exit 1; }
+    RR=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/)
+    C=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/$RR)
+    AK=$(echo "$C" | jq -r .AccessKeyId); SK=$(echo "$C" | jq -r .AccessKeySecret); TK=$(echo "$C" | jq -r .SecurityToken)
+    aliyun oss cp "$ROOTFS" oss://{{ oss_bucket }}/agent.x86_64-rootfs.img -f --access-key-id="$AK" --access-key-secret="$SK" --sts-token="$TK" --region={{ region }} --endpoint={{ _oss_internal_endpoint }}
+    aliyun oss set-acl oss://{{ oss_bucket }}/agent.x86_64-rootfs.img public-read --access-key-id="$AK" --access-key-secret="$SK" --sts-token="$TK" --region={{ region }} --endpoint={{ _oss_internal_endpoint }}'
+  changed_when: true
+
 - name: ABI — adopt existing agent image by name (idempotent)
   ansible.builtin.shell: |
     {{ _ssh_root_mirror }} 'aliyun ecs DescribeImages --region {{ region }} --RegionId {{ region }} --ImageName openshift-{{ cluster_name }}-agent --mode EcsRamRole --ram-role-name $(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/) | jq -r ".Images.Image[0].ImageId // empty"'

@@ -496,9 +496,13 @@ Resources:
               - oss:ListObjects
               - oss:ListBuckets
               # Write: Agent-based Installer uploads the agent ISO to OSS from
-              # the mirror ECS (in-VPC, internal endpoint) before ImportImage.
+              # the mirror ECS (in-VPC, internal endpoint) before ImportImage,
+              # and uploads the minimal-ISO rootfs as a public-read object so
+              # nodes fetch it in-VPC (bootArtifactsBaseURL) — needs PutObjectAcl.
               - oss:PutObject
               - oss:DeleteObject
+              - oss:PutObjectAcl
+              - oss:GetObjectAcl
             Resource: ['*']
           - Effect: Allow
             Action:

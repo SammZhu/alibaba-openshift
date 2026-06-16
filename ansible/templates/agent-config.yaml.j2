@@ -13,9 +13,17 @@
 # PrivateSubnetCidr2 / e.g. 10.0.32.0/20 for the default HA layout).  ABI
 # auto-assigns control-plane vs worker roles from the install-config replica
 # counts, so no per-host role pinning is needed for the compact 3-master layout.
+# bootArtifactsBaseURL — air-gap: the External-platform agent ISO is always a
+# MINIMAL ISO that fetches its ~1 GB rootfs over HTTP at boot. Without this it
+# points at the public rhcos.mirror.openshift.com (breaks air-gap, slow/blocked
+# in China). Point it at the OSS bucket's INTERNAL endpoint (an in-VPC Alibaba
+# service, no public internet) and upload boot-artifacts/agent.x86_64-rootfs.img
+# there (public-read) — done by tasks/iso_agent.yml. Nodes then pull the rootfs
+# from OSS-internal in-VPC.
 apiVersion: v1alpha1
 kind: AgentConfig
 metadata:
   name: {{ cluster_name }}
 rendezvousIP: {{ rendezvous_ip }}
+bootArtifactsBaseURL: http://{{ oss_bucket }}.oss-{{ region }}-internal.aliyuncs.com
 hosts: []
