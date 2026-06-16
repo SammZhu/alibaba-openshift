@@ -506,10 +506,17 @@ Resources:
       VSwitchId: !Ref PrivateVSwitch2Id
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
-      DiskMappings:
-        - Category: !Ref SystemDiskCategory
-          Size: !Ref InstallDiskSize
-          DiskName: !Sub '${ClusterName}-master-1-install'
+      # Agent-based: NO extra install disk.  The Alibaba ISO boot makes the agent
+      # ISO the system disk (/dev/vda); the minimal ISO runs its rootfs from RAM
+      # so /dev/vda is free, and with no second disk the assisted-installer
+      # installs RHCOS directly to /dev/vda -> reboot boots RHCOS (no vdb->vda
+      # clone hook needed).  Assisted keeps the /dev/vdb install disk + clone hook.
+      DiskMappings: !If
+        - IsAgentBased
+        - !Ref 'ALIYUN::NoValue'
+        - - Category: !Ref SystemDiskCategory
+            Size: !Ref InstallDiskSize
+            DiskName: !Sub '${ClusterName}-master-1-install'
       AllocatePublicIP: false
       PrivateIpAddress: !If [IsAgentBased, !Ref RendezvousIp, !Ref 'ALIYUN::NoValue']
       RamRoleName: !Ref NodeRamRoleName
@@ -530,10 +537,12 @@ Resources:
       VSwitchId: !Ref PrivateVSwitch2Id
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
-      DiskMappings:
-        - Category: !Ref SystemDiskCategory
-          Size: !Ref InstallDiskSize
-          DiskName: !Sub '${ClusterName}-master-2-install'
+      DiskMappings: !If
+        - IsAgentBased
+        - !Ref 'ALIYUN::NoValue'
+        - - Category: !Ref SystemDiskCategory
+            Size: !Ref InstallDiskSize
+            DiskName: !Sub '${ClusterName}-master-2-install'
       AllocatePublicIP: false
       PrivateIpAddress: !If [IsAgentBased, !Ref Master2Ip, !Ref 'ALIYUN::NoValue']
       RamRoleName: !Ref NodeRamRoleName
@@ -554,10 +563,12 @@ Resources:
       VSwitchId: !Ref PrivateVSwitch2Id
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
-      DiskMappings:
-        - Category: !Ref SystemDiskCategory
-          Size: !Ref InstallDiskSize
-          DiskName: !Sub '${ClusterName}-master-3-install'
+      DiskMappings: !If
+        - IsAgentBased
+        - !Ref 'ALIYUN::NoValue'
+        - - Category: !Ref SystemDiskCategory
+            Size: !Ref InstallDiskSize
+            DiskName: !Sub '${ClusterName}-master-3-install'
       AllocatePublicIP: false
       PrivateIpAddress: !If [IsAgentBased, !Ref Master3Ip, !Ref 'ALIYUN::NoValue']
       RamRoleName: !Ref NodeRamRoleName
