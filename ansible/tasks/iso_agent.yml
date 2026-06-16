@@ -293,11 +293,11 @@
     mkdir -p ci
     REL={{ mirror_private_ip }}:8443/openshift/release-images:{{ openshift_version }}-x86_64
     MOS=$(oc adm release info --image-for=machine-os-images --filter-by-os=linux/amd64 --insecure=true --icsp-file=abi-icsp.yaml $REL --registry-config=abi-rc.json)
-    test -x ci/usr/bin/coreos-installer || oc image extract $MOS --path=/usr/bin/coreos-installer:ci/ --confirm --insecure=true --icsp-file=abi-icsp.yaml --registry-config=abi-rc.json
-    chmod +x ci/usr/bin/coreos-installer
-    podman run --rm -v {{ _m_install_dir }}/ci/usr/bin/coreos-installer:/ci:z -v {{ _m_install_dir }}:/d:z --entrypoint /ci quay.io/coreos/coreos-installer:release iso ignition show /d/agent.x86_64.iso > existing.ign
+    test -x ci/coreos-installer || oc image extract $MOS --path=/usr/bin/coreos-installer:ci --confirm --insecure=true --icsp-file=abi-icsp.yaml --registry-config=abi-rc.json
+    chmod +x ci/coreos-installer
+    podman run --rm -v {{ _m_install_dir }}/ci/coreos-installer:/ci:z -v {{ _m_install_dir }}:/d:z --entrypoint /ci quay.io/coreos/coreos-installer:release iso ignition show /d/agent.x86_64.iso > existing.ign
     jq -s -f abi-ign-merge.jq existing.ign agent-live-clonehook.ign > merged.ign
-    podman run --rm -v {{ _m_install_dir }}/ci/usr/bin/coreos-installer:/ci:z -v {{ _m_install_dir }}:/d:z --entrypoint /ci quay.io/coreos/coreos-installer:release iso ignition embed --force --ignition-file /d/merged.ign /d/agent.x86_64.iso'
+    podman run --rm -v {{ _m_install_dir }}/ci/coreos-installer:/ci:z -v {{ _m_install_dir }}:/d:z --entrypoint /ci quay.io/coreos/coreos-installer:release iso ignition embed --force --ignition-file /d/merged.ign /d/agent.x86_64.iso'
   changed_when: true
   when: abi_clone_hook_enabled | default(true) | bool
 
