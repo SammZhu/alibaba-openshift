@@ -496,13 +496,12 @@ Resources:
               - oss:ListObjects
               - oss:ListBuckets
               # Write: Agent-based Installer uploads the agent ISO to OSS from
-              # the mirror ECS (in-VPC, internal endpoint) before ImportImage,
-              # and uploads the minimal-ISO rootfs as a public-read object so
-              # nodes fetch it in-VPC (bootArtifactsBaseURL) — needs PutObjectAcl.
+              # the mirror ECS (in-VPC, internal endpoint) before ImportImage.
+              # (The minimal-ISO rootfs is served by an in-VPC HTTP server on the
+              # mirror ECS — see MirrorSecurityGroup 8080 — not via OSS, because
+              # the bucket blocks public-read object ACLs.)
               - oss:PutObject
               - oss:DeleteObject
-              - oss:PutObjectAcl
-              - oss:GetObjectAcl
             Resource: ['*']
           - Effect: Allow
             Action:
@@ -536,6 +535,10 @@ Resources:
           PortRange: 8443/8443
           SourceCidrIp: !Ref VpcCidr
           Description: Quay HTTPS (VPC-internal pulls from cluster nodes)
+        - IpProtocol: tcp
+          PortRange: 8080/8080
+          SourceCidrIp: !Ref VpcCidr
+          Description: ABI rootfs HTTP (Agent-based minimal-ISO bootArtifactsBaseURL, VPC-internal)
         - IpProtocol: tcp
           PortRange: 22/22
           SourceCidrIp: !Ref VpcCidr

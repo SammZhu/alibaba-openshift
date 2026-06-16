@@ -16,14 +16,14 @@
 # bootArtifactsBaseURL — air-gap: the External-platform agent ISO is always a
 # MINIMAL ISO that fetches its ~1 GB rootfs over HTTP at boot. Without this it
 # points at the public rhcos.mirror.openshift.com (breaks air-gap, slow/blocked
-# in China). Point it at the OSS bucket's INTERNAL endpoint (an in-VPC Alibaba
-# service, no public internet) and upload boot-artifacts/agent.x86_64-rootfs.img
-# there (public-read) — done by tasks/iso_agent.yml. Nodes then pull the rootfs
-# from OSS-internal in-VPC.
+# in China). Point it at an in-VPC HTTP server on the mirror ECS (tasks/
+# iso_agent.yml serves boot-artifacts/agent.x86_64-rootfs.img there via a
+# systemd python http.server on :8080; the mirror SG opens 8080 to the VPC).
+# Nodes then pull the rootfs from the mirror ECS in-VPC, no public internet.
 apiVersion: v1alpha1
 kind: AgentConfig
 metadata:
   name: {{ cluster_name }}
 rendezvousIP: {{ rendezvous_ip }}
-bootArtifactsBaseURL: http://{{ oss_bucket }}.oss-{{ region }}-internal.aliyuncs.com
+bootArtifactsBaseURL: http://{{ mirror_private_ip }}:8080
 hosts: []

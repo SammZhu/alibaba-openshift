@@ -326,20 +326,35 @@
     aliyun oss cp {{ _m_iso }} oss://{{ oss_bucket }}/{{ oss_object }} -f --access-key-id="$AK" --access-key-secret="$SK" --sts-token="$TK" --region={{ region }} --endpoint={{ _oss_internal_endpoint }}'
   changed_when: true
 
-# Air-gap: upload the minimal ISO's rootfs to OSS (public-read) so nodes fetch
-# it from the OSS INTERNAL endpoint in-VPC (agent-config bootArtifactsBaseURL)
-# instead of the public rhcos.mirror.openshift.com. Key MUST be
-# agent.x86_64-rootfs.img (the URL openshift-install bakes into the kargs).
-- name: ABI — upload boot-artifacts rootfs to OSS public-read (in-VPC rootfs source)
+# Air-gap: serve the minimal ISO's rootfs from an in-VPC HTTP server on the
+# mirror ECS (agent-config bootArtifactsBaseURL = http://<mirror>:8080) so nodes
+# fetch it in-VPC instead of from the public rhcos.mirror.openshift.com. The
+# file MUST be agent.x86_64-rootfs.img (the URL openshift-install bakes into the
+# kargs). A systemd unit keeps the server up across reboots / for the later
+# Phase 06 boot. (OSS public-read was blocked by the bucket's public-access
+# setting, so we serve it ourselves.)
+- name: ABI — serve boot-artifacts rootfs over HTTP on the mirror ECS (in-VPC)
   ansible.builtin.shell: |
     {{ _ssh_root_mirror }} 'set -e
     ROOTFS=$(ls {{ _m_install_dir }}/boot-artifacts/*rootfs*.img 2>/dev/null | head -1)
     test -n "$ROOTFS" || { echo "no rootfs in boot-artifacts (bootArtifactsBaseURL not honored?)"; exit 1; }
-    RR=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/)
-    C=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/$RR)
-    AK=$(echo "$C" | jq -r .AccessKeyId); SK=$(echo "$C" | jq -r .AccessKeySecret); TK=$(echo "$C" | jq -r .SecurityToken)
-    aliyun oss cp "$ROOTFS" oss://{{ oss_bucket }}/agent.x86_64-rootfs.img -f --access-key-id="$AK" --access-key-secret="$SK" --sts-token="$TK" --region={{ region }} --endpoint={{ _oss_internal_endpoint }}
-    aliyun oss set-acl oss://{{ oss_bucket }}/agent.x86_64-rootfs.img public-read --access-key-id="$AK" --access-key-secret="$SK" --sts-token="$TK" --region={{ region }} --endpoint={{ _oss_internal_endpoint }}'
+    mkdir -p /var/lib/abi-rootfs
+    cp -f "$ROOTFS" /var/lib/abi-rootfs/agent.x86_64-rootfs.img
+    cat > /etc/systemd/system/abi-rootfs.service <<UNIT
+    [Unit]
+    Description=ABI rootfs HTTP server (in-VPC bootArtifactsBaseURL)
+    After=network-online.target
+    Wants=network-online.target
+    [Service]
+    ExecStart=/usr/bin/python3 -m http.server 8080 --directory /var/lib/abi-rootfs
+    Restart=always
+    [Install]
+    WantedBy=multi-user.target
+    UNIT
+    systemctl daemon-reload
+    systemctl enable --now abi-rootfs.service
+    sleep 1
+    curl -sS -o /dev/null -w "local rootfs HTTP: %{http_code}\n" http://127.0.0.1:8080/agent.x86_64-rootfs.img -r 0-0'
   changed_when: true
 
 - name: ABI — adopt existing agent image by name (idempotent)
