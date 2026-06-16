@@ -50,14 +50,17 @@
   poll: 30
   changed_when: false
 
-- name: ABI — wait for install-complete (on mirror ECS)
-  ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'set -o pipefail; openshift-install agent wait-for install-complete --dir {{ _m_install_dir }} --log-level=info 2>&1 | tee {{ _m_install_dir }}/wait-install.log'
-  args:
-    executable: /bin/bash
-  async: 5400
-  poll: 30
-  changed_when: false
+# IMPORTANT ordering: harvest the kubeconfig and rewrite *.apps DNS *between*
+# bootstrap-complete and install-complete — NOT after.  `wait-for
+# install-complete` blocks until ALL cluster operators are Available, and
+# authentication/console/ingress only converge once the *.apps wildcard
+# resolves to a node running router-default.  The cluster-stack seeds *.apps
+# with a placeholder (IngressVip), so if we waited for install-complete first
+# we'd deadlock (operators wait on DNS, DNS rewrite waits on install-complete).
+# The AI path doesn't hit this because it confirms via assisted-service, not
+# `openshift-install wait-for`.  The kubeconfig from `agent create image` is a
+# valid admin kubeconfig the moment bootstrap is up, so harvesting it here is
+# safe.
 
 # ── harvest credentials back to the operator host (same path the AI path uses) ──
 - name: ABI — ensure local output auth dir exists
@@ -101,11 +104,21 @@
 
 # Method-agnostic post-install wiring (same as the AI 07 path does inline):
 # stage kubeconfig on the jump host (/root/kubeconfig — 08+ run oc there) and
-# rewrite the *.apps wildcard PrivateZone record to a real router node.  ABI's
-# `agent wait-for install-complete` already confirmed the cluster, so we do NOT
-# need AI 07's Phase-B AI-status poll — only this shared post-install step.
+# rewrite the *.apps wildcard PrivateZone record to a real router node so the
+# console/ingress/auth operators can converge.  MUST run before install-complete
+# (see ordering note above).
 - name: ABI — stage kubeconfig on jump host + rewrite *.apps DNS
   ansible.builtin.include_tasks: ../tasks/post_install_apps_dns.yml
+
+# Now that *.apps resolves to a router node, the remaining operators converge.
+- name: ABI — wait for install-complete (on mirror ECS)
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'set -o pipefail; openshift-install agent wait-for install-complete --dir {{ _m_install_dir }} --log-level=info 2>&1 | tee {{ _m_install_dir }}/wait-install.log'
+  args:
+    executable: /bin/bash
+  async: 5400
+  poll: 30
+  changed_when: false
 
 - name: ABI — install complete
   ansible.builtin.debug:
