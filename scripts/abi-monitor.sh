@@ -27,16 +27,41 @@ ANSIBLE_DIR="$(cd "$HERE/../ansible" && pwd)"
 STATE="$ANSIBLE_DIR/state.yml"
 GV="$ANSIBLE_DIR/group_vars/all.yml"
 
-# tiny YAML scalar reader (top-level "key: value", strips quotes/comments)
-yval() { sed -nE "s/^${1}:[[:space:]]*[\"']?([^\"'#]+)[\"']?.*/\1/p" "$2" 2>/dev/null | head -n1 | sed 's/[[:space:]]*$//'; }
+# tiny YAML scalar reader: grab everything after "key:", strip trailing
+# inline comment and surrounding quotes (keeps inner quotes intact).
+yval() {
+  sed -nE "s/^${1}:[[:space:]]*(.*)/\1/p" "$2" 2>/dev/null | head -n1 \
+    | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]*$//; s/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/'
+}
+
+# Resolve a value that may be a Jinja env lookup like
+#   {{ lookup('env', 'HOME') }}/.ssh/openshift_ed25519
+resolve_jinja_home() {
+  printf '%s' "$1" | sed -E "s#\{\{[[:space:]]*lookup\([^)]*'HOME'[^)]*\)[[:space:]]*\}\}#${HOME}#g"
+}
 
 JUMP_HOST_IP="${JUMP_HOST_IP:-$(yval jump_host_ip "$STATE")}"
 MIRROR_PRIVATE_IP="${MIRROR_PRIVATE_IP:-$(yval mirror_private_ip "$STATE")}"
 SSH_PRIV_KEY_FILE="${SSH_PRIV_KEY_FILE:-$(yval ssh_priv_key_file "$GV")}"
-# group_vars value may use a Jinja env lookup; fall back to the documented default
-[ -z "${SSH_PRIV_KEY_FILE:-}" ] || case "$SSH_PRIV_KEY_FILE" in *'{{'*) SSH_PRIV_KEY_FILE="$HOME/.ssh/openshift_ed25519";; esac
-SSH_PRIV_KEY_FILE="${SSH_PRIV_KEY_FILE:-$HOME/.ssh/openshift_ed25519}"
+SSH_PRIV_KEY_FILE="$(resolve_jinja_home "$SSH_PRIV_KEY_FILE")"
+SSH_PRIV_KEY_FILE="${SSH_PRIV_KEY_FILE/#\~/$HOME}"
 M_INSTALL_DIR="${M_INSTALL_DIR:-/var/lib/quay-storage/agent-build/install}"
+
+# If the resolved key doesn't exist, try to auto-discover one under ~/.ssh so
+# the operator isn't forced to hand-set SSH_PRIV_KEY_FILE.
+if [ -n "$SSH_PRIV_KEY_FILE" ] && [ ! -f "$SSH_PRIV_KEY_FILE" ]; then
+  echo "WARN: ssh key '$SSH_PRIV_KEY_FILE' not found — searching ~/.ssh ..."
+  for c in "$HOME"/.ssh/openshift* "$HOME"/.ssh/*.pem "$HOME"/.ssh/id_*; do
+    case "$c" in *.pub) continue;; esac
+    [ -f "$c" ] || continue
+    SSH_PRIV_KEY_FILE="$c"; echo "WARN: using '$c' (override with SSH_PRIV_KEY_FILE=...)"; break
+  done
+fi
+if [ ! -f "${SSH_PRIV_KEY_FILE:-/nonexistent}" ]; then
+  echo "ERROR: no usable ssh private key. Set SSH_PRIV_KEY_FILE=/path/to/key and re-run."
+  echo "       (check: grep ssh_priv_key_file ansible/group_vars/all.yml ; ls -la ~/.ssh)"
+  exit 1
+fi
 
 MILESTONE="${1:-both}"
 
