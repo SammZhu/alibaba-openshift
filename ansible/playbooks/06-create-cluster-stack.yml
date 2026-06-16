@@ -183,12 +183,12 @@
               | list | first | default({})).ZoneId | default('') }}
 
     # PTR records: reverse DNS for each master fixed IP → <cluster>-master-N.
-    # AI sets node hostnames itself via assisted-service requested_hostname, but
-    # ABI has no such step — RHCOS (no cloud-init / guest agent) takes its
-    # hostname from DHCP option 12 or reverse-DNS, so without these PTRs the
-    # node names fall back to MAC-derived junk.  Method-agnostic and harmless
-    # for AI.  Zone is chosen by the IP's 3rd octet (16.* → zone1, else zone2)
-    # so it works regardless of which subnet the masters land in.
+    # AI sets node hostnames itself via assisted-service requested_hostname, so
+    # it doesn't need these and the new 06 didn't create them — keep that path
+    # untouched (ABI-only).  ABI's RHCOS (no cloud-init / guest agent) takes its
+    # hostname from DHCP option 12 or reverse-DNS, so without these PTRs the node
+    # names fall back to MAC-derived junk.  Zone is chosen by the IP's 3rd octet
+    # (16.* → zone1, else zone2) so it works regardless of master subnet.
     - name: Add PTR records for control plane nodes (reverse DNS → node hostname)
       ansible.builtin.command:
         argv:
@@ -215,6 +215,7 @@
       failed_when: false
       changed_when: true
       when:
+        - installation_method | default('Assisted') | lower in ['agent', 'agent-based']
         - item.ip | length > 0
         - (reverse_zone_id1 if item.ip.split('.')[2] == '16' else reverse_zone_id2) | length > 0
 

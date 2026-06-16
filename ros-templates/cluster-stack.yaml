@@ -513,7 +513,10 @@ Resources:
     Type: ALIYUN::ECS::Instance
     Properties:
       InstanceName: !Sub '${ClusterName}-master-1'
-      HostName: !Sub '${ClusterName}-master-1'
+      # ABI only: gives RHCOS a real hostname via DHCP/IMDS instead of the
+      # MAC-derived fallback.  AI sets node names itself (requested_hostname),
+      # so leave it unset there to keep AI behaviour byte-for-byte unchanged.
+      HostName: !If [IsAgentBased, !Sub '${ClusterName}-master-1', !Ref 'ALIYUN::NoValue']
       InstanceType: !Ref ControlPlaneInstanceType
       ImageId: !Ref ImageId
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
@@ -545,7 +548,7 @@ Resources:
     DependsOn: RendezvousInstance
     Properties:
       InstanceName: !Sub '${ClusterName}-master-2'
-      HostName: !Sub '${ClusterName}-master-2'
+      HostName: !If [IsAgentBased, !Sub '${ClusterName}-master-2', !Ref 'ALIYUN::NoValue']
       InstanceType: !Ref ControlPlaneInstanceType
       ImageId: !Ref ImageId
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
@@ -572,7 +575,7 @@ Resources:
     DependsOn: ControlPlaneInstance2
     Properties:
       InstanceName: !Sub '${ClusterName}-master-3'
-      HostName: !Sub '${ClusterName}-master-3'
+      HostName: !If [IsAgentBased, !Sub '${ClusterName}-master-3', !Ref 'ALIYUN::NoValue']
       InstanceType: !Ref ControlPlaneInstanceType
       ImageId: !Ref ImageId
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
