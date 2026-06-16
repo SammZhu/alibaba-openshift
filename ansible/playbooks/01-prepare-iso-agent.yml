@@ -3,10 +3,11 @@
 # agent ISO locally with `openshift-install agent create image`.
 #
 # ABI counterpart of 01-prepare-iso.yml (which is Assisted-only).  Invoked by
-# site-agent.yml AFTER 03/04/05 (mirror), so the mirror CA + mirror-stack
-# network outputs are available.  Network model is fixed-IP-via-DHCP with an
-# empty agent-config hosts[] (no MAC harvest).  The Assisted playbook is left
-# untouched (zero AI regression).
+# site-agent.yml AFTER 03/04/05 (mirror) AND AFTER 06 phase-1, which created the
+# fixed-IP control-plane ENIs and harvested their MACs into state.  agent-config
+# hosts[] then binds each MAC -> hostname (ENI-first; deterministic node names
+# incl. the rendezvous).  The Assisted playbook is left untouched (zero AI
+# regression).
 - name: Prepare OpenShift agent ISO (Agent-based Installer)
   hosts: local
   gather_facts: false

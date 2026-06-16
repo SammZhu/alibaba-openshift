@@ -2,23 +2,25 @@
 # Convenience wrapper: bring up the CLUSTER via the Agent-based Installer
 # (installation_method=Agent-based).  ABI counterpart of site.yml (Assisted).
 #
-# Network model (scripts/abi-eni-spike.sh, 2026-06-15): Alibaba's VPC delivers
-# each node's fixed PrivateIpAddress over cloud DHCP, so ABI uses fixed-IP-via-
-# DHCP with an EMPTY agent-config hosts[] — no per-node MAC harvest, no 06 split.
-# The only ordering difference from site.yml is that the mirror (03/04/05) must
-# run BEFORE the ISO is built (01), because ABI bakes the mirror CA +
-# imageDigestSources into the agent ISO at creation time (the AI path PATCHes
-# them in later via the assisted-service API).
+# Network model (ENI-first, 2026-06-16): the cluster-stack creates the 3 fixed-IP
+# control-plane ENIs FIRST (phase-1, no instances), agent-config hosts[] binds
+# each ENI MAC -> hostname, and phase-2 boots the instances attaching those ENIs
+# as their primary NIC.  This gives deterministic node names INCLUDING the
+# rendezvous/node-zero (a prior DHCP-only + empty-hosts[] attempt left node-zero
+# named after its MAC).  Hence the ordering: 06 (ENIs+MAC) runs BEFORE 01 (ISO),
+# and 06b (instances) AFTER.  Mirror (03/04/05) is still first because ABI bakes
+# the mirror CA + imageDigestSources into the agent ISO at creation time.
 #
 #   00            preflight
 #   03/04/05      mirror (REQUIRED for ABI) — the agent ISO is built ON the
 #                 mirror ECS, so the mirror must be up first
-#   01-agent      ON the mirror ECS: build agent ISO (empty hosts[]) + inject
-#                 clone-hook + upload to OSS + ImportImage -> ecs_image_id
-#                 (no separate Phase 02 — import is folded in here)
-#   06            cluster-stack: instances boot the agent image -> auto-install
-#                 (06 already passes InstallationMethod + RendezvousIp; IsAgentBased
-#                  pins the fixed master IPs that DHCP then hands to the nodes)
+#   06            cluster-stack PHASE-1: SG/NLB/DNS + 3 fixed-IP ENIs, NO
+#                 instances (ImageId=''); harvest the ENI MACs into state
+#   01-agent      ON the mirror ECS: build agent ISO (hosts[] = harvested
+#                 MAC↔hostname bindings) + upload to OSS + ImportImage ->
+#                 ecs_image_id (no separate Phase 02 — import folded in here)
+#   06b           cluster-stack PHASE-2: UpdateStack with the agent ImageId ->
+#                 instances boot attaching the pre-created ENIs -> auto-install
 #   07-agent      ON the mirror ECS: wait-for install-complete + scp kubeconfig back
 #
 # Post-install worker plane (08+) is the shared site-post.yml, unchanged — it
@@ -27,6 +29,7 @@
 - ansible.builtin.import_playbook: 03-create-mirror-stack.yml
 - ansible.builtin.import_playbook: 04-prepare-mirror.yml
 - ansible.builtin.import_playbook: 05-verify-mirror.yml
-- ansible.builtin.import_playbook: 01-prepare-iso-agent.yml     # build + import on the mirror ECS
-- ansible.builtin.import_playbook: 06-create-cluster-stack.yml  # instances boot the agent image
+- ansible.builtin.import_playbook: 06-create-cluster-stack.yml  # phase-1: ENIs + MAC harvest (no instances)
+- ansible.builtin.import_playbook: 01-prepare-iso-agent.yml     # build ISO with MAC↔hostname bindings + import
+- ansible.builtin.import_playbook: 06b-attach-instances.yml     # phase-2: UpdateStack -> instances attach ENIs
 - ansible.builtin.import_playbook: 07-install-cluster-agent.yml

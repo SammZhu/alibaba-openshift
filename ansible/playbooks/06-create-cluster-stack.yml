@@ -35,12 +35,21 @@
           Required mirror-stack outputs missing from state.yml.
           Run 03-create-mirror-stack.yml first.
 
-    - name: Sanity — ECS image was imported by Phase 02
+    - name: Resolve ABI flag + the ImageId to pass this pass
+      ansible.builtin.set_fact:
+        _is_abi: "{{ installation_method | default('Assisted') | lower in ['agent', 'agent-based'] }}"
+
+    # AI needs the image up-front (single create).  ABI's ENI-first phase-1
+    # create runs BEFORE the image exists (01 builds it from the ENI MACs this
+    # pass harvests), so it passes ImageId='' and the instances are deferred to
+    # the phase-2 update in 06b-attach-instances.yml.
+    - name: Sanity — ECS image was imported by Phase 02 (Assisted only)
       ansible.builtin.assert:
         that:
           - ecs_image_id is defined
           - ecs_image_id | length > 0
         fail_msg: "Run 02-import-image.yml first."
+      when: not (_is_abi | bool)
 
     - name: Read SSH public key (informational; RHCOS gets keys via ignition)
       ansible.builtin.slurp:
@@ -59,63 +68,10 @@
         _effective_control_plane_count: "{{ 1 if (cluster_topology | default('ha')) == 'sno' else (control_plane_count | int) }}"
         _effective_compute_count: "{{ 0 if (cluster_topology | default('ha')) == 'sno' else (compute_count | int) }}"
 
-    - name: Build cluster-stack Parameters
-      ansible.builtin.set_fact:
-        _cluster_stack_params:
-          # ── mirror-stack outputs passed through ──────────────────────
-          - ParameterKey: VpcId
-            ParameterValue: "{{ mirror_vpc_id }}"
-          - ParameterKey: VpcCidr
-            ParameterValue: "{{ mirror_vpc_cidr | default(vpc_cidr) }}"
-          - ParameterKey: PrivateVSwitchId
-            ParameterValue: "{{ mirror_private_vsw_1 }}"
-          - ParameterKey: PrivateVSwitch2Id
-            ParameterValue: "{{ mirror_private_vsw_2 }}"
-          - ParameterKey: ZoneId
-            ParameterValue: "{{ mirror_zone_id | default(zone) }}"
-          - ParameterKey: ZoneId2
-            ParameterValue: "{{ mirror_zone_id2 | default(zone2) }}"
-          - ParameterKey: NodeRamRoleName
-            ParameterValue: "{{ mirror_node_ram_role }}"
-          # JumpHostSecurityGroupId: the actual SG id (or "none" sentinel).
-          # EnableJumpHostSsh: separate boolean — see cluster-stack.yaml
-          # comment for why we don't compute the boolean from the SG id
-          # via !Not [!Equals [...]] (Aliyun ROS bug, observed 2026-05-30).
-          - ParameterKey: JumpHostSecurityGroupId
-            ParameterValue: "{{ jump_host_sg_id if (jump_host_sg_id | default('') | length > 0) else 'none' }}"
-          - ParameterKey: EnableJumpHostSsh
-            ParameterValue: "{{ 'true' if (jump_host_sg_id | default('') | length > 0) else 'false' }}"
-          # ── cluster-specific ─────────────────────────────────────────
-          - ParameterKey: ClusterName
-            ParameterValue: "{{ cluster_name }}"
-          - ParameterKey: BaseDomain
-            ParameterValue: "{{ base_domain }}"
-          - ParameterKey: Region
-            ParameterValue: "{{ region }}"
-          - ParameterKey: ImageId
-            ParameterValue: "{{ ecs_image_id }}"
-          - ParameterKey: ControlPlaneCount
-            ParameterValue: "{{ _effective_control_plane_count | string }}"
-          - ParameterKey: ControlPlaneInstanceType
-            ParameterValue: "{{ control_plane_type }}"
-          - ParameterKey: ComputeCount
-            ParameterValue: "{{ _effective_compute_count | string }}"
-          - ParameterKey: ComputeInstanceType
-            ParameterValue: "{{ compute_type }}"
-          - ParameterKey: SystemDiskCategory
-            ParameterValue: "{{ system_disk_category }}"
-          - ParameterKey: SystemDiskSize
-            ParameterValue: "{{ system_disk_size | string }}"
-          - ParameterKey: InstallDiskSize
-            ParameterValue: "{{ install_disk_size | string }}"
-          - ParameterKey: RendezvousIp
-            ParameterValue: "{{ rendezvous_ip }}"
-          - ParameterKey: IngressVip
-            ParameterValue: "{{ ingress_vip }}"
-          - ParameterKey: InstallationMethod
-            ParameterValue: "{{ installation_method }}"
-          - ParameterKey: SshPublicKey
-            ParameterValue: "{{ _ssh_pub_slurp.content | b64decode | trim }}"
+    - name: Build cluster-stack Parameters (ABI phase-1 passes empty ImageId)
+      ansible.builtin.include_tasks: ../tasks/cluster_stack_params.yml
+      vars:
+        cluster_stack_image_id: "{{ '' if (_is_abi | bool) else ecs_image_id }}"
 
     # cluster_topology selects between HA (3-master + NLB) and SNO (1 ECS,
     # no NLB).  Defaults to 'ha' for back-compat.  See docs/SNO-MODE.md.
@@ -151,6 +107,25 @@
         reverse_zone_id1: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId1')      | first).OutputValue }}"
         reverse_zone_id2: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId2')      | first).OutputValue }}"
         dynamic_manifest: "{{ (_cs_outputs | selectattr('OutputKey','equalto','DynamicCustomManifest')| first).OutputValue }}"
+
+    # ENI-first: harvest the 3 pre-created control-plane ENI MACs (output only
+    # exists for Agent-based) so 01 (iso_agent) can bind them to hostnames in
+    # agent-config hosts[].  This is the whole reason 06 runs before 01 for ABI.
+    - name: ABI — harvest control-plane ENI MACs from stack outputs
+      ansible.builtin.set_fact:
+        master_mac1: "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master1Mac') | first).OutputValue }}"
+        master_mac2: "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master2Mac') | first).OutputValue }}"
+        master_mac3: "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master3Mac') | first).OutputValue }}"
+      when: _is_abi | bool
+
+    - name: ABI — persist ENI MACs to state (consumed by 01 iso_agent)
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        new_state:
+          master_mac1: "{{ master_mac1 }}"
+          master_mac2: "{{ master_mac2 }}"
+          master_mac3: "{{ master_mac3 }}"
+      when: _is_abi | bool
 
     - name: Save dynamic CCM config to {{ output_dir }}/alibaba-ccm-config.yaml
       ansible.builtin.copy:

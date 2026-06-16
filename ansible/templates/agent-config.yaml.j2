@@ -2,17 +2,20 @@
 # agent-config.yaml for the Agent-based Installer (installation_method=Agent-based).
 # Rendered by ansible/tasks/iso_agent.yml.
 #
-# Network model (decided 2026-06-15 via scripts/abi-eni-spike.sh): on Alibaba
-# Cloud the VPC always delivers the node's fixed PrivateIpAddress over cloud
-# DHCP, so per-node static NMState is redundant AND would force a MAC
-# circular-dependency (the agent ISO would need each node's MAC before the
-# instances exist).  We therefore keep hosts[] EMPTY and let the ROS stack pin
-# the fixed IPs (RendezvousIp / Master2Ip / Master3Ip) which DHCP then hands to
-# the nodes.  rendezvousIP must equal master-1's fixed IP (the ROS RendezvousIp
-# parameter, fed from ansible rendezvous_ip — must live in the masters' subnet,
-# PrivateSubnetCidr2 / e.g. 10.0.32.0/20 for the default HA layout).  ABI
-# auto-assigns control-plane vs worker roles from the install-config replica
-# counts, so no per-host role pinning is needed for the compact 3-master layout.
+# Network model (ENI-first, 2026-06-16): hosts[] binds each master's pre-created
+# ENI MAC -> hostname.  This is the ONLY way the rendezvous/node-zero gets a
+# deterministic name: the assisted agent reads the hostname from config at
+# registration, so it no longer matters whether the OS hostname has settled from
+# DHCP/PTR yet (an earlier DHCP-only + empty-hosts[] attempt left node-zero named
+# after its MAC, because it gathered inventory while its hostname was still
+# localhost).  The MACs are known before the ISO is built because the cluster-
+# stack creates the 3 fixed-IP ENIs in a phase-1 (ENI-only) pass and the
+# instances attach them as their primary NIC in the phase-2 update; the MACs are
+# harvested from the stack outputs (master_mac1..3).  We still rely on DHCP to
+# hand each ENI its fixed IP (no static NMState / networkConfig), so a host entry
+# is just {hostname, role, MAC matcher, rootDeviceHints=/dev/vda}.  rendezvousIP
+# must equal master-1's fixed IP (ROS RendezvousIp / ansible rendezvous_ip, in
+# the masters' subnet, e.g. 10.0.32.0/20).
 # bootArtifactsBaseURL — air-gap: the External-platform agent ISO is always a
 # MINIMAL ISO that fetches its ~1 GB rootfs over HTTP at boot. Without this it
 # points at the public rhcos.mirror.openshift.com (breaks air-gap, slow/blocked
@@ -26,4 +29,31 @@ metadata:
   name: {{ cluster_name }}
 rendezvousIP: {{ rendezvous_ip }}
 bootArtifactsBaseURL: http://{{ mirror_private_ip }}:8080
+{% if (master_mac1 | default('')) | length > 0 %}
+hosts:
+  - hostname: {{ cluster_name }}-master-1
+    role: master
+    rootDeviceHints:
+      deviceName: /dev/vda
+    interfaces:
+      - name: eth0
+        macAddress: "{{ master_mac1 | lower }}"
+  - hostname: {{ cluster_name }}-master-2
+    role: master
+    rootDeviceHints:
+      deviceName: /dev/vda
+    interfaces:
+      - name: eth0
+        macAddress: "{{ master_mac2 | lower }}"
+  - hostname: {{ cluster_name }}-master-3
+    role: master
+    rootDeviceHints:
+      deviceName: /dev/vda
+    interfaces:
+      - name: eth0
+        macAddress: "{{ master_mac3 | lower }}"
+{% else %}
+# Fallback (no MACs harvested — e.g. ENI-first phase-1 not run): empty hosts[],
+# nodes get DHCP-pinned IPs but the rendezvous may fall back to a MAC hostname.
 hosts: []
+{% endif %}

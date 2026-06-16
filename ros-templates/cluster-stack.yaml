@@ -133,9 +133,19 @@ Parameters:
 
   ImageId:
     Type: String
+    Default: ""
     Description: |
       Custom ECS image ID imported from the OpenShift Discovery ISO.
       Produced by ansible Phase 02 (02-import-image.yml).
+
+      ENI-first (Agent-based): on the FIRST create this is passed empty —
+      the stack then builds only the network plumbing + the 3 fixed-IP
+      control-plane ENIs (whose MACs feed agent-config hosts[]), and skips
+      the instances (Condition HasImage).  After the agent image is built
+      and imported, a stack UPDATE re-runs with ImageId set, which creates
+      the instances attaching those pre-created ENIs as their primary NIC.
+      The Assisted path always passes a real ImageId, so it creates
+      everything in one shot exactly as before.
 
   RendezvousIp:
     Type: String
@@ -183,6 +193,13 @@ Conditions:
   IsAssisted:   !Equals [!Ref InstallationMethod, Assisted]
   HasWorkers:   !Not [!Equals [!Ref ComputeCount, 0]]
   HasJumpHost:  !Equals [!Ref EnableJumpHostSsh, "true"]
+  # ENI-first two-phase gate (see ImageId description).  Instances and every
+  # resource that references them (NLB server groups + listeners, etcd records,
+  # instance outputs) are created only once an ImageId is supplied.  For the
+  # Assisted path ImageId is always set, so HasImage is always true and the
+  # stack behaves exactly as a single-shot create.
+  HasImage:      !Not [!Equals [!Ref ImageId, ""]]
+  CreateWorkers: !And [!Not [!Equals [!Ref ComputeCount, 0]], !Not [!Equals [!Ref ImageId, ""]]]
 
 Resources:
   # ── Security Groups ──────────────────────────────────────────────────────
@@ -327,6 +344,7 @@ Resources:
   # 6443 — Kubernetes API server (Servers inline; NLB has no SG attachment resource)
   ApiServerGroup:
     Type: ALIYUN::NLB::ServerGroup
+    Condition: HasImage
     Properties:
       ServerGroupName: !Sub '${ClusterName}-api-6443'
       ServerGroupType: Instance
@@ -356,6 +374,7 @@ Resources:
 
   ApiNLBListener:
     Type: ALIYUN::NLB::Listener
+    Condition: HasImage
     Properties:
       LoadBalancerId: !Ref ApiNLB
       ListenerProtocol: TCP
@@ -365,6 +384,7 @@ Resources:
   # 22623 — Machine Config Server (ignition fetch during install)
   McsServerGroup:
     Type: ALIYUN::NLB::ServerGroup
+    Condition: HasImage
     Properties:
       ServerGroupName: !Sub '${ClusterName}-mcs-22623'
       ServerGroupType: Instance
@@ -394,6 +414,7 @@ Resources:
 
   McsNLBListener:
     Type: ALIYUN::NLB::Listener
+    Condition: HasImage
     Properties:
       LoadBalancerId: !Ref ApiNLB
       ListenerProtocol: TCP
@@ -448,32 +469,35 @@ Resources:
   # etcd-N A records → master private IPs
   EtcdRecord0:
     Type: ALIYUN::PVTZ::ZoneRecord
+    Condition: HasImage
     DependsOn: [RendezvousInstance, PrivateZone]
     Properties:
       ZoneId: !Ref PrivateZone
       Rr: etcd-0
       Type: A
-      Value: !GetAtt RendezvousInstance.PrivateIp
+      Value: !If [IsAgentBased, !Ref RendezvousIp, !GetAtt RendezvousInstance.PrivateIp]
       Ttl: 60
 
   EtcdRecord1:
     Type: ALIYUN::PVTZ::ZoneRecord
+    Condition: HasImage
     DependsOn: [ControlPlaneInstance2, PrivateZone]
     Properties:
       ZoneId: !Ref PrivateZone
       Rr: etcd-1
       Type: A
-      Value: !GetAtt ControlPlaneInstance2.PrivateIp
+      Value: !If [IsAgentBased, !Ref Master2Ip, !GetAtt ControlPlaneInstance2.PrivateIp]
       Ttl: 60
 
   EtcdRecord2:
     Type: ALIYUN::PVTZ::ZoneRecord
+    Condition: HasImage
     DependsOn: [ControlPlaneInstance3, PrivateZone]
     Properties:
       ZoneId: !Ref PrivateZone
       Rr: etcd-2
       Type: A
-      Value: !GetAtt ControlPlaneInstance3.PrivateIp
+      Value: !If [IsAgentBased, !Ref Master3Ip, !GetAtt ControlPlaneInstance3.PrivateIp]
       Ttl: 60
 
   # ── Reverse DNS zones (PTR records added by Phase 03 post-creation) ──────
@@ -505,12 +529,49 @@ Resources:
         - VpcId: !Ref VpcId
           RegionId: !Ref Region
 
+  # ── Control-plane ENIs (Agent-based only, ENI-first) ────────────────────
+  # Pre-created with the masters' fixed IPs so their MACs are known BEFORE the
+  # agent ISO is built (agent-config hosts[] binds MAC -> hostname, which is the
+  # only way the rendezvous/node-zero gets a deterministic name instead of the
+  # MAC-derived fallback).  Attached as each instance's PRIMARY NIC at the
+  # stack-update phase.  Confirmed supported on Alibaba (RunInstances DryRun with
+  # NetworkInterface.InstanceType=Primary passes).  Assisted uses auto ENIs.
+  Eni1:
+    Type: ALIYUN::ECS::NetworkInterface
+    Condition: IsAgentBased
+    Properties:
+      NetworkInterfaceName: !Sub '${ClusterName}-master-1-eni'
+      VSwitchId: !Ref PrivateVSwitch2Id
+      SecurityGroupId: !Ref ControlPlaneSecurityGroup
+      PrimaryIpAddress: !Ref RendezvousIp
+
+  Eni2:
+    Type: ALIYUN::ECS::NetworkInterface
+    Condition: IsAgentBased
+    Properties:
+      NetworkInterfaceName: !Sub '${ClusterName}-master-2-eni'
+      VSwitchId: !Ref PrivateVSwitch2Id
+      SecurityGroupId: !Ref ControlPlaneSecurityGroup
+      PrimaryIpAddress: !Ref Master2Ip
+
+  Eni3:
+    Type: ALIYUN::ECS::NetworkInterface
+    Condition: IsAgentBased
+    Properties:
+      NetworkInterfaceName: !Sub '${ClusterName}-master-3-eni'
+      VSwitchId: !Ref PrivateVSwitch2Id
+      SecurityGroupId: !Ref ControlPlaneSecurityGroup
+      PrimaryIpAddress: !Ref Master3Ip
+
   # ── ECS Instances (all in zone2 to avoid c-series stockout in zone1) ─────
   # Serialised via DependsOn chain so ROS does not batch a single
   # RunInstances(Amount=2+) call that Aliyun cn-wulanchabu often rejects
   # atomically even when per-instance stock is available.
+  # Condition HasImage: created on the (Assisted) create or the (Agent-based)
+  # stack-update, never on the Agent-based phase-1 ENI-only create.
   RendezvousInstance:
     Type: ALIYUN::ECS::Instance
+    Condition: HasImage
     Properties:
       InstanceName: !Sub '${ClusterName}-master-1'
       # ABI only: gives RHCOS a real hostname via DHCP/IMDS instead of the
@@ -519,8 +580,14 @@ Resources:
       HostName: !If [IsAgentBased, !Sub '${ClusterName}-master-1', !Ref 'ALIYUN::NoValue']
       InstanceType: !Ref ControlPlaneInstanceType
       ImageId: !Ref ImageId
-      SecurityGroupId: !Ref ControlPlaneSecurityGroup
-      VSwitchId: !Ref PrivateVSwitch2Id
+      # ABI: primary NIC = pre-created Eni1 (carries SG + fixed IP).  AI: auto NIC.
+      NetworkInterfaces: !If
+        - IsAgentBased
+        - - NetworkInterfaceId: !Ref Eni1
+            InstanceType: Primary
+        - !Ref 'ALIYUN::NoValue'
+      SecurityGroupId: !If [IsAgentBased, !Ref 'ALIYUN::NoValue', !Ref ControlPlaneSecurityGroup]
+      VSwitchId: !If [IsAgentBased, !Ref 'ALIYUN::NoValue', !Ref PrivateVSwitch2Id]
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
       # Agent-based: NO extra install disk.  The Alibaba ISO boot makes the agent
@@ -535,7 +602,8 @@ Resources:
             Size: !Ref InstallDiskSize
             DiskName: !Sub '${ClusterName}-master-1-install'
       AllocatePublicIP: false
-      PrivateIpAddress: !If [IsAgentBased, !Ref RendezvousIp, !Ref 'ALIYUN::NoValue']
+      # ABI fixed IP rides on Eni1; AI auto-assigns.
+      PrivateIpAddress: !Ref 'ALIYUN::NoValue'
       RamRoleName: !Ref NodeRamRoleName
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
@@ -545,14 +613,20 @@ Resources:
 
   ControlPlaneInstance2:
     Type: ALIYUN::ECS::Instance
+    Condition: HasImage
     DependsOn: RendezvousInstance
     Properties:
       InstanceName: !Sub '${ClusterName}-master-2'
       HostName: !If [IsAgentBased, !Sub '${ClusterName}-master-2', !Ref 'ALIYUN::NoValue']
       InstanceType: !Ref ControlPlaneInstanceType
       ImageId: !Ref ImageId
-      SecurityGroupId: !Ref ControlPlaneSecurityGroup
-      VSwitchId: !Ref PrivateVSwitch2Id
+      NetworkInterfaces: !If
+        - IsAgentBased
+        - - NetworkInterfaceId: !Ref Eni2
+            InstanceType: Primary
+        - !Ref 'ALIYUN::NoValue'
+      SecurityGroupId: !If [IsAgentBased, !Ref 'ALIYUN::NoValue', !Ref ControlPlaneSecurityGroup]
+      VSwitchId: !If [IsAgentBased, !Ref 'ALIYUN::NoValue', !Ref PrivateVSwitch2Id]
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
       DiskMappings: !If
@@ -562,7 +636,7 @@ Resources:
             Size: !Ref InstallDiskSize
             DiskName: !Sub '${ClusterName}-master-2-install'
       AllocatePublicIP: false
-      PrivateIpAddress: !If [IsAgentBased, !Ref Master2Ip, !Ref 'ALIYUN::NoValue']
+      PrivateIpAddress: !Ref 'ALIYUN::NoValue'
       RamRoleName: !Ref NodeRamRoleName
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
@@ -572,14 +646,20 @@ Resources:
 
   ControlPlaneInstance3:
     Type: ALIYUN::ECS::Instance
+    Condition: HasImage
     DependsOn: ControlPlaneInstance2
     Properties:
       InstanceName: !Sub '${ClusterName}-master-3'
       HostName: !If [IsAgentBased, !Sub '${ClusterName}-master-3', !Ref 'ALIYUN::NoValue']
       InstanceType: !Ref ControlPlaneInstanceType
       ImageId: !Ref ImageId
-      SecurityGroupId: !Ref ControlPlaneSecurityGroup
-      VSwitchId: !Ref PrivateVSwitch2Id
+      NetworkInterfaces: !If
+        - IsAgentBased
+        - - NetworkInterfaceId: !Ref Eni3
+            InstanceType: Primary
+        - !Ref 'ALIYUN::NoValue'
+      SecurityGroupId: !If [IsAgentBased, !Ref 'ALIYUN::NoValue', !Ref ControlPlaneSecurityGroup]
+      VSwitchId: !If [IsAgentBased, !Ref 'ALIYUN::NoValue', !Ref PrivateVSwitch2Id]
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
       DiskMappings: !If
@@ -589,7 +669,7 @@ Resources:
             Size: !Ref InstallDiskSize
             DiskName: !Sub '${ClusterName}-master-3-install'
       AllocatePublicIP: false
-      PrivateIpAddress: !If [IsAgentBased, !Ref Master3Ip, !Ref 'ALIYUN::NoValue']
+      PrivateIpAddress: !Ref 'ALIYUN::NoValue'
       RamRoleName: !Ref NodeRamRoleName
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
@@ -599,7 +679,7 @@ Resources:
 
   WorkerInstanceGroup:
     Type: ALIYUN::ECS::InstanceGroup
-    Condition: HasWorkers
+    Condition: CreateWorkers
     Properties:
       InstanceName: !Sub '${ClusterName}-worker'
       InstanceType: !Ref ComputeInstanceType
@@ -629,19 +709,33 @@ Outputs:
   PrivateZoneName:
     Value: !Sub '${ClusterName}.${BaseDomain}'
   RendezvousInstanceId:
+    Condition: HasImage
     Value: !Ref RendezvousInstance
+  # Master IPs are the fixed params for ABI (known at the ENI-only phase-1, no
+  # instance ref), GetAtt for AI.
   MasterIp1:
-    Value: !GetAtt RendezvousInstance.PrivateIp
+    Value: !If [IsAgentBased, !Ref RendezvousIp, !GetAtt RendezvousInstance.PrivateIp]
   MasterIp2:
-    Value: !GetAtt ControlPlaneInstance2.PrivateIp
+    Value: !If [IsAgentBased, !Ref Master2Ip, !GetAtt ControlPlaneInstance2.PrivateIp]
   MasterIp3:
-    Value: !GetAtt ControlPlaneInstance3.PrivateIp
+    Value: !If [IsAgentBased, !Ref Master3Ip, !GetAtt ControlPlaneInstance3.PrivateIp]
   WorkerSecurityGroup:
     Value: !Ref WorkerSecurityGroup
   ReverseZoneId1:
     Value: !Ref ReverseZone1
   ReverseZoneId2:
     Value: !Ref ReverseZone2
+  # Agent-based ENI-first: MACs of the pre-created control-plane ENIs, harvested
+  # at phase-1 and fed into agent-config hosts[] (MAC -> hostname binding).
+  Master1Mac:
+    Condition: IsAgentBased
+    Value: !GetAtt Eni1.MacAddress
+  Master2Mac:
+    Condition: IsAgentBased
+    Value: !GetAtt Eni2.MacAddress
+  Master3Mac:
+    Condition: IsAgentBased
+    Value: !GetAtt Eni3.MacAddress
   InstallConfig:
     Description: install-config.yaml (paste into Red Hat console or save for agent-create)
     Value: !Sub |
