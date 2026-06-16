@@ -146,7 +146,7 @@
   ansible.builtin.set_fact:
     _abi_mirror_auth_b64: "{{ ((mirror_init_user | default('mirror-admin')) + ':' + mirror_init_password) | b64encode }}"
   no_log: true
-  when: abi_clone_hook_enabled | default(true) | bool
+  when: abi_clone_hook_enabled | default(false) | bool
 
 - name: ABI — render oc registry-config + ICSP for matched coreos-installer extract
   ansible.builtin.copy:
@@ -171,7 +171,7 @@
   loop_control:
     label: "{{ item.name }}"
   no_log: true
-  when: abi_clone_hook_enabled | default(true) | bool
+  when: abi_clone_hook_enabled | default(false) | bool
 
 - name: ABI — render CCM manifest + alibaba-ccm-config into openshift/
   ansible.builtin.template:
@@ -278,14 +278,16 @@
   # local trust); add registries.conf/--insecure handling here if needed.
 
 # ── inject the Alibaba clone-vdb-to-vda hook into the agent ISO live ignition ──
-# The FCOS quay.io/coreos/coreos-installer:release (0.26.0) READS the agent ISO
-# but `iso ignition embed` fails "kargs don't match" on the RHCOS-9.6 minimal
-# agent ISO (version skew).  Fix: extract the VERSION-MATCHED coreos-installer
-# (0.24.0) — it ships as a loose binary inside the release's machine-os-images —
-# and run that binary INSIDE the FCOS container so it picks up libssl.so.3
-# (RHCOS9-built, won't run bare on the RHEL8 mirror ECS).  Then show -> jq merge
-# -> embed --force.  Each remote command stays on ONE line.  Gated by
-# abi_clone_hook_enabled (default true).
+# ⚠ DEFAULT OFF (abi_clone_hook_enabled=false) AND SUPERSEDED.  This injection is
+# fundamentally blocked: openshift-install customizes the agent ISO's kargs
+# (prepends /images/assisted_installer_custom.img), so coreos-installer's
+# `iso ignition embed` fails "kargs don't match at all offsets" on the agent ISO
+# — confirmed with BOTH the FCOS 0.26.0 image AND the version-matched 0.24.0
+# binary (extracted from machine-os-images, run inside the FCOS container for
+# libssl.so.3).  Replaced by the cleaner approach: drop the masters' /dev/vdb
+# install disk (cluster-stack.yaml IsAgentBased) so the assisted-installer
+# installs RHCOS straight to /dev/vda — no clone needed.  Kept here, gated off,
+# only for reference / a future ISO-format that allows the embed.
 - name: ABI — inject clone-hook with version-matched coreos-installer (on mirror ECS)
   ansible.builtin.shell: |
     {{ _ssh_root_mirror }} 'set -e
@@ -299,7 +301,7 @@
     jq -s -f abi-ign-merge.jq existing.ign agent-live-clonehook.ign > merged.ign
     podman run --rm -v {{ _m_install_dir }}/ci/coreos-installer:/ci:z -v {{ _m_install_dir }}:/d:z --entrypoint /ci quay.io/coreos/coreos-installer:release iso ignition embed --force --ignition-file /d/merged.ign /d/agent.x86_64.iso'
   changed_when: true
-  when: abi_clone_hook_enabled | default(true) | bool
+  when: abi_clone_hook_enabled | default(false) | bool
 
 - name: ABI — WARN clone-hook injection skipped
   ansible.builtin.debug:
@@ -307,7 +309,7 @@
       clone-vdb-to-vda hook NOT injected (abi_clone_hook_enabled=false). The
       agent ISO will boot without it — confirm whether the ABI minimal ISO needs
       it (node disk install on /dev/vda) before relying on this path.
-  when: not (abi_clone_hook_enabled | default(true) | bool)
+  when: not (abi_clone_hook_enabled | default(false) | bool)
 
 # ── upload to OSS (internal endpoint) + ImportImage, from the mirror ECS ──────
 # aliyun on the mirror ECS authenticates via its instance RAM role (Instance
