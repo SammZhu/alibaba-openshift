@@ -182,6 +182,52 @@
               | selectattr('ZoneName','equalto', cluster_name + '.' + base_domain)
               | list | first | default({})).ZoneId | default('') }}
 
+    # PTR records: reverse DNS for each master fixed IP → <cluster>-master-N.
+    # AI sets node hostnames itself via assisted-service requested_hostname, but
+    # ABI has no such step — RHCOS (no cloud-init / guest agent) takes its
+    # hostname from DHCP option 12 or reverse-DNS, so without these PTRs the
+    # node names fall back to MAC-derived junk.  Method-agnostic and harmless
+    # for AI.  Zone is chosen by the IP's 3rd octet (16.* → zone1, else zone2)
+    # so it works regardless of which subnet the masters land in.
+    - name: Add PTR records for control plane nodes (reverse DNS → node hostname)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - pvtz
+          - AddZoneRecord
+          - --ZoneId
+          - "{{ reverse_zone_id1 if item.ip.split('.')[2] == '16' else reverse_zone_id2 }}"
+          - --Rr
+          - "{{ item.ip.split('.')[-1] }}"
+          - --Type
+          - PTR
+          - --Value
+          - "{{ cluster_name }}-master-{{ item.idx }}.{{ cluster_name }}.{{ base_domain }}."
+          - --Ttl
+          - "60"
+          - --profile
+          - "{{ aliyun_profile }}"
+      loop:
+        - { ip: "{{ master_ip1 }}", idx: "1" }
+        - { ip: "{{ master_ip2 }}", idx: "2" }
+        - { ip: "{{ master_ip3 }}", idx: "3" }
+      register: _ptr_results
+      failed_when: false
+      changed_when: true
+      when:
+        - item.ip | length > 0
+        - (reverse_zone_id1 if item.ip.split('.')[2] == '16' else reverse_zone_id2) | length > 0
+
+    - name: Warn on PTR record failures (non-fatal — record may already exist)
+      ansible.builtin.debug:
+        msg: "WARNING: PTR for master-{{ item.item.idx }} ({{ item.item.ip }}) rc={{ item.rc }} stderr={{ item.stderr | default('') }}"
+      loop: "{{ _ptr_results.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.idx | default('?') }}"
+      when:
+        - item.rc is defined
+        - item.rc != 0
+
     - name: Save cluster-stack facts to state
       ansible.builtin.include_tasks: ../tasks/save_state.yml
       vars:

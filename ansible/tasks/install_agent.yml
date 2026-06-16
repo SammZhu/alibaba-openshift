@@ -26,18 +26,35 @@
     {{ _ssh_root_mirror }} 'test -f {{ _m_install_dir }}/.openshift_install_state.json'
   changed_when: false
 
+# ansible buffers async/poll stdout, so the wait-for output below is NOT shown
+# live — for a live progress view run scripts/abi-monitor.sh in a SECOND
+# terminal on the operator host.  We also tee each milestone to a log on the
+# mirror ECS so progress survives for after-the-fact inspection.
+- name: ABI — live-monitor hint
+  ansible.builtin.debug:
+    msg: >-
+      Watch progress live in another terminal:  scripts/abi-monitor.sh
+      — it streams `agent wait-for` from the mirror ECS, bypassing ansible's
+      async buffering.  Logs also tee to {{ _m_install_dir }}/wait-bootstrap.log
+      and wait-install.log on the mirror ECS.
+
 # wait-for blocks until the milestone or its own timeout; bootstrap ~20-40 min,
 # install-complete longer.  async/poll guards the long-running ssh command.
+# `set -o pipefail` so the task's rc reflects openshift-install, not tee.
 - name: ABI — wait for bootstrap-complete (on mirror ECS)
   ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'openshift-install agent wait-for bootstrap-complete --dir {{ _m_install_dir }} --log-level=info'
+    {{ _ssh_root_mirror }} 'set -o pipefail; openshift-install agent wait-for bootstrap-complete --dir {{ _m_install_dir }} --log-level=info 2>&1 | tee {{ _m_install_dir }}/wait-bootstrap.log'
+  args:
+    executable: /bin/bash
   async: 3600
   poll: 30
   changed_when: false
 
 - name: ABI — wait for install-complete (on mirror ECS)
   ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'openshift-install agent wait-for install-complete --dir {{ _m_install_dir }} --log-level=info'
+    {{ _ssh_root_mirror }} 'set -o pipefail; openshift-install agent wait-for install-complete --dir {{ _m_install_dir }} --log-level=info 2>&1 | tee {{ _m_install_dir }}/wait-install.log'
+  args:
+    executable: /bin/bash
   async: 5400
   poll: 30
   changed_when: false
