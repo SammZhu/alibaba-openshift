@@ -348,14 +348,17 @@
     After=network-online.target
     Wants=network-online.target
     [Service]
-    ExecStart=/usr/bin/python3 -m http.server 8080 --directory /var/lib/abi-rootfs
+    WorkingDirectory=/var/lib/abi-rootfs
+    ExecStart=/usr/bin/python3 -m http.server 8080
     Restart=always
+    RestartSec=3
     [Install]
     WantedBy=multi-user.target
     UNIT
     systemctl daemon-reload
+    systemctl reset-failed abi-rootfs.service 2>/dev/null || true
     systemctl enable --now abi-rootfs.service
-    sleep 1
+    sleep 2
     curl -sS -o /dev/null -w "local rootfs HTTP: %{http_code}\n" http://127.0.0.1:8080/agent.x86_64-rootfs.img -r 0-0'
   changed_when: true
 
