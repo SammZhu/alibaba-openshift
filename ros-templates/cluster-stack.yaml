@@ -220,6 +220,19 @@ Resources:
           PortRange: 443/443
           SourceCidrIp: !Ref VpcCidr
           Description: Ingress HTTPS (router-default hostNetwork on masters)
+        # Agent-based only: the rendezvous node runs assisted-service on 8090.
+        # Masters reach each other intra-SG by default, but the monitoring host
+        # — the mirror ECS (different SG) running `openshift-install agent
+        # wait-for`, and the jump host — is NOT, so without this the wait-for
+        # gets "Agent Rest API never initialized" even though the install
+        # succeeds.  Install-time only; assisted-service stops post-install.
+        - !If
+          - IsAgentBased
+          - IpProtocol: tcp
+            PortRange: 8090/8090
+            SourceCidrIp: !Ref VpcCidr
+            Description: Agent-based assisted-service API (install-time; wait-for from mirror/jump)
+          - !Ref 'ALIYUN::NoValue'
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
           Value: owned
