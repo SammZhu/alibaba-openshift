@@ -31,18 +31,39 @@ Assumed configuration:
 - `installation_method: Assisted` (this runbook covers the Assisted path via
   `site.yml`).  The **Agent-based Installer (ABI)** is also supported via
   `site-agent.yml` (`installation_method: Agent-based`) — fully air-gapped, no
-  assisted-service dependency.  ABI uses **fixed-IP-via-DHCP** (the ROS stack
-  pins the master IPs, the VPC's cloud DHCP delivers them) with an empty
-  `agent-config` `hosts[]` — confirmed via `scripts/abi-eni-spike.sh` that this
-  is the clean Alibaba path (static NMState would force a MAC circular
-  dependency).  The agent ISO is built **on the mirror ECS** (in-VPC): the
-  operator host only renders the configs and orchestrates over ssh; the mirror
-  ECS runs `openshift-install agent create image` (release pulled from its own
-  localhost:8443), injects the clone-vdb-to-vda hook into the live ignition via
-  coreos-installer (podman: show -> jq-merge -> embed --force), then uploads the
-  ISO to OSS (internal endpoint) + `ImportImage` via its instance RAM role — all
-  in-VPC.  So the **mirror** must be up before ABI runs; the operator host needs
-  only ssh/scp + jq.  Live HA validation pending.
+  assisted-service dependency.
+
+  **ABI network model — ENI-first (MAC↔hostname binding).**  The cluster-stack
+  is built in two phases so each node gets a deterministic name (including the
+  rendezvous/node-zero, which an earlier DHCP-only + empty-`hosts[]` attempt
+  left named after its MAC):
+    1. **06 phase-1** creates the SGs/NLB/DNS **plus 3 fixed-IP control-plane
+       ENIs** (`ImageId` empty → instances deferred via the template's
+       `HasImage` condition) and harvests the ENI MACs into `state.yml`.
+    2. **01-agent** builds the agent ISO with `agent-config` `hosts[]` binding
+       each MAC → `<cluster>-master-N` (+ `rootDeviceHints: /dev/vda`), then
+       imports it to an ECS image.
+    3. **06b** `UpdateStack`s the cluster-stack with the real `ImageId` → the 3
+       masters materialise, each attaching its pre-created ENI as the **primary
+       NIC** (confirmed supported on Alibaba via RunInstances `--DryRun`).
+    4. **07-agent** waits for the install and harvests the kubeconfig.
+  `rendezvous_ip` must be a master-subnet IP (e.g. `10.0.32.5`, in
+  `PrivateSubnetCidr2`).  Masters install **straight to `/dev/vda`** (no `vdb`,
+  no clone hook): the minimal agent ISO runs its rootfs from RAM.
+
+  **Air-gap.** The External-platform agent ISO is always *minimal* and fetches
+  its ~1 GB rootfs over HTTP; `agent-config bootArtifactsBaseURL` points at an
+  in-VPC HTTP server on the mirror ECS (`:8080`), so no public rhcos mirror.
+  The ISO is built **on the mirror ECS** (in-VPC): the operator host only
+  renders configs + orchestrates over ssh; the mirror ECS runs
+  `openshift-install agent create image` (release pulled from its own
+  `localhost:8443`), uploads to OSS (internal endpoint) + `ImportImage` via its
+  instance RAM role.  So the **mirror** must be up before ABI runs.
+
+  **Live monitor.** `agent wait-for` runs on the mirror ECS under ansible
+  (buffered); run `scripts/abi-monitor.sh` in a second terminal for live
+  progress.  Requires the cluster-stack SG to allow `:8090` from the VPC CIDR
+  (the template adds this for Agent-based).  Live HA validation in progress.
 - compact 3-node (`compute_count: 0`) — workers schedule on masters
 
 ---
