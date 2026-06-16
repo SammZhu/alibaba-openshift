@@ -390,6 +390,21 @@
   delay: 30
   until: _abi_img_status.stdout | trim == 'Available'
 
+# Delete the OSS agent ISO object now that the image is Available — it only
+# existed to feed ImportImage (same as the AI path deletes its discovery-ISO
+# object right after import).  The image keeps its own backing snapshot, which
+# the teardown's ECS-image block cascade-deletes.  Keeps OSS clean (no ~133 MB
+# leftover) without relying on teardown.
+- name: ABI — delete the OSS agent ISO object (consumed by ImportImage)
+  ansible.builtin.shell: |
+    {{ _ssh_root_mirror }} 'set -e
+    RR=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/)
+    C=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/$RR)
+    AK=$(echo "$C" | jq -r .AccessKeyId); SK=$(echo "$C" | jq -r .AccessKeySecret); TK=$(echo "$C" | jq -r .SecurityToken)
+    aliyun oss rm oss://{{ oss_bucket }}/{{ oss_object }} --access-key-id="$AK" --access-key-secret="$SK" --sts-token="$TK" --region={{ region }} --endpoint={{ _oss_internal_endpoint }} -f'
+  changed_when: true
+  ignore_errors: true
+
 # ── record outputs + tidy scratch ───────────────────────────────────────────
 - name: ABI — record ISO build timestamp (24h ignition-cert window)
   ansible.builtin.set_fact:
