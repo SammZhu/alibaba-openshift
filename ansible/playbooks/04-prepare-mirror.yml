@@ -932,31 +932,6 @@
         CREDS=$(jq -r ".auths[\"registry.redhat.io\"].auth" < ~/.docker/config.json)
         if [ "$CREDS" != "null" ] && [ -n "$CREDS" ]; then
           {{ _ssh_root_mirror }} "bash <<'REMOTE'
-            if [ ! -f /root/.docker/config.json ]; then
-              mkdir -p /root/.docker
-              echo '{\"auths\": {}}' > /root/.docker/config.json
-            fi
-            jq '.auths + {\"registry.redhat.io\": {\"auth\": \"'"$CREDS"'\"}}' /root/.docker/config.json > /tmp/config.json
-            mv /tmp/config.json /root/.docker/config.json
-            echo "✅ Injected registry.redhat.io credentials into mirror ECS"
-REMOTE
-"
-        fi
-        if [ "$CREDS" = "null" ] || [ -z "$CREDS" ]; then
-          echo "⚠️ No registry.redhat.io credentials found on localhost, will skip"
-        fi
-      changed_when: true
-
-            echo "⚠️  Digest $DIGEST not found locally → pulling from registry.redhat.io"
-            podman pull --tls-verify=false "registry.redhat.io/$REPO@$DIGEST"
-            podman tag "registry.redhat.io/$REPO@$DIGEST" "$REG/$REPO@$DIGEST"
-          fi
-          podman tag "$REG/$REPO@$DIGEST" "$REG/$REPO:$TAG"
-          podman push --tls-verify=false   "$REG/$REPO:$TAG"
-        done < /var/lib/quay-storage/tag-mapping.tsv
-        rm -f /var/lib/quay-storage/tag-mapping.tsv
-        echo "✓ all commit-tag aliases ensured"
-        REMOTE
       changed_when: true
 
     # ── Alibaba CCM image: belt-and-suspenders pre-pull (idempotent) ───────
