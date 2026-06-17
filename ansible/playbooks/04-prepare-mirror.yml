@@ -930,7 +930,7 @@
               echo '{"auths": {}}' > /root/.docker/config.json
             fi
             # jq to inject the creds into remote config
-            jq '.auths + {"registry.redhat.io": {"auth": "'"$CREDS"'"}}' /root/.docker/config.json > /tmp/config.json
+            jq '.auths + {"registry.redhat.io": {"auth": "''$CREDS''"}}' /root/.docker/config.json > /tmp/config.json
             mv /tmp/config.json /root/.docker/config.json
             echo "✅ Injected registry.redhat.io credentials into mirror ECS"
 REMOTE
