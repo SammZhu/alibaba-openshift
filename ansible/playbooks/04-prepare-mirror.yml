@@ -916,12 +916,12 @@
         while IFS=$'\t' read -r REPO TAG DIGEST; do
           [ -z "$REPO" ] && continue
           echo "=== aliasing $REG/$REPO@$DIGEST → :$TAG ==="
-          # Try pull from local mirror first; if fails, pull from upstream quay.io/openshift
-          # rhai/* images live in quay.io/openshift, not openshift-release-dev
+          # Try pull from local mirror first; if fails, pull from upstream registry.redhat.io
+          # We already have credentials for registry.redhat.io in /root/.docker/config.json
           if ! podman pull --tls-verify=false "$REG/$REPO@$DIGEST"; then
-            echo "⚠️  Digest $DIGEST not found locally → pulling from quay.io/openshift"
-            podman pull --tls-verify=false "quay.io/openshift/$REPO@$DIGEST"
-            podman tag "quay.io/openshift/$REPO@$DIGEST" "$REG/$REPO@$DIGEST"
+            echo "⚠️  Digest $DIGEST not found locally → pulling from registry.redhat.io"
+            podman pull --tls-verify=false "registry.redhat.io/$REPO@$DIGEST"
+            podman tag "registry.redhat.io/$REPO@$DIGEST" "$REG/$REPO@$DIGEST"
           fi
           podman tag "$REG/$REPO@$DIGEST" "$REG/$REPO:$TAG"
           podman push --tls-verify=false   "$REG/$REPO:$TAG"
