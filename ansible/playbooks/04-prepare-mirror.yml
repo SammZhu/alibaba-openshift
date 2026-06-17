@@ -906,6 +906,38 @@
         wc -l /var/lib/quay-storage/tag-mapping.tsv
         REMOTE
       changed_when: true
+    - name: Download tag-mapping.tsv from OSS (commit-tag → digest aliases)
+      ansible.builtin.shell: |
+        {{ _ssh_root_mirror }} bash <<'REMOTE'
+        set -euxo pipefail
+        aliyun oss cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}.tag-mapping.tsv" \
+          /var/lib/quay-storage/tag-mapping.tsv \
+          --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
+          --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
+          --region "{{ region }}" --force
+        wc -l /var/lib/quay-storage/tag-mapping.tsv
+        REMOTE
+      changed_when: true
+
+    - name: Ensure mirror ECS has registry.redhat.io docker credentials (copy from localhost)
+      ansible.builtin.shell: |
+        # Extract registry.redhat.io creds from localhost docker config, inject into mirror ECS
+        CREDS=$(jq -r ".auths[\"registry.redhat.io\"].auth" < ~/.docker/config.json)
+        if [ "$CREDS" != "null" ] && [ -n "$CREDS" ]; then
+          {{ _ssh_root_mirror }} bash <<'REMOTE'
+            if [ ! -f /root/.docker/config.json ]; then
+              mkdir -p /root/.docker
+              echo '{"auths": {}}' > /root/.docker/config.json
+            fi
+            # jq to inject the creds into remote config
+            jq '.auths + {"registry.redhat.io": {"auth": "'"$CREDS"'"}}' /root/.docker/config.json > /tmp/config.json
+            mv /tmp/config.json /root/.docker/config.json
+            echo "✅ Injected registry.redhat.io credentials into mirror ECS"
+REMOTE
+        else
+          echo "⚠️ No registry.redhat.io credentials found on localhost, will skip"
+        fi
+      changed_when: true
 
     - name: Add commit-tag aliases for rhai images on mirror (always; idempotent)
       ansible.builtin.shell: |
