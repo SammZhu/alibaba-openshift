@@ -934,7 +934,8 @@
             mv /tmp/config.json /root/.docker/config.json
             echo "✅ Injected registry.redhat.io credentials into mirror ECS"
 REMOTE
-        else
+        fi
+        if [ "$CREDS" = "null" ] || [ -z "$CREDS" ]; then
           echo "⚠️ No registry.redhat.io credentials found on localhost, will skip"
         fi
       changed_when: true
