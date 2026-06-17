@@ -70,10 +70,10 @@
 
     - name: Map refreshed outputs to facts
       ansible.builtin.set_fact:
-        api_lb_endpoint:  "{{ (_cs_outputs | selectattr('OutputKey','equalto','ApiLBEndpoint') | first).OutputValue }}"
-        master_ip1:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp1')     | first).OutputValue }}"
-        master_ip2:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp2')     | first).OutputValue }}"
-        master_ip3:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp3')     | first).OutputValue }}"
+        api_lb_endpoint:  "{{ (_cs_outputs | selectattr('OutputKey','equalto','ApiLBEndpoint')  | first).OutputValue }}"
+        master_ip1:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterFixedIp1') | first).OutputValue }}"
+        master_ip2:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterFixedIp2') | first).OutputValue }}"
+        master_ip3:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterFixedIp3') | first).OutputValue }}"
 
     - name: Persist refreshed endpoint to state
       ansible.builtin.include_tasks: ../tasks/save_state.yml

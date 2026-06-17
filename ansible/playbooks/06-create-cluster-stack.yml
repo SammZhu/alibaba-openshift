@@ -101,9 +101,11 @@
       ansible.builtin.set_fact:
         api_lb_endpoint:  "{{ (_cs_outputs | selectattr('OutputKey','equalto','ApiLBEndpoint')        | first).OutputValue }}"
         worker_sg:        "{{ (_cs_outputs | selectattr('OutputKey','equalto','WorkerSecurityGroup') | first).OutputValue }}"
-        master_ip1:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp1')           | first).OutputValue }}"
-        master_ip2:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp2')           | first).OutputValue }}"
-        master_ip3:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp3')           | first).OutputValue }}"
+        # ABI phase-1 has no instances yet → read the fixed-IP outputs; AI reads
+        # the instance GetAtt outputs (auto-assigned).
+        master_ip1:       "{{ (_cs_outputs | selectattr('OutputKey','equalto', ('MasterFixedIp1' if (_is_abi | bool) else 'MasterIp1')) | first).OutputValue }}"
+        master_ip2:       "{{ (_cs_outputs | selectattr('OutputKey','equalto', ('MasterFixedIp2' if (_is_abi | bool) else 'MasterIp2')) | first).OutputValue }}"
+        master_ip3:       "{{ (_cs_outputs | selectattr('OutputKey','equalto', ('MasterFixedIp3' if (_is_abi | bool) else 'MasterIp3')) | first).OutputValue }}"
         reverse_zone_id1: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId1')      | first).OutputValue }}"
         reverse_zone_id2: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId2')      | first).OutputValue }}"
         dynamic_manifest: "{{ (_cs_outputs | selectattr('OutputKey','equalto','DynamicCustomManifest')| first).OutputValue }}"

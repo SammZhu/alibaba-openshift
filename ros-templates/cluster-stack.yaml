@@ -711,14 +711,29 @@ Outputs:
   RendezvousInstanceId:
     Condition: HasImage
     Value: !Ref RendezvousInstance
-  # Master IPs are the fixed params for ABI (known at the ENI-only phase-1, no
-  # instance ref), GetAtt for AI.
+  # AI: actual instance IPs (auto-assigned) — only valid once instances exist,
+  # so the output is HasImage-conditional (ROS rejects an unconditional output
+  # that references a conditional resource, even inside an !If branch).
   MasterIp1:
-    Value: !If [IsAgentBased, !Ref RendezvousIp, !GetAtt RendezvousInstance.PrivateIp]
+    Condition: HasImage
+    Value: !GetAtt RendezvousInstance.PrivateIp
   MasterIp2:
-    Value: !If [IsAgentBased, !Ref Master2Ip, !GetAtt ControlPlaneInstance2.PrivateIp]
+    Condition: HasImage
+    Value: !GetAtt ControlPlaneInstance2.PrivateIp
   MasterIp3:
-    Value: !If [IsAgentBased, !Ref Master3Ip, !GetAtt ControlPlaneInstance3.PrivateIp]
+    Condition: HasImage
+    Value: !GetAtt ControlPlaneInstance3.PrivateIp
+  # ABI: the masters' fixed IPs are the params (= the pre-created ENIs' IPs),
+  # available in BOTH phase-1 (ENI-only) and phase-2.  06 reads these for ABI.
+  MasterFixedIp1:
+    Condition: IsAgentBased
+    Value: !Ref RendezvousIp
+  MasterFixedIp2:
+    Condition: IsAgentBased
+    Value: !Ref Master2Ip
+  MasterFixedIp3:
+    Condition: IsAgentBased
+    Value: !Ref Master3Ip
   WorkerSecurityGroup:
     Value: !Ref WorkerSecurityGroup
   ReverseZoneId1:
