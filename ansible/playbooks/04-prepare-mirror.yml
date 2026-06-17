@@ -926,32 +926,27 @@
         if [ "$CREDS" != "null" ] && [ -n "$CREDS" ]; then
           {{ _ssh_root_mirror }} bash <<'REMOTE'
             if [ ! -f /root/.docker/config.json ]; then
+
+    - name: Ensure mirror ECS has registry.redhat.io docker credentials (copy from localhost)
+      ansible.builtin.shell: >
+        CREDS=$(jq -r ".auths[\"registry.redhat.io\"].auth" < ~/.docker/config.json)
+        if [ "$CREDS" != "null" ] && [ -n "$CREDS" ]; then
+          {{ _ssh_root_mirror }} "bash <<'REMOTE'
+            if [ ! -f /root/.docker/config.json ]; then
               mkdir -p /root/.docker
-              echo '{"auths": {}}' > /root/.docker/config.json
+              echo '{\"auths\": {}}' > /root/.docker/config.json
             fi
-            # jq to inject the creds into remote config
-            jq '.auths + {"registry.redhat.io": {"auth": "''$CREDS''"}}' /root/.docker/config.json > /tmp/config.json
+            jq '.auths + {\"registry.redhat.io\": {\"auth\": \"'"$CREDS"'\"}}' /root/.docker/config.json > /tmp/config.json
             mv /tmp/config.json /root/.docker/config.json
             echo "✅ Injected registry.redhat.io credentials into mirror ECS"
 REMOTE
+"
         fi
         if [ "$CREDS" = "null" ] || [ -z "$CREDS" ]; then
           echo "⚠️ No registry.redhat.io credentials found on localhost, will skip"
         fi
       changed_when: true
 
-    - name: Add commit-tag aliases for rhai images on mirror (always; idempotent)
-      ansible.builtin.shell: |
-        {{ _ssh_root_mirror }} bash <<'REMOTE'
-        set -euxo pipefail
-        export HOME=/root  # so podman picks up /root/.docker/config.json
-        REG=10.0.16.4:8443
-        while IFS=$'\t' read -r REPO TAG DIGEST; do
-          [ -z "$REPO" ] && continue
-          echo "=== aliasing $REG/$REPO@$DIGEST → :$TAG ==="
-          # Try pull from local mirror first; if fails, pull from upstream registry.redhat.io
-          # We already have credentials for registry.redhat.io in /root/.docker/config.json
-          if ! podman pull --tls-verify=false "$REG/$REPO@$DIGEST"; then
             echo "⚠️  Digest $DIGEST not found locally → pulling from registry.redhat.io"
             podman pull --tls-verify=false "registry.redhat.io/$REPO@$DIGEST"
             podman tag "registry.redhat.io/$REPO@$DIGEST" "$REG/$REPO@$DIGEST"
