@@ -916,8 +916,13 @@
         while IFS=$'\t' read -r REPO TAG DIGEST; do
           [ -z "$REPO" ] && continue
           echo "=== aliasing $REG/$REPO@$DIGEST → :$TAG ==="
-          podman pull  --tls-verify=false "$REG/$REPO@$DIGEST"
-          podman tag                       "$REG/$REPO@$DIGEST" "$REG/$REPO:$TAG"
+          # Try pull from local mirror first; if fails, pull from upstream quay.io/openshift-release-dev
+          if ! podman pull --tls-verify=false "$REG/$REPO@$DIGEST"; then
+            echo "⚠️  Digest $DIGEST not found locally → pulling from quay.io/openshift-release-dev"
+            podman pull --tls-verify=false "quay.io/openshift-release-dev/$REPO@$DIGEST"
+            podman tag "quay.io/openshift-release-dev/$REPO@$DIGEST" "$REG/$REPO@$DIGEST"
+          fi
+          podman tag "$REG/$REPO@$DIGEST" "$REG/$REPO:$TAG"
           podman push --tls-verify=false   "$REG/$REPO:$TAG"
         done < /var/lib/quay-storage/tag-mapping.tsv
         rm -f /var/lib/quay-storage/tag-mapping.tsv
