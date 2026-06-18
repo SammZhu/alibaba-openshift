@@ -52,9 +52,12 @@
         fail_msg: "Run 02-import-image.yml first."
       when: not (_is_abi | bool)
 
-    # ABI phase-1 placeholder: pick any bootable system Linux image compatible
-    # with the control-plane instance type.  Overridable via abi_placeholder_image_id.
-    - name: ABI — resolve a placeholder system image for phase-1
+    # ABI phase-1 placeholder: a throwaway system image only needed so the
+    # masters + their auto primary ENIs come up (06b reimages them to the agent
+    # image).  Prefer Alibaba Cloud Linux 3 — the cloud-native image: free,
+    # always present, fast-booting, no marketplace subscription.  Overridable
+    # via abi_placeholder_image_id.
+    - name: ABI — list Alibaba Cloud Linux 3 system images for phase-1
       ansible.builtin.command:
         argv:
           - aliyun
@@ -73,7 +76,7 @@
           - --Status
           - Available
           - --PageSize
-          - "50"
+          - "100"
           - --profile
           - "{{ aliyun_profile }}"
       register: _abi_images
@@ -82,14 +85,24 @@
         - _is_abi | bool
         - abi_placeholder_image_id | default('') | length == 0
 
-    - name: ABI — set placeholder image id
+    - name: ABI — select placeholder image (prefer Alibaba Cloud Linux 3)
+      vars:
+        _imgs: "{{ (_abi_images.stdout | default('{}') | from_json).Images.Image | default([]) }}"
+        _acl3: "{{ _imgs | selectattr('OSNameEn','defined') | selectattr('OSNameEn','search','Alibaba Cloud Linux 3') | map(attribute='ImageId') | list }}"
+        _acl:  "{{ _imgs | selectattr('Platform','defined') | selectattr('Platform','search','Alibaba Cloud Linux') | map(attribute='ImageId') | list }}"
+        _any:  "{{ _imgs | selectattr('ImageId','defined') | map(attribute='ImageId') | list }}"
       ansible.builtin.set_fact:
         _abi_placeholder_image: >-
           {{ abi_placeholder_image_id
              if (abi_placeholder_image_id | default('') | length > 0)
-             else ((_abi_images.stdout | from_json).Images.Image
-                   | selectattr('ImageId','defined') | map(attribute='ImageId')
-                   | list | first | default('')) }}
+             else (_acl3[0] if (_acl3 | length > 0)
+                   else (_acl[0] if (_acl | length > 0)
+                         else (_any[0] if (_any | length > 0) else ''))) }}
+      when: _is_abi | bool
+
+    - name: ABI — show chosen placeholder image
+      ansible.builtin.debug:
+        msg: "ABI phase-1 placeholder image = {{ _abi_placeholder_image }}"
       when: _is_abi | bool
 
     - name: ABI — fail if no placeholder image found
