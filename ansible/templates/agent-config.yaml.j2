@@ -8,10 +8,10 @@
 # registration, so it no longer matters whether the OS hostname has settled from
 # DHCP/PTR yet (an earlier DHCP-only + empty-hosts[] attempt left node-zero named
 # after its MAC, because it gathered inventory while its hostname was still
-# localhost).  The MACs are known before the ISO is built because the cluster-
-# stack creates the 3 fixed-IP ENIs in a phase-1 (ENI-only) pass and the
-# instances attach them as their primary NIC in the phase-2 update; the MACs are
-# harvested from the stack outputs (master_mac1..3).  We still rely on DHCP to
+# localhost).  The MACs are known before the ISO is built because 06 phase-1
+# boots the masters from a placeholder image (fixed IPs, auto primary ENIs) and
+# harvests those ENIs' MACs; 06b phase-2 reimages the masters to the agent image
+# in place (ReplaceSystemDisk keeps the ENI/MAC/IP).  We still rely on DHCP to
 # hand each ENI its fixed IP (no static NMState / networkConfig), so a host entry
 # is just {hostname, role, MAC matcher, rootDeviceHints=/dev/vda}.  rendezvousIP
 # must equal master-1's fixed IP (ROS RendezvousIp / ansible rendezvous_ip, in

@@ -39,10 +39,11 @@
       ansible.builtin.set_fact:
         _is_abi: "{{ installation_method | default('Assisted') | lower in ['agent', 'agent-based'] }}"
 
-    # AI needs the image up-front (single create).  ABI's ENI-first phase-1
-    # create runs BEFORE the image exists (01 builds it from the ENI MACs this
-    # pass harvests), so it passes ImageId='' and the instances are deferred to
-    # the phase-2 update in 06b-attach-instances.yml.
+    # AI needs the agent/discovery image up-front (single create).  ABI's
+    # ENI-first phase-1 create runs BEFORE the agent image exists (01 builds it
+    # from the MACs this pass harvests), so it boots the masters from a throwaway
+    # PLACEHOLDER system image; 06b later UpdateStacks ImageId to the real agent
+    # image (in-place ReplaceSystemDisk keeps the ENI/MAC/IP).
     - name: Sanity — ECS image was imported by Phase 02 (Assisted only)
       ansible.builtin.assert:
         that:
@@ -50,6 +51,55 @@
           - ecs_image_id | length > 0
         fail_msg: "Run 02-import-image.yml first."
       when: not (_is_abi | bool)
+
+    # ABI phase-1 placeholder: pick any bootable system Linux image compatible
+    # with the control-plane instance type.  Overridable via abi_placeholder_image_id.
+    - name: ABI — resolve a placeholder system image for phase-1
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeImages
+          - --RegionId
+          - "{{ region }}"
+          - --ImageOwnerAlias
+          - system
+          - --OSType
+          - linux
+          - --Architecture
+          - x86_64
+          - --InstanceType
+          - "{{ control_plane_type }}"
+          - --Status
+          - Available
+          - --PageSize
+          - "50"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _abi_images
+      changed_when: false
+      when:
+        - _is_abi | bool
+        - abi_placeholder_image_id | default('') | length == 0
+
+    - name: ABI — set placeholder image id
+      ansible.builtin.set_fact:
+        _abi_placeholder_image: >-
+          {{ abi_placeholder_image_id
+             if (abi_placeholder_image_id | default('') | length > 0)
+             else ((_abi_images.stdout | from_json).Images.Image
+                   | selectattr('ImageId','defined') | map(attribute='ImageId')
+                   | list | first | default('')) }}
+      when: _is_abi | bool
+
+    - name: ABI — fail if no placeholder image found
+      ansible.builtin.fail:
+        msg: |
+          No bootable system image found for {{ control_plane_type }} in {{ region }}.
+          Set abi_placeholder_image_id in group_vars to a known-good system image id.
+      when:
+        - _is_abi | bool
+        - _abi_placeholder_image | default('') | length == 0
 
     - name: Read SSH public key (informational; RHCOS gets keys via ignition)
       ansible.builtin.slurp:
@@ -68,10 +118,10 @@
         _effective_control_plane_count: "{{ 1 if (cluster_topology | default('ha')) == 'sno' else (control_plane_count | int) }}"
         _effective_compute_count: "{{ 0 if (cluster_topology | default('ha')) == 'sno' else (compute_count | int) }}"
 
-    - name: Build cluster-stack Parameters (ABI phase-1 passes empty ImageId)
+    - name: Build cluster-stack Parameters (ABI phase-1 uses placeholder ImageId)
       ansible.builtin.include_tasks: ../tasks/cluster_stack_params.yml
       vars:
-        cluster_stack_image_id: "{{ '' if (_is_abi | bool) else ecs_image_id }}"
+        cluster_stack_image_id: "{{ _abi_placeholder_image if (_is_abi | bool) else ecs_image_id }}"
 
     # cluster_topology selects between HA (3-master + NLB) and SNO (1 ECS,
     # no NLB).  Defaults to 'ha' for back-compat.  See docs/SNO-MODE.md.
@@ -101,32 +151,59 @@
       ansible.builtin.set_fact:
         api_lb_endpoint:  "{{ (_cs_outputs | selectattr('OutputKey','equalto','ApiLBEndpoint')        | first).OutputValue }}"
         worker_sg:        "{{ (_cs_outputs | selectattr('OutputKey','equalto','WorkerSecurityGroup') | first).OutputValue }}"
-        # ABI phase-1 has no instances yet → read the fixed-IP outputs; AI reads
-        # the instance GetAtt outputs (auto-assigned).
-        master_ip1:       "{{ (_cs_outputs | selectattr('OutputKey','equalto', ('MasterFixedIp1' if (_is_abi | bool) else 'MasterIp1')) | first).OutputValue }}"
-        master_ip2:       "{{ (_cs_outputs | selectattr('OutputKey','equalto', ('MasterFixedIp2' if (_is_abi | bool) else 'MasterIp2')) | first).OutputValue }}"
-        master_ip3:       "{{ (_cs_outputs | selectattr('OutputKey','equalto', ('MasterFixedIp3' if (_is_abi | bool) else 'MasterIp3')) | first).OutputValue }}"
+        # Instances always exist (placeholder at ABI phase-1), so MasterIp{1,2,3}
+        # GetAtt the actual primary-NIC IP — which for ABI equals the fixed param.
+        master_ip1:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp1')           | first).OutputValue }}"
+        master_ip2:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp2')           | first).OutputValue }}"
+        master_ip3:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp3')           | first).OutputValue }}"
         reverse_zone_id1: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId1')      | first).OutputValue }}"
         reverse_zone_id2: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId2')      | first).OutputValue }}"
         dynamic_manifest: "{{ (_cs_outputs | selectattr('OutputKey','equalto','DynamicCustomManifest')| first).OutputValue }}"
 
-    # ENI-first: harvest the 3 pre-created control-plane ENI MACs (output only
-    # exists for Agent-based) so 01 (iso_agent) can bind them to hostnames in
-    # agent-config hosts[].  This is the whole reason 06 runs before 01 for ABI.
-    - name: ABI — harvest control-plane ENI MACs from stack outputs
+    # ENI-first via reimage: phase-1 booted the masters from the placeholder
+    # image so their auto primary ENIs now exist.  Resolve each primary-NIC id
+    # (stack output) to its MAC, then feed the MACs into agent-config hosts[] at
+    # 01 (MAC -> hostname binding).  This is why 06 runs before 01 for ABI.
+    - name: ABI — collect master primary-NIC ids from stack outputs
       ansible.builtin.set_fact:
-        master_mac1: "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master1Mac') | first).OutputValue }}"
-        master_mac2: "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master2Mac') | first).OutputValue }}"
-        master_mac3: "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master3Mac') | first).OutputValue }}"
+        _abi_nic_ids:
+          - "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master1PrimaryNic') | first).OutputValue }}"
+          - "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master2PrimaryNic') | first).OutputValue }}"
+          - "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master3PrimaryNic') | first).OutputValue }}"
       when: _is_abi | bool
 
-    - name: ABI — persist ENI MACs to state (consumed by 01 iso_agent)
+    - name: ABI — resolve each primary NIC to its MAC
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeNetworkInterfaces
+          - --RegionId
+          - "{{ region }}"
+          - --NetworkInterfaceId.1
+          - "{{ item }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _abi_nic_desc
+      changed_when: false
+      loop: "{{ _abi_nic_ids | default([]) }}"
+      when: _is_abi | bool
+
+    - name: ABI — set master MAC facts
+      ansible.builtin.set_fact:
+        master_mac1: "{{ (_abi_nic_desc.results[0].stdout | from_json).NetworkInterfaceSets.NetworkInterfaceSet[0].MacAddress }}"
+        master_mac2: "{{ (_abi_nic_desc.results[1].stdout | from_json).NetworkInterfaceSets.NetworkInterfaceSet[0].MacAddress }}"
+        master_mac3: "{{ (_abi_nic_desc.results[2].stdout | from_json).NetworkInterfaceSets.NetworkInterfaceSet[0].MacAddress }}"
+      when: _is_abi | bool
+
+    - name: ABI — persist MACs + placeholder image to state (consumed by 01 / 06b)
       ansible.builtin.include_tasks: ../tasks/save_state.yml
       vars:
         new_state:
           master_mac1: "{{ master_mac1 }}"
           master_mac2: "{{ master_mac2 }}"
           master_mac3: "{{ master_mac3 }}"
+          abi_placeholder_image_used: "{{ _abi_placeholder_image }}"
       when: _is_abi | bool
 
     - name: Save dynamic CCM config to {{ output_dir }}/alibaba-ccm-config.yaml
