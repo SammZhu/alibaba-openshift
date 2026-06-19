@@ -180,9 +180,23 @@
 
         - name: Download the raw qcow from the public mirror (resumable) when not in OSS
           ansible.builtin.shell: |
-            set -euo pipefail
-            curl -fL -C - --retry 5 --retry-delay 10 --connect-timeout 30 \
-              -o "{{ qcow_gz }}" "{{ _qcow_url.stdout | trim }}"
+            set -uo pipefail
+            DEST="{{ qcow_gz }}"; URL="{{ _qcow_url.stdout | trim }}"
+            # If a prior run already fully downloaded the file, `curl -C -` resumes
+            # from EOF and the server returns HTTP 416 (Range Not Satisfiable) ->
+            # treat that as "already complete".  Best-effort size check first.
+            RS=$(curl -fsIL --connect-timeout 20 "$URL" 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="content-length:"{v=$2} END{print v+0}')
+            LS=$(stat -c%s "$DEST" 2>/dev/null || echo 0)
+            if [ "${RS:-0}" -gt 0 ] && [ "${LS:-0}" -ge "${RS:-0}" ]; then
+              echo "qcow already complete locally (${LS} bytes); skipping download"; exit 0
+            fi
+            OUT=$(curl -fL -C - --retry 5 --retry-delay 10 --connect-timeout 30 -o "$DEST" "$URL" 2>&1) && exit 0
+            rc=$?
+            if printf '%s' "$OUT" | grep -q "416"; then
+              echo "HTTP 416 on resume -> file already complete; OK"; exit 0
+            fi
+            printf '%s\n' "$OUT" >&2
+            exit $rc
           register: _qcow_dl
           retries: 10
           delay: 15
