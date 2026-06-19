@@ -204,6 +204,39 @@
             - (rhcos_qcow | default('') | length) == 0
             - not (_qcow_in_oss | default(false) | bool)
 
+        # Keep only the current RHCOS build's raw qcow in OSS: on a version bump
+        # the filename changes and the previous version's ~1.4 GB object would
+        # otherwise pile up.  Delete every mirror-tarballs/rhcos-*-openstack*.qcow2.gz
+        # that isn't the one we just used/seeded.
+        - name: Prune stale RHCOS raw-qcow versions in OSS (keep only current)
+          ansible.builtin.shell: |
+            set -uo pipefail
+            AKID="{{ _aksk.stdout.split(' ')[0] }}"; AKSEC="{{ _aksk.stdout.split(' ')[1] }}"
+            B="{{ oss_bucket }}"; EP="{{ _oss_endpoint }}"; CUR="{{ _qcow_src_object }}"
+            aliyun oss ls "oss://$B/mirror-tarballs/" \
+              --access-key-id="$AKID" --access-key-secret="$AKSEC" --region="{{ region }}" --endpoint="$EP" \
+              | grep -oE "oss://$B/mirror-tarballs/rhcos-[^[:space:]]*openstack[^[:space:]]*\.qcow2\.gz" \
+              | sort -u \
+              | while read -r OBJ; do
+                  KEY="${OBJ#oss://$B/}"
+                  if [ "$KEY" != "$CUR" ]; then
+                    aliyun oss rm "$OBJ" --access-key-id="$AKID" --access-key-secret="$AKSEC" \
+                      --region="{{ region }}" --endpoint="$EP" -f >/dev/null && echo "pruned stale qcow: $KEY"
+                  fi
+                done
+          register: _qcow_prune
+          changed_when: "'pruned stale qcow' in (_qcow_prune.stdout | default(''))"
+          failed_when: false
+          no_log: true
+          when: (rhcos_qcow | default('') | length) == 0
+
+        - name: Show pruned stale qcows (if any)
+          ansible.builtin.debug:
+            msg: "{{ _qcow_prune.stdout_lines | default([]) | select('search', 'pruned stale qcow') | list }}"
+          when:
+            - (rhcos_qcow | default('') | length) == 0
+            - _qcow_prune is defined
+
         - name: Decompress qcow2 (idempotent)
           ansible.builtin.shell: |
             set -euo pipefail
