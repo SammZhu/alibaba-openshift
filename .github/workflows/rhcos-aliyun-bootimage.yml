@@ -13,8 +13,13 @@ jobs:
   bake-matrix:
     runs-on: [self-hosted, Linux, X64, rhel8, alibaba-vpc]
     steps:
+      # This runner is in the Alibaba VPC; its cross-border path to github.com is
+      # flaky (OpenSSL SSL_ERROR_SYSCALL).  fetch-depth:1 minimises the clone, and
+      # the provenance write-back below retries.  A rare checkout SSL drop just
+      # needs a workflow re-run.
       - uses: actions/checkout@v4
-
+        with:
+          fetch-depth: 1
       - name: Bake every RHCOS from the floor up (skip already baked)
         run: |
           set -uo pipefail
@@ -60,5 +65,14 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bootimage/provenance
           git commit -m "chore(bootimage): refresh ocpVersion to latest z" || { echo "no change"; exit 0; }
-          git pull --rebase --autostash origin "${GITHUB_REF_NAME:-main}"
-          git push origin "HEAD:${GITHUB_REF_NAME:-main}"
+          # Self-hosted runner -> github.com is cross-border and flaky
+          # (OpenSSL SSL_ERROR_SYSCALL); retry the pull/push write-back.
+          for i in 1 2 3 4 5; do
+            if git pull --rebase --autostash origin "${GITHUB_REF_NAME:-main}" \
+               && git push origin "HEAD:${GITHUB_REF_NAME:-main}"; then
+              echo "provenance write-back OK (attempt $i)"; exit 0
+            fi
+            echo "::warning::git write-back attempt $i failed (github.com SSL/network); retry in 15s"
+            sleep 15
+          done
+          echo "::error::git write-back failed after 5 attempts"; exit 1
