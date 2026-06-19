@@ -122,13 +122,63 @@
             mode: "0755"
           when: (rhcos_qcow | default('') | length) == 0
 
-        # RESUMABLE download: the qcow is ~1.4 GB from the public rhcos mirror and
-        # the operator host's cross-border egress resets mid-transfer ("Connection
-        # reset by peer").  get_url re-downloads from scratch on retry; curl -C -
-        # resumes the partial, so it eventually completes across resets.  (Proper
-        # air-gap fix = stage the qcow in OSS and pull from the internal endpoint
-        # — see the OSS-transit refactor.)
-        - name: Download RHCOS openstack qcow2.gz (resumable, survives resets)
+        # Air-gap source: the raw RHCOS openstack qcow normally comes from the
+        # public rhcos.mirror.openshift.com (cross-border, resets).  Stage it in
+        # OSS once and pull from there on every (re)run, so install time has no
+        # Red Hat CDN dependency.  Object key = the upstream filename (versions
+        # don't collide).  First run with egress seeds OSS; later / air-gapped
+        # reruns reuse it.  Lives under mirror-tarballs/ (a PERSISTENT reuse
+        # artifact like the mirror tarball — NOT a transit object), so teardown
+        # keeps it; delete manually if you want to reclaim the ~1.4 GB.
+        - name: Read AK/SK from aliyun profile for OSS
+          ansible.builtin.command:
+            argv: [jq, -r,
+                   '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret',
+                   "{{ lookup('env', 'HOME') }}/.aliyun/config.json"]
+          register: _aksk
+          changed_when: false
+          no_log: true
+          when: not (skip_upload_until_gate | bool)
+
+        - name: Resolve the raw-qcow OSS object key
+          ansible.builtin.set_fact:
+            _qcow_src_object: "mirror-tarballs/{{ (_qcow_url.stdout | trim) | basename }}"
+          when: (rhcos_qcow | default('') | length) == 0
+
+        - name: Check whether the raw qcow is already staged in OSS
+          ansible.builtin.command:
+            argv: [aliyun, oss, ls, "oss://{{ oss_bucket }}/{{ _qcow_src_object }}",
+                   "--endpoint={{ _oss_endpoint }}",
+                   "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
+                   "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}"]
+          register: _qcow_oss_ls
+          changed_when: false
+          failed_when: false
+          no_log: true
+          when: (rhcos_qcow | default('') | length) == 0
+
+        - name: Decide whether the raw qcow is in OSS
+          ansible.builtin.set_fact:
+            _qcow_in_oss: "{{ (_qcow_src_object | default('_none_')) in (_qcow_oss_ls.stdout | default('')) }}"
+          when: (rhcos_qcow | default('') | length) == 0
+
+        - name: Pull the raw qcow from OSS (air-gap; resumable)
+          ansible.builtin.command:
+            argv: [aliyun, oss, cp, "oss://{{ oss_bucket }}/{{ _qcow_src_object }}", "{{ qcow_gz }}",
+                   "--endpoint={{ _oss_endpoint }}",
+                   "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
+                   "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
+          register: _qcow_oss_dl
+          retries: 3
+          delay: 15
+          until: _qcow_oss_dl.rc == 0
+          no_log: true
+          changed_when: true
+          when:
+            - (rhcos_qcow | default('') | length) == 0
+            - _qcow_in_oss | default(false) | bool
+
+        - name: Download the raw qcow from the public mirror (resumable) when not in OSS
           ansible.builtin.shell: |
             set -euo pipefail
             curl -fL -C - --retry 5 --retry-delay 10 --connect-timeout 30 \
@@ -138,7 +188,21 @@
           delay: 15
           until: _qcow_dl.rc == 0
           changed_when: true
-          when: (rhcos_qcow | default('') | length) == 0
+          when:
+            - (rhcos_qcow | default('') | length) == 0
+            - not (_qcow_in_oss | default(false) | bool)
+
+        - name: Seed the raw qcow into OSS for future air-gapped runs
+          ansible.builtin.command:
+            argv: [aliyun, oss, cp, "{{ qcow_gz }}", "oss://{{ oss_bucket }}/{{ _qcow_src_object }}",
+                   "--endpoint={{ _oss_endpoint }}",
+                   "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
+                   "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
+          no_log: true
+          changed_when: true
+          when:
+            - (rhcos_qcow | default('') | length) == 0
+            - not (_qcow_in_oss | default(false) | bool)
 
         - name: Decompress qcow2 (idempotent)
           ansible.builtin.shell: |
@@ -224,16 +288,7 @@
           when: not (skip_upload_until_gate | bool)
 
         # ── Upload + import as an ECS custom image (standalone only) ────────────
-        - name: Read AK/SK from aliyun profile for OSS
-          ansible.builtin.command:
-            argv: [jq, -r,
-                   '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret',
-                   "{{ lookup('env', 'HOME') }}/.aliyun/config.json"]
-          register: _aksk
-          changed_when: false
-          no_log: true
-          when: not (skip_upload_until_gate | bool)
-
+        # (_aksk was read above, before the raw-qcow OSS staging.)
         - name: Upload qcow2 to OSS
           ansible.builtin.command:
             argv: [aliyun, oss, cp, "{{ qcow }}", "oss://{{ oss_bucket }}/{{ oss_object }}",
