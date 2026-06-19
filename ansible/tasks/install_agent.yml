@@ -26,29 +26,41 @@
     {{ _ssh_root_mirror }} 'test -f {{ _m_install_dir }}/.openshift_install_state.json'
   changed_when: false
 
-# ansible buffers async/poll stdout, so the wait-for output below is NOT shown
-# live — for a live progress view run scripts/abi-monitor.sh in a SECOND
-# terminal on the operator host.  We also tee each milestone to a log on the
-# mirror ECS so progress survives for after-the-fact inspection.
+# Progress display: instead of `openshift-install agent wait-for` under
+# async/poll (which buffers stdout → the main terminal only shows the opaque
+# "ASYNC POLL ... finished=0" heartbeat), we POLL the cluster directly with oc
+# (the admin kubeconfig from `agent create image` is valid as soon as the API is
+# up, and the mirror ECS can reach api.<cluster>:6443 in-VPC).  Each retry the
+# task prints a one-line status (nodes Ready / operators Available / cluster
+# version) and ansible shows a meaningful "(N retries left)" countdown.  For a
+# fully streaming view, scripts/abi-monitor.sh remains available in a 2nd
+# terminal (it runs its own `agent wait-for`).
 - name: ABI — live-monitor hint
   ansible.builtin.debug:
     msg: >-
-      Watch progress live in another terminal:  scripts/abi-monitor.sh
-      — it streams `agent wait-for` from the mirror ECS, bypassing ansible's
-      async buffering.  Logs also tee to {{ _m_install_dir }}/wait-bootstrap.log
-      and wait-install.log on the mirror ECS.
+      Waiting on the cluster — each poll below prints node/operator status.
+      For a fully streaming view, run scripts/abi-monitor.sh in another terminal.
 
-# wait-for blocks until the milestone or its own timeout; bootstrap ~20-40 min,
-# install-complete longer.  async/poll guards the long-running ssh command.
-# `set -o pipefail` so the task's rc reflects openshift-install, not tee.
-- name: ABI — wait for bootstrap-complete (on mirror ECS)
-  ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'set -o pipefail; openshift-install agent wait-for bootstrap-complete --dir {{ _m_install_dir }} --log-level=info 2>&1 | tee {{ _m_install_dir }}/wait-bootstrap.log'
-  args:
-    executable: /bin/bash
-  async: 3600
-  poll: 30
+# Phase 1: wait until the real control plane is serving (kube-apiserver operator
+# exists + ≥2 control-plane nodes Ready) — the point at which routers are
+# schedulable, so the *.apps rewrite below can take effect.
+- name: ABI — wait for control plane (poll; prints status each cycle)
+  ansible.builtin.shell: |
+    {{ _ssh_root_mirror }} bash <<'REMOTE'
+    export KUBECONFIG={{ _m_install_dir }}/auth/kubeconfig PATH=/usr/local/bin:$PATH
+    R=$(oc get nodes --no-headers 2>/dev/null | grep -c " Ready")
+    echo "[$(date -u +%H:%M:%S)] control-plane nodes Ready=${R:-0} (waiting for kube-apiserver + >=2 Ready)"
+    oc get co kube-apiserver >/dev/null 2>&1 && [ "${R:-0}" -ge 2 ]
+    REMOTE
+  register: _abi_bootstrap
   changed_when: false
+  retries: 120
+  delay: 30
+  until: _abi_bootstrap.rc == 0
+
+- name: ABI — control plane up
+  ansible.builtin.debug:
+    msg: "{{ _abi_bootstrap.stdout_lines | default(['control plane ready']) | last }}"
 
 # IMPORTANT ordering: harvest the kubeconfig and rewrite *.apps DNS *between*
 # bootstrap-complete and install-complete — NOT after.  `wait-for
@@ -110,15 +122,29 @@
 - name: ABI — stage kubeconfig on jump host + rewrite *.apps DNS
   ansible.builtin.include_tasks: ../tasks/post_install_apps_dns.yml
 
-# Now that *.apps resolves to a router node, the remaining operators converge.
-- name: ABI — wait for install-complete (on mirror ECS)
-  ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'set -o pipefail; openshift-install agent wait-for install-complete --dir {{ _m_install_dir }} --log-level=info 2>&1 | tee {{ _m_install_dir }}/wait-install.log'
-  args:
-    executable: /bin/bash
-  async: 5400
-  poll: 30
+# Phase 2: now that *.apps resolves to a router node, poll until the cluster is
+# fully installed (clusterversion Available=True).  Prints nodes Ready / CO
+# Available / cluster-version each cycle.
+- name: ABI — wait for install-complete (poll; prints status each cycle)
+  ansible.builtin.shell: |
+    {{ _ssh_root_mirror }} bash <<'REMOTE'
+    export KUBECONFIG={{ _m_install_dir }}/auth/kubeconfig PATH=/usr/local/bin:$PATH
+    R=$(oc get nodes --no-headers 2>/dev/null | grep -c " Ready")
+    A=$(oc get co --no-headers 2>/dev/null | awk '$3=="True"' | wc -l)
+    T=$(oc get co --no-headers 2>/dev/null | wc -l)
+    CV=$(oc get clusterversion version -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null)
+    echo "[$(date -u +%H:%M:%S)] nodesReady=${R:-0}/3 coAvailable=${A:-0}/${T:-0} clusterVersionAvailable=${CV:-?}"
+    [ "$CV" = "True" ]
+    REMOTE
+  register: _abi_installcomplete
   changed_when: false
+  retries: 200
+  delay: 30
+  until: _abi_installcomplete.rc == 0
+
+- name: ABI — install-complete status
+  ansible.builtin.debug:
+    msg: "{{ _abi_installcomplete.stdout_lines | default(['install complete']) | last }}"
 
 - name: ABI — install complete
   ansible.builtin.debug:
