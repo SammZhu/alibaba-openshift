@@ -100,28 +100,15 @@
   until: _abi_pull.rc == 0
   changed_when: true
 
-- name: relay-abi — scp tars to the mirror ECS via jump host
-  ansible.builtin.command:
-    argv:
-      - scp
-      - -i
-      - "{{ ssh_priv_key_file }}"
-      - -o
-      - StrictHostKeyChecking=no
-      - -o
-      - UserKnownHostsFile=/dev/null
-      - -o
-      - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
-      - "/tmp/abi-{{ item.key }}.tar"
-      - "root@{{ mirror_private_ip }}:/tmp/abi-{{ item.key }}.tar"
+- name: relay-abi — ship each docker-archive to the mirror via OSS (not scp)
+  ansible.builtin.include_tasks: ../tasks/ship_via_oss.yml
+  vars:
+    ship_local: "/tmp/abi-{{ item.key }}.tar"
+    ship_remote: "/tmp/abi-{{ item.key }}.tar"
+    ship_object: "abi-relay-{{ cluster_name }}-{{ item.key }}.tar"
   loop: "{{ _abi_missing }}"
   loop_control:
     label: "{{ item.repo }}:{{ item.ctag }}"
-  register: _abi_scp
-  retries: 3
-  delay: 10
-  until: _abi_scp.rc == 0
-  changed_when: true
 
 - name: relay-abi — load + tag + push on the mirror ECS
   ansible.builtin.shell: |

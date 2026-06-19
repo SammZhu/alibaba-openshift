@@ -221,13 +221,34 @@
   loop_control:
     label: "{{ item }}"
 
-- name: ABI — copy openshift-install + oc from operator host to the mirror ECS (tar over ssh)
+# Ship the oc + openshift-install binaries (~500 MB) to the mirror via OSS, not
+# scp-through-jump (removes the jump-sshd bottleneck).  Tar locally, ship, then
+# extract on the mirror.
+- name: ABI — tar oc + openshift-install on the operator host
   ansible.builtin.shell: >-
-    tar -C "$(dirname "$(command -v openshift-install)")" -czf - openshift-install oc
-    | {{ _ssh_root_mirror }} 'tar -C /usr/local/bin -xzf - && chmod 0755 /usr/local/bin/openshift-install /usr/local/bin/oc && oc version --client && openshift-install version'
+    tar -C "$(dirname "$(command -v openshift-install)")" -czf /tmp/abi-clients.tgz openshift-install oc
   args:
     executable: /bin/bash
   changed_when: true
+
+- name: ABI — ship the client tarball to the mirror ECS via OSS
+  ansible.builtin.include_tasks: ../tasks/ship_via_oss.yml
+  vars:
+    ship_local: /tmp/abi-clients.tgz
+    ship_remote: /tmp/abi-clients.tgz
+    ship_object: "abi-clients-{{ cluster_name }}.tgz"
+
+- name: ABI — extract oc + openshift-install on the mirror ECS
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'tar -C /usr/local/bin -xzf /tmp/abi-clients.tgz
+    && chmod 0755 /usr/local/bin/openshift-install /usr/local/bin/oc
+    && rm -f /tmp/abi-clients.tgz && oc version --client && openshift-install version'
+  changed_when: true
+
+- name: ABI — remove local client tarball
+  ansible.builtin.file:
+    path: /tmp/abi-clients.tgz
+    state: absent
 
 - name: ABI — ensure coreos-installer is runnable via podman on the mirror ECS
   ansible.builtin.shell: >-

@@ -1019,26 +1019,13 @@
       when: "'MISSING' in _capa_on_mirror.stdout"
       changed_when: true
 
-    - name: Stage CAPA tar onto mirror ECS via jumphost ProxyCommand
-      ansible.builtin.command:
-        argv:
-          - scp
-          - -i
-          - "{{ ssh_priv_key_file }}"
-          - -o
-          - StrictHostKeyChecking=no
-          - -o
-          - UserKnownHostsFile=/dev/null
-          - -o
-          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
-          - /tmp/capa-{{ capa_image_tag }}.tar
-          - "root@{{ mirror_private_ip }}:/tmp/capa-{{ capa_image_tag }}.tar"
-      register: _capa_scp
-      retries: 3
-      delay: 10
-      until: _capa_scp.rc == 0
+    - name: Stage CAPA tar onto mirror ECS via OSS (not scp)
+      ansible.builtin.include_tasks: ../tasks/ship_via_oss.yml
+      vars:
+        ship_local: "/tmp/capa-{{ capa_image_tag }}.tar"
+        ship_remote: "/tmp/capa-{{ capa_image_tag }}.tar"
+        ship_object: "capa-{{ cluster_name }}-{{ capa_image_tag }}.tar"
       when: "'MISSING' in _capa_on_mirror.stdout"
-      changed_when: true
 
     - name: Load + tag + push CAPA on mirror ECS
       ansible.builtin.shell: |
@@ -1192,29 +1179,16 @@
       when: "'MISSING' in (item.stdout | default(''))"
       changed_when: true
 
-    - name: Stage sidecar tar onto mirror ECS via jumphost ProxyCommand
-      ansible.builtin.command:
-        argv:
-          - scp
-          - -i
-          - "{{ ssh_priv_key_file }}"
-          - -o
-          - StrictHostKeyChecking=no
-          - -o
-          - UserKnownHostsFile=/dev/null
-          - -o
-          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
-          - "/tmp/{{ item.item.repo | basename }}-{{ item.item.tag }}.tar"
-          - "root@{{ mirror_private_ip }}:/tmp/{{ item.item.repo | basename }}-{{ item.item.tag }}.tar"
+    - name: Stage sidecar tar onto mirror ECS via OSS (not scp)
+      ansible.builtin.include_tasks: ../tasks/ship_via_oss.yml
+      vars:
+        ship_local: "/tmp/{{ item.item.repo | basename }}-{{ item.item.tag }}.tar"
+        ship_remote: "/tmp/{{ item.item.repo | basename }}-{{ item.item.tag }}.tar"
+        ship_object: "csi-{{ cluster_name }}-{{ item.item.repo | basename }}-{{ item.item.tag }}.tar"
       loop: "{{ _csi_xb_on_mirror.results | default([]) }}"
       loop_control:
         label: "{{ item.item.repo }}:{{ item.item.tag }}"
-      register: _csi_xb_scp
-      retries: 3
-      delay: 10
-      until: _csi_xb_scp.rc == 0
       when: "'MISSING' in (item.stdout | default(''))"
-      changed_when: true
 
     - name: Load + tag + push sidecar on mirror ECS
       ansible.builtin.shell: |
@@ -1316,24 +1290,12 @@
       when: "'MISSING' in (item.stdout | default(''))"
       changed_when: true
 
-    - name: Stage missing CSI tars onto mirror ECS via jumphost ProxyCommand
-      ansible.builtin.command:
-        argv:
-          - scp
-          - -i
-          - "{{ ssh_priv_key_file }}"
-          - -o
-          - StrictHostKeyChecking=no
-          - -o
-          - UserKnownHostsFile=/dev/null
-          - -o
-          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
-          - "/tmp/{{ item.item.tarname }}.tar"
-          - "root@{{ mirror_private_ip }}:/tmp/{{ item.item.tarname }}.tar"
-      register: _csi_scp
-      retries: 3
-      delay: 10
-      until: _csi_scp.rc == 0
+    - name: Stage missing CSI tars onto mirror ECS via OSS (not scp)
+      ansible.builtin.include_tasks: ../tasks/ship_via_oss.yml
+      vars:
+        ship_local: "/tmp/{{ item.item.tarname }}.tar"
+        ship_remote: "/tmp/{{ item.item.tarname }}.tar"
+        ship_object: "csi-{{ cluster_name }}-{{ item.item.tarname }}.tar"
       loop: "{{ _csi_on_mirror.results }}"
       loop_control:
         label: "{{ item.item.repo }}:{{ item.item.tag }}"

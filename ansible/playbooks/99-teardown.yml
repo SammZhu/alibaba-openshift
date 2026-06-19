@@ -95,6 +95,24 @@
         that: teardown_confirmed | bool or _confirm.user_input == 'yes'
         fail_msg: "Aborted"
 
+    # ── 0. OSS transit sweep (backstop) ──────────────────────────────────
+    # tasks/ship_via_oss.yml deletes each transit object right after the mirror
+    # pulls it, but an aborted 04/06a run can leave oss://<bucket>/transit/*
+    # objects.  Sweep them best-effort on every teardown (cheap; bucket may not
+    # exist or be empty → ignored).
+    - name: Sweep leftover OSS transit objects
+      ansible.builtin.shell: |
+        set -uo pipefail
+        read AK SK <<<"$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret' ~/.aliyun/config.json)"
+        aliyun oss rm "oss://{{ oss_bucket }}/transit/" --recursive -f \
+          --access-key-id="$AK" --access-key-secret="$SK" \
+          --region="{{ region }}" --endpoint="oss-{{ region }}.aliyuncs.com" || true
+      register: _oss_transit_sweep
+      changed_when: "'Succeed' in (_oss_transit_sweep.stdout | default('')) or 'removed' in (_oss_transit_sweep.stdout | default('')|lower)"
+      failed_when: false
+      no_log: true
+      when: oss_bucket | default('') | length > 0
+
     # ── 0a. PVC-delete-first reclaim (PRIMARY NAS/disk cleanup) ──────────
     # The clean way to reclaim CSI-provisioned NAS filesystems + cloud disks is to
     # delete the PVCs WHILE THE CLUSTER IS STILL UP: the CSI controller then calls

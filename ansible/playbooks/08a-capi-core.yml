@@ -59,25 +59,12 @@
       until: _core_pull.rc == 0
       changed_when: true
 
-    - name: Stage the CAPI core tar onto the mirror ECS via jump host ProxyCommand
-      ansible.builtin.command:
-        argv:
-          - scp
-          - -i
-          - "{{ ssh_priv_key_file }}"
-          - -o
-          - StrictHostKeyChecking=no
-          - -o
-          - UserKnownHostsFile=/dev/null
-          - -o
-          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
-          - "/tmp/capi-core-{{ capi_core_tag }}.tar"
-          - "root@{{ mirror_private_ip }}:/tmp/capi-core-{{ capi_core_tag }}.tar"
-      register: _core_scp
-      retries: 3
-      delay: 10
-      until: _core_scp.rc == 0
-      changed_when: true
+    - name: Stage the CAPI core tar onto the mirror ECS via OSS (not scp)
+      ansible.builtin.include_tasks: ../tasks/ship_via_oss.yml
+      vars:
+        ship_local: "/tmp/capi-core-{{ capi_core_tag }}.tar"
+        ship_remote: "/tmp/capi-core-{{ capi_core_tag }}.tar"
+        ship_object: "capi-core-{{ cluster_name }}-{{ capi_core_tag }}.tar"
 
     - name: Load + tag + push the CAPI core image on the mirror ECS
       ansible.builtin.shell: |

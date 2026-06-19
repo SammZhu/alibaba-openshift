@@ -1,0 +1,85 @@
+---
+# Ship a local operator-host file to the mirror ECS THROUGH OSS, instead of
+# scp-through-the-jump-host.  Big artifacts (the oc/openshift-install tarball,
+# rhai/CAPA/CSI docker-archives) used to stream over the jump-host ProxyCommand,
+# which is slow and overloads the jump sshd (banner-exchange timeouts).  OSS
+# transit removes the jump hop entirely: the operator uploads to OSS over the
+# public endpoint (multipart/resumable, robust across cross-border resets) and
+# the mirror pulls from the OSS *internal* endpoint in-region (fast, free), then
+# we delete the transit object.  teardown sweeps oss://<bucket>/transit/* as a
+# backstop.
+#
+# Inputs (caller sets via include_tasks vars):
+#   ship_local    absolute path on the operator host (file to send)
+#   ship_remote   absolute path on the mirror ECS (destination)
+#   ship_object   OSS object key (placed under transit/); e.g. "abi-clients.tgz"
+# Requires in scope: oss_bucket, region, aliyun_profile, cluster_name,
+#                    _ssh_root_mirror (ssh prefix to root@mirror via jump).
+
+- name: "ship_via_oss [{{ ship_object }}] — set endpoints"
+  ansible.builtin.set_fact:
+    _ship_key: "transit/{{ ship_object }}"
+    _ship_pub_endpoint: "oss-{{ region }}.aliyuncs.com"
+    _ship_int_endpoint: "oss-{{ region }}-internal.aliyuncs.com"
+    _ship_mirror_role: "{{ cluster_name }}-mirror-role"
+
+- name: "ship_via_oss [{{ ship_object }}] — read operator OSS AK/SK"
+  ansible.builtin.shell: >-
+    jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret'
+    ~/.aliyun/config.json
+  register: _ship_aksk
+  changed_when: false
+  no_log: true
+
+- name: "ship_via_oss [{{ ship_object }}] — set AK/SK facts"
+  ansible.builtin.set_fact:
+    _ship_ak: "{{ _ship_aksk.stdout.split(' ')[0] }}"
+    _ship_sk: "{{ _ship_aksk.stdout.split(' ')[1] }}"
+  no_log: true
+
+- name: "ship_via_oss [{{ ship_object }}] — operator uploads to OSS (public endpoint)"
+  ansible.builtin.command:
+    argv:
+      - aliyun
+      - oss
+      - cp
+      - "{{ ship_local }}"
+      - "oss://{{ oss_bucket }}/{{ _ship_key }}"
+      - -f
+      - "--access-key-id={{ _ship_ak }}"
+      - "--access-key-secret={{ _ship_sk }}"
+      - "--region={{ region }}"
+      - "--endpoint={{ _ship_pub_endpoint }}"
+  register: _ship_up
+  retries: 3
+  delay: 15
+  until: _ship_up.rc == 0
+  changed_when: true
+  no_log: true   # AK/SK in argv
+
+- name: "ship_via_oss [{{ ship_object }}] — mirror pulls from OSS (internal endpoint, RAM role)"
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'aliyun oss cp oss://{{ oss_bucket }}/{{ _ship_key }} {{ ship_remote }} -f
+    --mode=EcsRamRole --ecs-role-name "{{ _ship_mirror_role }}"
+    --region={{ region }} --endpoint={{ _ship_int_endpoint }}'
+  register: _ship_dl
+  retries: 3
+  delay: 15
+  until: _ship_dl.rc == 0
+  changed_when: true
+
+- name: "ship_via_oss [{{ ship_object }}] — delete the OSS transit object"
+  ansible.builtin.command:
+    argv:
+      - aliyun
+      - oss
+      - rm
+      - "oss://{{ oss_bucket }}/{{ _ship_key }}"
+      - -f
+      - "--access-key-id={{ _ship_ak }}"
+      - "--access-key-secret={{ _ship_sk }}"
+      - "--region={{ region }}"
+      - "--endpoint={{ _ship_pub_endpoint }}"
+  changed_when: true
+  failed_when: false
+  no_log: true
