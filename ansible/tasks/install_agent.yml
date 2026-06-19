@@ -54,14 +54,14 @@
   register: _abi_bs_job
   changed_when: false
 
-- name: ABI — wait for bootstrap-complete (countdown; live via abi-monitor.sh)
+- name: "ABI — waiting for bootstrap-complete [the 'FAILED - RETRYING' line below is the normal heartbeat = still installing (~20-40 min); live detail: scripts/abi-monitor.sh]"
   ansible.builtin.async_status:
     jid: "{{ _abi_bs_job.ansible_job_id }}"
   register: _abi_bs
-  until: _abi_bs.finished
-  retries: 240
-  delay: 15
-  failed_when: _abi_bs.finished and _abi_bs.rc != 0
+  until: _abi_bs.finished | bool
+  retries: 160
+  delay: 30
+  failed_when: (_abi_bs.finished | bool) and (_abi_bs.rc | default(0) | int) != 0
 
 - name: ABI — bootstrap-complete (agent wait-for output)
   ansible.builtin.debug:
@@ -139,14 +139,14 @@
   register: _abi_ic_job
   changed_when: false
 
-- name: ABI — wait for install-complete (countdown; live via abi-monitor.sh)
+- name: "ABI — waiting for install-complete [the 'FAILED - RETRYING' line below is the normal heartbeat = operators still converging; live detail: scripts/abi-monitor.sh]"
   ansible.builtin.async_status:
     jid: "{{ _abi_ic_job.ansible_job_id }}"
   register: _abi_ic
-  until: _abi_ic.finished
+  until: _abi_ic.finished | bool
   retries: 280
-  delay: 15
-  failed_when: _abi_ic.finished and _abi_ic.rc != 0
+  delay: 30
+  failed_when: (_abi_ic.finished | bool) and (_abi_ic.rc | default(0) | int) != 0
 
 - name: ABI — install-complete (agent wait-for output)
   ansible.builtin.debug:
