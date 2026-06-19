@@ -13,7 +13,7 @@
 # the mirror ECS (no repo, no git).  All build scratch goes on the data disk
 # ({{ _m_build_dir }}), never the 40 GB system disk.
 #
-# Included by 01-prepare-iso-agent.yml when installation_method == 'agent'.
+# Included by 06a-build-agent-iso.yml when installation_method == 'agent'.
 # Prereqs (site-agent.yml order): 03/04/05 mirror ran -> state has
 # mirror_private_ip / jump_host_ip / mirror CA at {{ output_dir }}/mirror-ca.crt
 # / mirror_vpc_id / mirror_private_vsw_1; group_vars has rendezvous_ip.

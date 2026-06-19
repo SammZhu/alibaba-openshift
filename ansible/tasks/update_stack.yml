@@ -1,10 +1,10 @@
 ---
 # Shared "update an existing ROS stack" task — the UpdateStack counterpart of
-# create_stack.yml.  Used by the Agent-based ENI-first phase-2
-# (06b-attach-instances.yml): the stack already exists with only the network +
-# ENIs, and we re-submit the SAME parameters but with ImageId now set, which
-# makes the cluster-stack template materialise the instances (Condition
-# HasImage) attaching the pre-created ENIs.
+# create_stack.yml.  Used by the Agent-based phase-2 (06b-reimage-masters.yml):
+# the masters already exist booted from the placeholder image, and we re-submit
+# the SAME parameters but with ImageId now = the agent image; ROS applies that
+# as an in-place ReplaceSystemDisk (keeps each instance's ENI/MAC/IP) so the
+# masters reboot into the agent image.
 #
 # Inputs (caller sets via include_tasks vars):
 #   _cs_stack_name        Stack name (for temp file + messages)

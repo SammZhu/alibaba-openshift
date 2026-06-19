@@ -33,20 +33,26 @@ Assumed configuration:
   `site-agent.yml` (`installation_method: Agent-based`) — fully air-gapped, no
   assisted-service dependency.
 
-  **ABI network model — ENI-first (MAC↔hostname binding).**  The cluster-stack
-  is built in two phases so each node gets a deterministic name (including the
-  rendezvous/node-zero, which an earlier DHCP-only + empty-`hosts[]` attempt
-  left named after its MAC):
-    1. **06 phase-1** creates the SGs/NLB/DNS **plus 3 fixed-IP control-plane
-       ENIs** (`ImageId` empty → instances deferred via the template's
-       `HasImage` condition) and harvests the ENI MACs into `state.yml`.
-    2. **01-agent** builds the agent ISO with `agent-config` `hosts[]` binding
-       each MAC → `<cluster>-master-N` (+ `rootDeviceHints: /dev/vda`), then
-       imports it to an ECS image.
-    3. **06b** `UpdateStack`s the cluster-stack with the real `ImageId` → the 3
-       masters materialise, each attaching its pre-created ENI as the **primary
-       NIC** (confirmed supported on Alibaba via RunInstances `--DryRun`).
-    4. **07-agent** waits for the install and harvests the kubeconfig.
+  **ABI network model — ENI-first via reimage (MAC↔hostname binding).**  For
+  deterministic node names (including the rendezvous/node-zero, which an earlier
+  DHCP-only + empty-`hosts[]` attempt left named after its MAC) the agent-config
+  `hosts[]` binds each master's primary-ENI MAC → hostname, so the MACs must be
+  known *before* the ISO is built.  ROS can't attach a pre-created ENI as an
+  instance's primary NIC, so the cluster-stack is built in two phases:
+    1. **06** (phase-1) creates the SGs/NLB/DNS and boots the 3 masters from a
+       throwaway **placeholder** system image (Alibaba Cloud Linux; override via
+       `abi_placeholder_image_id`) with their fixed IPs → auto primary ENIs.  It
+       harvests each master's primary-ENI MAC into `state.yml`
+       (`PrimaryNetworkInterfaceId` output → `DescribeNetworkInterfaces`).
+    2. **06a** (`06a-build-agent-iso`) builds the agent ISO with `agent-config`
+       `hosts[]` binding each MAC → `<cluster>-master-N` (+ `rootDeviceHints:
+       /dev/vda`), then imports it to an ECS image (`ecs_image_id`).
+    3. **06b** (`06b-reimage-masters`) `UpdateStack`s the cluster-stack with
+       `ImageId = ecs_image_id`; ROS applies it as an in-place
+       **ReplaceSystemDisk** (an "interruption", not a replacement) so each
+       master keeps its ENI/MAC/IP and reboots into the agent image to install.
+    4. **07** (`07-install-cluster-agent`) monitors via `openshift-install agent
+       wait-for`, rewrites `*.apps`, and harvests the kubeconfig.
   `rendezvous_ip` must be a master-subnet IP (e.g. `10.0.32.5`, in
   `PrivateSubnetCidr2`).  Masters install **straight to `/dev/vda`** (no `vdb`,
   no clone hook): the minimal agent ISO runs its rootfs from RAM.
@@ -60,10 +66,15 @@ Assumed configuration:
   `localhost:8443`), uploads to OSS (internal endpoint) + `ImportImage` via its
   instance RAM role.  So the **mirror** must be up before ABI runs.
 
-  **Live monitor.** `agent wait-for` runs on the mirror ECS under ansible
-  (buffered); run `scripts/abi-monitor.sh` in a second terminal for live
-  progress.  Requires the cluster-stack SG to allow `:8090` from the VPC CIDR
-  (the template adds this for Agent-based).  Live HA validation in progress.
+  **Monitoring.** 07 is the authoritative ABI monitor: `openshift-install agent
+  wait-for bootstrap-complete` then `... install-complete` on the mirror ECS,
+  launched backgrounded (`poll: 0`, tracked via `async_status` → a meaningful
+  "(N retries left)" countdown, full output dumped on completion).  For a fully
+  streaming view run `scripts/abi-monitor.sh` in a second terminal (same
+  `agent wait-for`).  Needs the cluster-stack SG to allow `:8090` from the VPC
+  CIDR (the template adds this for Agent-based).  Live HA install validated
+  end-to-end 2026-06-19 (3 nodes Ready incl. rendezvous=`<cluster>-master-1`,
+  34/34 cluster operators Available).
 - compact 3-node (`compute_count: 0`) — workers schedule on masters
 
 ---

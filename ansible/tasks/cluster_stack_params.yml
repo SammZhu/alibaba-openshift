@@ -1,10 +1,10 @@
 ---
 # Build the cluster-stack ROS parameter list into `_cluster_stack_params`.
 # Shared by 06-create-cluster-stack.yml (initial create) and
-# 06b-attach-instances.yml (Agent-based ENI-first phase-2 stack update) so the
-# two never drift.  Caller MUST set:
-#   cluster_stack_image_id   — value for the ImageId parameter.  Empty string on
-#                              the Agent-based phase-1 (ENI-only) create; the
+# 06b-reimage-masters.yml (Agent-based phase-2 stack update) so the two never
+# drift.  Caller MUST set:
+#   cluster_stack_image_id   — value for the ImageId parameter.  The placeholder
+#                              system image on the Agent-based phase-1 create; the
 #                              real ecs_image_id on AI create and on ABI phase-2.
 # Caller must already have loaded state + mirror_defaults and resolved
 # _effective_control_plane_count / _effective_compute_count and _ssh_pub_slurp.

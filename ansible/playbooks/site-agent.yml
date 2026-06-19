@@ -2,34 +2,37 @@
 # Convenience wrapper: bring up the CLUSTER via the Agent-based Installer
 # (installation_method=Agent-based).  ABI counterpart of site.yml (Assisted).
 #
-# Network model (ENI-first, 2026-06-16): the cluster-stack creates the 3 fixed-IP
-# control-plane ENIs FIRST (phase-1, no instances), agent-config hosts[] binds
-# each ENI MAC -> hostname, and phase-2 boots the instances attaching those ENIs
-# as their primary NIC.  This gives deterministic node names INCLUDING the
-# rendezvous/node-zero (a prior DHCP-only + empty-hosts[] attempt left node-zero
-# named after its MAC).  Hence the ordering: 06 (ENIs+MAC) runs BEFORE 01 (ISO),
-# and 06b (instances) AFTER.  Mirror (03/04/05) is still first because ABI bakes
-# the mirror CA + imageDigestSources into the agent ISO at creation time.
+# Network model (ENI-first via reimage): for deterministic node hostnames the
+# agent-config hosts[] binds each master's primary-ENI MAC -> hostname, so the
+# MACs must be known BEFORE the agent ISO is built (an earlier DHCP-only +
+# empty-hosts[] attempt left the rendezvous/node-zero named after its MAC).
+# ROS can't attach a pre-created ENI as an instance's primary NIC, so we do it
+# in two phases: phase-1 boots the masters from a throwaway PLACEHOLDER image
+# (fixed IPs -> auto primary ENIs) and harvests their MACs; phase-2 UpdateStacks
+# ImageId to the agent image, which ROS applies as an in-place ReplaceSystemDisk
+# (keeps the instance/ENI/MAC/IP) so the masters reboot into the agent image and
+# self-install with the correct hostnames.  Mirror (03/04/05) is first because
+# ABI bakes the mirror CA + imageDigestSources into the agent ISO at build time.
 #
-#   00            preflight
-#   03/04/05      mirror (REQUIRED for ABI) — the agent ISO is built ON the
-#                 mirror ECS, so the mirror must be up first
-#   06            cluster-stack PHASE-1: SG/NLB/DNS + 3 fixed-IP ENIs, NO
-#                 instances (ImageId=''); harvest the ENI MACs into state
-#   01-agent      ON the mirror ECS: build agent ISO (hosts[] = harvested
-#                 MAC↔hostname bindings) + upload to OSS + ImportImage ->
-#                 ecs_image_id (no separate Phase 02 — import folded in here)
-#   06b           cluster-stack PHASE-2: UpdateStack with the agent ImageId ->
-#                 instances boot attaching the pre-created ENIs -> auto-install
-#   07-agent      ON the mirror ECS: wait-for install-complete + scp kubeconfig back
+#   00       preflight
+#   03/04/05 mirror (REQUIRED) — the agent ISO is built ON the mirror ECS
+#   06       create-cluster-stack PHASE-1: SG/NLB/DNS + masters on a placeholder
+#            image (fixed IPs, auto primary ENIs); harvest the ENI MACs to state
+#   06a      build-agent-iso: ON the mirror ECS, build the agent ISO (hosts[] =
+#            harvested MAC↔hostname bindings) + OSS upload + ImportImage ->
+#            ecs_image_id  (no separate Phase 02 — import is folded in here)
+#   06b      reimage-masters PHASE-2: UpdateStack ImageId -> agent image
+#            (in-place ReplaceSystemDisk) -> masters reboot + self-install
+#   07       install-cluster-agent: monitor via `agent wait-for`, rewrite *.apps,
+#            harvest kubeconfig
 #
 # Post-install worker plane (08+) is the shared site-post.yml, unchanged — it
-# reads kubeconfig from {{ output_dir }}/auth, the same place 07-agent writes it.
+# reads kubeconfig from {{ output_dir }}/auth, the same place 07 writes it.
 - ansible.builtin.import_playbook: 00-preflight.yml
 - ansible.builtin.import_playbook: 03-create-mirror-stack.yml
 - ansible.builtin.import_playbook: 04-prepare-mirror.yml
 - ansible.builtin.import_playbook: 05-verify-mirror.yml
-- ansible.builtin.import_playbook: 06-create-cluster-stack.yml  # phase-1: ENIs + MAC harvest (no instances)
-- ansible.builtin.import_playbook: 01-prepare-iso-agent.yml     # build ISO with MAC↔hostname bindings + import
-- ansible.builtin.import_playbook: 06b-attach-instances.yml     # phase-2: UpdateStack -> instances attach ENIs
+- ansible.builtin.import_playbook: 06-create-cluster-stack.yml  # phase-1: placeholder masters + MAC harvest
+- ansible.builtin.import_playbook: 06a-build-agent-iso.yml      # build agent ISO (MAC↔hostname) + import
+- ansible.builtin.import_playbook: 06b-reimage-masters.yml      # phase-2: UpdateStack -> ReplaceSystemDisk to agent image
 - ansible.builtin.import_playbook: 07-install-cluster-agent.yml

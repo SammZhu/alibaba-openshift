@@ -1,10 +1,10 @@
 ---
 # Phase 06b — Agent-based ENI-first phase-2: reimage masters to the agent image.
 #
-# Runs AFTER 01-prepare-iso-agent.yml has built + imported the agent image.
+# Runs AFTER 06a-build-agent-iso.yml has built + imported the agent image.
 # 06 (phase-1) created the cluster-stack and booted the 3 masters from a
 # PLACEHOLDER system image with their fixed IPs (auto primary ENIs), and
-# harvested those ENIs' MACs into state (which 01 baked into agent-config
+# harvested those ENIs' MACs into state (which 06a baked into agent-config
 # hosts[]).  This playbook re-submits the SAME stack with ImageId=ecs_image_id
 # via UpdateStack; ROS performs an in-place ReplaceSystemDisk on each master
 # (an "interruption", not a replacement), so each instance KEEPS its primary
@@ -27,7 +27,7 @@
       ansible.builtin.assert:
         that:
           - installation_method | default('Assisted') | lower in ['agent', 'agent-based']
-        fail_msg: "06b is Agent-based ENI-first only; the Assisted path creates instances in 06."
+        fail_msg: "06b is Agent-based only; the Assisted path creates instances in 06."
 
     - name: Sanity — phase-1 stack + agent image present
       ansible.builtin.assert:
@@ -36,7 +36,7 @@
           - ecs_image_id is defined and ecs_image_id | length > 0
         fail_msg: |
           Need both the phase-1 cluster_stack_id (run 06-create-cluster-stack.yml)
-          and ecs_image_id (run 01-prepare-iso-agent.yml) in state.yml first.
+          and ecs_image_id (run 06a-build-agent-iso.yml) in state.yml first.
 
     - name: Read SSH public key (informational; RHCOS gets keys via ignition)
       ansible.builtin.slurp:
