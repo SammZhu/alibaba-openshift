@@ -122,12 +122,22 @@
             mode: "0755"
           when: (rhcos_qcow | default('') | length) == 0
 
-        - name: Download RHCOS openstack qcow2.gz
-          ansible.builtin.get_url:
-            url: "{{ _qcow_url.stdout | trim }}"
-            dest: "{{ qcow_gz }}"
-            mode: "0644"
-            timeout: 1200
+        # RESUMABLE download: the qcow is ~1.4 GB from the public rhcos mirror and
+        # the operator host's cross-border egress resets mid-transfer ("Connection
+        # reset by peer").  get_url re-downloads from scratch on retry; curl -C -
+        # resumes the partial, so it eventually completes across resets.  (Proper
+        # air-gap fix = stage the qcow in OSS and pull from the internal endpoint
+        # — see the OSS-transit refactor.)
+        - name: Download RHCOS openstack qcow2.gz (resumable, survives resets)
+          ansible.builtin.shell: |
+            set -euo pipefail
+            curl -fL -C - --retry 5 --retry-delay 10 --connect-timeout 30 \
+              -o "{{ qcow_gz }}" "{{ _qcow_url.stdout | trim }}"
+          register: _qcow_dl
+          retries: 10
+          delay: 15
+          until: _qcow_dl.rc == 0
+          changed_when: true
           when: (rhcos_qcow | default('') | length) == 0
 
         - name: Decompress qcow2 (idempotent)
