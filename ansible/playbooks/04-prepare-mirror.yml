@@ -906,33 +906,13 @@
         wc -l /var/lib/quay-storage/tag-mapping.tsv
         REMOTE
       changed_when: true
-    - name: Download tag-mapping.tsv from OSS (commit-tag → digest aliases)
-      ansible.builtin.shell: |
-        {{ _ssh_root_mirror }} bash <<'REMOTE'
-        set -euxo pipefail
-        aliyun oss cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}.tag-mapping.tsv" \
-          /var/lib/quay-storage/tag-mapping.tsv \
-          --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
-          --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
-          --region "{{ region }}" --force
-        wc -l /var/lib/quay-storage/tag-mapping.tsv
-        REMOTE
-      changed_when: true
 
-    - name: Ensure mirror ECS has registry.redhat.io docker credentials (copy from localhost)
-      ansible.builtin.shell: |
-        # Extract registry.redhat.io creds from localhost docker config, inject into mirror ECS
-        CREDS=$(jq -r ".auths[\"registry.redhat.io\"].auth" < ~/.docker/config.json)
-        if [ "$CREDS" != "null" ] && [ -n "$CREDS" ]; then
-          {{ _ssh_root_mirror }} bash <<'REMOTE'
-            if [ ! -f /root/.docker/config.json ]; then
-
-    - name: Ensure mirror ECS has registry.redhat.io docker credentials (copy from localhost)
-      ansible.builtin.shell: >
-        CREDS=$(jq -r ".auths[\"registry.redhat.io\"].auth" < ~/.docker/config.json)
-        if [ "$CREDS" != "null" ] && [ -n "$CREDS" ]; then
-          {{ _ssh_root_mirror }} "bash <<'REMOTE'
-      changed_when: true
+    # Ensure the rhai discovery-image BLOBS for the (possibly just-rotated)
+    # commit-tags are actually on the mirror.  refresh_tag_mapping.yml above only
+    # refreshed the tag→digest ALIASES; the blobs come via the operator relay
+    # (registry.redhat.io is unreachable from the restricted mirror/jump, but the
+    # operator host can reach it).  Idempotent — skips images already present.
+    - ansible.builtin.include_tasks: ../tasks/relay_abi_images.yml
 
     # ── Alibaba CCM image: belt-and-suspenders pre-pull (idempotent) ───────
     # The CCM Deployment in custom_manifests/01-alibaba-ccm.yaml references
