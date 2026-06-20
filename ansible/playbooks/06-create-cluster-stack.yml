@@ -226,12 +226,16 @@
     # image so their auto primary ENIs now exist.  Resolve each primary-NIC id
     # (stack output) to its MAC, then feed the MACs into agent-config hosts[] at
     # 01 (MAC -> hostname binding).  This is why 06 runs before 01 for ABI.
-    - name: ABI — collect master primary-NIC ids from stack outputs
+    # Count-aware (SNO=1, HA=3): build the primary-NIC id list by looping over the
+    # effective control-plane count and picking Master{N}PrimaryNic.  The old hard
+    # 3-way list broke SNO ("No first item" — Master2/3PrimaryNic don't exist).
+    - name: ABI — collect master primary-NIC ids from stack outputs (count-aware)
       ansible.builtin.set_fact:
-        _abi_nic_ids:
-          - "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master1PrimaryNic') | first).OutputValue }}"
-          - "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master2PrimaryNic') | first).OutputValue }}"
-          - "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master3PrimaryNic') | first).OutputValue }}"
+        _abi_nic_ids: >-
+          {{ _abi_nic_ids | default([])
+             + [ (_cs_outputs | selectattr('OutputKey','equalto', 'Master' ~ item ~ 'PrimaryNic')
+                  | map(attribute='OutputValue') | first) ] }}
+      loop: "{{ range(1, (_effective_control_plane_count | int) + 1) | list }}"
       when: _is_abi | bool
 
     - name: ABI — resolve each primary NIC to its MAC
@@ -251,17 +255,29 @@
       loop: "{{ _abi_nic_ids | default([]) }}"
       when: _is_abi | bool
 
-    - name: ABI — set master MAC facts
+    - name: ABI — set master MAC list (ordered, length = control-plane count)
       ansible.builtin.set_fact:
-        master_mac1: "{{ (_abi_nic_desc.results[0].stdout | from_json).NetworkInterfaceSets.NetworkInterfaceSet[0].MacAddress }}"
-        master_mac2: "{{ (_abi_nic_desc.results[1].stdout | from_json).NetworkInterfaceSets.NetworkInterfaceSet[0].MacAddress }}"
-        master_mac3: "{{ (_abi_nic_desc.results[2].stdout | from_json).NetworkInterfaceSets.NetworkInterfaceSet[0].MacAddress }}"
+        abi_master_macs: >-
+          {{ _abi_nic_desc.results
+             | map(attribute='stdout') | map('from_json')
+             | map(attribute='NetworkInterfaceSets.NetworkInterfaceSet')
+             | map('first') | map(attribute='MacAddress') | list }}
       when: _is_abi | bool
 
-    - name: ABI — persist MACs + placeholder image to state (consumed by 01 / 06b)
+    # Back-compat individual facts (state/teardown still reference master_mac1/2/3);
+    # empty string for indices the topology doesn't have (SNO has only master_mac1).
+    - name: ABI — back-compat individual MAC facts
+      ansible.builtin.set_fact:
+        master_mac1: "{{ abi_master_macs[0] | default('') }}"
+        master_mac2: "{{ abi_master_macs[1] | default('') }}"
+        master_mac3: "{{ abi_master_macs[2] | default('') }}"
+      when: _is_abi | bool
+
+    - name: ABI — persist MACs + placeholder image to state (consumed by 06a / 06b)
       ansible.builtin.include_tasks: ../tasks/save_state.yml
       vars:
         new_state:
+          abi_master_macs: "{{ abi_master_macs }}"
           master_mac1: "{{ master_mac1 }}"
           master_mac2: "{{ master_mac2 }}"
           master_mac3: "{{ master_mac3 }}"

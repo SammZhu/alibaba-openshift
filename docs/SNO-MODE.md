@@ -34,6 +34,34 @@ No other changes needed — the ROS template's outputs are name-compatible
 with the HA template (MasterIp2/MasterIp3/WorkerSecurityGroup return
 empty strings).
 
+### Agent-based (ABI) SNO
+
+SNO also works air-gapped via the Agent-based Installer — set both knobs and
+run `site-agent.yml` instead of `site.yml`:
+
+```yaml
+# ansible/group_vars/all.yml
+cluster_topology:    sno
+installation_method: Agent-based
+rendezvous_ip:       10.0.16.5      # default is fine — see below
+```
+
+```bash
+ansible-playbook -i inventory.yml playbooks/site-agent.yml
+```
+
+Same ENI-first/reimage flow as ABI HA, just one node: 06 boots the single master
+from a placeholder image and harvests its primary-NIC MAC, 06a bakes a one-host
+`agent-config.yaml` (`<cluster>-master-1`), 06b reimages it to the agent image in
+place. The count is driven by `cluster_topology` end to end
+(`_eff_control_plane_count=1`, `abi_master_macs` has one entry, the SNO template
+emits one `RendezvousInstance` + `Master1PrimaryNic`).
+
+The **ABI SNO master lands in zone1** (`PrivateVSwitchId`, 10.0.16.x) to match
+the HA multi-AZ master-1 and the default `rendezvous_ip: 10.0.16.5`, so the fixed
+rendezvous IP falls in the master's subnet with no extra config. (AI SNO keeps
+zone2 with an auto-allocated IP — unchanged.)
+
 ---
 
 ## 2. What SNO actually is

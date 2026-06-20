@@ -31,7 +31,8 @@ Assumed configuration:
 - `installation_method: Assisted` (this runbook covers the Assisted path via
   `site.yml`).  The **Agent-based Installer (ABI)** is also supported via
   `site-agent.yml` (`installation_method: Agent-based`) — fully air-gapped, no
-  assisted-service dependency.
+  assisted-service dependency.  ABI supports both HA (3-master multi-AZ) and SNO
+  (`cluster_topology: sno`, single node in zone1) — see [SNO-MODE.md](SNO-MODE.md#agent-based-abi-sno).
 
   **ABI network model — ENI-first via reimage (MAC↔hostname binding).**  For
   deterministic node names (including the rendezvous/node-zero, which an earlier
