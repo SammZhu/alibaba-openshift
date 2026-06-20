@@ -197,6 +197,10 @@
           # image; all restore state rides MirrorDataDiskSnapshotId (vdb).
           - ParameterKey: MirrorOverrideImageId
             ParameterValue: ""
+          # Positive boolean that actually gates HasOverrideImage (ROS Fn::Not is
+          # broken).  Stays false because the override id above is always empty.
+          - ParameterKey: EnableOverrideImage
+            ParameterValue: "false"
           - ParameterKey: MirrorDataDiskSnapshotId
             ParameterValue: "{{ mirror_snapshot_data_id if _mirror_restore_from_snapshot else '' }}"
 

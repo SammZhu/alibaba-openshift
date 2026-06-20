@@ -127,6 +127,15 @@ Parameters:
     Type: Number
     Default: 0
     MinValue: 0
+  EnableWorkers:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: |
+      "true" -> create the ROS worker InstanceGroup (ComputeCount replicas).
+      06 sets this from ComputeCount > 0.  Positive boolean because Aliyun ROS's
+      Fn::Not is broken (see EnableZone3).  Note: this project normally runs
+      compute_count=0 and adds workers via CAPA (phase 12), so this stays false.
   ComputeInstanceType:
     Type: String
     Default: ecs.c7.xlarge
@@ -209,7 +218,9 @@ Parameters:
 Conditions:
   IsAgentBased: !Equals [!Ref InstallationMethod, Agent-based]
   IsAssisted:   !Equals [!Ref InstallationMethod, Assisted]
-  HasWorkers:   !Not [!Equals [!Ref ComputeCount, 0]]
+  # Positive boolean — Aliyun ROS's Fn::Not is broken (see EnableZone3/
+  # EnableJumpHostSsh).  06 sets EnableWorkers from ComputeCount > 0.
+  HasWorkers:   !Equals [!Ref EnableWorkers, "true"]
   HasJumpHost:  !Equals [!Ref EnableJumpHostSsh, "true"]
   # Multi-AZ control plane (Agent-based): master-1/2/3 spread across zone1/2/3.
   # True only when a third zone/VSwitch is supplied — i.e. the ABI multi-AZ path.

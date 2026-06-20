@@ -172,15 +172,28 @@ Parameters:
     Default: ""
     Description: |
       Optional snapshot ID for the data disk (/var/lib/quay-storage).  When
-      non-empty, the data disk is created from this snapshot instead of blank.
+      non-empty, the data disk is created from this snapshot instead of blank
+      (the DiskMappings SnapshotId references it directly — no condition needed).
       cloud-init will detect existing XFS and skip mkfs.
+
+  EnableOverrideImage:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: |
+      "true" -> use MirrorOverrideImageId as the mirror ECS system image instead
+      of the auto-discovered RHEL image.  Positive boolean because Aliyun ROS's
+      Fn::Not is broken (see EnableZone3); 03 sets it from whether an override id
+      was supplied.
 
 Conditions:
   HasJumpHost: !Equals [!Ref EnableJumpHost, true]
-  HasOverrideImage: !Not [!Equals [!Ref MirrorOverrideImageId, ""]]
-  HasDataSnapshot:  !Not [!Equals [!Ref MirrorDataDiskSnapshotId, ""]]
+  # Positive booleans throughout — Aliyun ROS's Fn::Not mis-evaluates (always
+  # false) even when the inner Fn::Equals is plainly false (verified 2026-06-20
+  # via PreviewStack; first hit 2026-05-30 on HasJumpHost).  The ansible layer
+  # computes these booleans in Jinja and passes them as Enable* params.
+  HasOverrideImage: !Equals [!Ref EnableOverrideImage, "true"]
   # Third private VSwitch for the Agent-based multi-AZ control plane.
-  # Positive boolean — Aliyun ROS's Fn::Not is broken (see EnableZone3 desc).
   HasZone3: !Equals [!Ref EnableZone3, "true"]
 
 Resources:

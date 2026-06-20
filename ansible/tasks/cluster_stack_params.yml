@@ -66,6 +66,10 @@
         ParameterValue: "{{ control_plane_type }}"
       - ParameterKey: ComputeCount
         ParameterValue: "{{ _effective_compute_count | string }}"
+      # Positive boolean that actually gates HasWorkers (ROS Fn::Not is broken).
+      # True iff ComputeCount > 0 — normally false (workers come via CAPA phase 12).
+      - ParameterKey: EnableWorkers
+        ParameterValue: "{{ 'true' if (_effective_compute_count | int > 0) else 'false' }}"
       - ParameterKey: ComputeInstanceType
         ParameterValue: "{{ compute_type }}"
       - ParameterKey: SystemDiskCategory

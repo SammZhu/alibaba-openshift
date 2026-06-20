@@ -93,6 +93,12 @@ Parameters:
     Default: 0
     AllowedValues: [0]
     Description: SNO has no separate workers.
+  # Accepted but unused (SNO has no workers) — present so the shared
+  # cluster_stack_params can pass it without an "unknown parameter" rejection.
+  EnableWorkers:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
   ComputeInstanceType:
     Type: String
     Default: ""
