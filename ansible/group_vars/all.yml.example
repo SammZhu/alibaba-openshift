@@ -23,6 +23,7 @@ openshift_version:   "4.20.22"
 region:              cn-wulanchabu
 zone:                cn-wulanchabu-a
 zone2:               cn-wulanchabu-b
+zone3:               cn-wulanchabu-c   # Agent-based multi-AZ control plane (master-3); leave for AI/single-AZ
 oss_bucket:          openshift-iso-samzhu-test   # must be globally unique
 aliyun_profile:      openshift-test              # aliyun-cli profile
 
@@ -76,8 +77,9 @@ install_disk_size:    100
 vpc_cidr:             10.0.0.0/16
 private_subnet_cidr:  10.0.16.0/20
 private_subnet_cidr2: 10.0.32.0/20
+private_subnet_cidr3: 10.0.48.0/20   # Agent-based multi-AZ master-3 (zone3)
 public_subnet_cidr:   10.0.0.0/20
-rendezvous_ip:        10.0.16.5
+rendezvous_ip:        10.0.16.5      # ABI master-1 (zone1) fixed IP; master-2=10.0.32.6 (z2), master-3=10.0.48.7 (z3)
 ingress_vip:          10.0.16.6
 
 # ── Jump host (SSH into VPC) ─────────────────────────────────────────────────
@@ -96,11 +98,12 @@ output_dir:           "{{ lookup('env', 'HOME') }}/openshift-install/{{ cluster_
 # ── Installation method ──────────────────────────────────────────────────────
 # Assisted    → run via site.yml       (assisted-service REST API; tested path)
 # Agent-based → run via site-agent.yml (ABI; fully air-gapped, no assisted-service).
-#               ABI uses fixed-IP-via-DHCP (ROS pins the master IPs, cloud DHCP
-#               delivers them) with an empty agent-config hosts[] — no MAC harvest.
-#               For ABI HA, set rendezvous_ip to master-1's IP in the masters'
-#               subnet (PrivateSubnetCidr2, e.g. 10.0.32.5 — NOT the 10.0.16.5
-#               zone1 default). Value is matched case-insensitively.
+#               ABI is multi-AZ: master-1/2/3 spread across zone/zone2/zone3
+#               (PrivateSubnetCidr/2/3), each pinned to a fixed IP that cloud DHCP
+#               delivers; agent-config hosts[] binds each master's MAC→hostname.
+#               rendezvous_ip = master-1's IP in zone1 (10.0.16.5 default — matches
+#               the multi-AZ layout; no longer the old all-zone2 10.0.32.5).
+#               Value is matched case-insensitively.
 installation_method:  Assisted
 
 # ── Repo locations on the local machine ──────────────────────────────────────

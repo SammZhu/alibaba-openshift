@@ -21,10 +21,14 @@
         ParameterValue: "{{ mirror_private_vsw_1 }}"
       - ParameterKey: PrivateVSwitch2Id
         ParameterValue: "{{ mirror_private_vsw_2 }}"
+      - ParameterKey: PrivateVSwitch3Id
+        ParameterValue: "{{ mirror_private_vsw_3 | default('') }}"
       - ParameterKey: ZoneId
         ParameterValue: "{{ mirror_zone_id | default(zone) }}"
       - ParameterKey: ZoneId2
         ParameterValue: "{{ mirror_zone_id2 | default(zone2) }}"
+      - ParameterKey: ZoneId3
+        ParameterValue: "{{ mirror_zone_id3 | default(zone3 | default('')) }}"
       - ParameterKey: NodeRamRoleName
         ParameterValue: "{{ mirror_node_ram_role }}"
       - ParameterKey: JumpHostSecurityGroupId

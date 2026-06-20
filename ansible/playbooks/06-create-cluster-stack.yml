@@ -189,6 +189,7 @@
         master_ip3:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp3')           | first).OutputValue }}"
         reverse_zone_id1: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId1')      | first).OutputValue }}"
         reverse_zone_id2: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId2')      | first).OutputValue }}"
+        reverse_zone_id3: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId3')      | list | first | default({})).OutputValue | default('') }}"
         dynamic_manifest: "{{ (_cs_outputs | selectattr('OutputKey','equalto','DynamicCustomManifest')| first).OutputValue }}"
 
     # ENI-first via reimage: phase-1 booted the masters from the placeholder
@@ -273,7 +274,8 @@
     # untouched (ABI-only).  ABI's RHCOS (no cloud-init / guest agent) takes its
     # hostname from DHCP option 12 or reverse-DNS, so without these PTRs the node
     # names fall back to MAC-derived junk.  Zone is chosen by the IP's 3rd octet
-    # (16.* → zone1, else zone2) so it works regardless of master subnet.
+    # (16→zone1, 48→zone3 [multi-AZ master-3], else zone2) so it works for both
+    # the single-AZ (all-32) and multi-AZ (16/32/48) master layouts.
     - name: Add PTR records for control plane nodes (reverse DNS → node hostname)
       ansible.builtin.command:
         argv:
@@ -281,7 +283,7 @@
           - pvtz
           - AddZoneRecord
           - --ZoneId
-          - "{{ reverse_zone_id1 if item.ip.split('.')[2] == '16' else reverse_zone_id2 }}"
+          - "{{ reverse_zone_id1 if item.ip.split('.')[2] == '16' else (reverse_zone_id3 if item.ip.split('.')[2] == '48' else reverse_zone_id2) }}"
           - --Rr
           - "{{ item.ip.split('.')[-1] }}"
           - --Type
@@ -302,7 +304,7 @@
       when:
         - installation_method | default('Assisted') | lower in ['agent', 'agent-based']
         - item.ip | length > 0
-        - (reverse_zone_id1 if item.ip.split('.')[2] == '16' else reverse_zone_id2) | length > 0
+        - (reverse_zone_id1 if item.ip.split('.')[2] == '16' else (reverse_zone_id3 if item.ip.split('.')[2] == '48' else reverse_zone_id2)) | length > 0
 
     - name: Warn on PTR record failures (non-fatal — record may already exist)
       ansible.builtin.debug:
@@ -327,6 +329,7 @@
           forward_zone_id: "{{ forward_zone_id }}"
           reverse_zone_id1: "{{ reverse_zone_id1 }}"
           reverse_zone_id2: "{{ reverse_zone_id2 }}"
+          reverse_zone_id3: "{{ reverse_zone_id3 | default('') }}"
           dynamic_manifest_file: "{{ output_dir }}/alibaba-ccm-config.yaml"
 
     - name: Phase 06 (cluster-stack) done

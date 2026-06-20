@@ -50,6 +50,14 @@ Parameters:
     Type: String
     Description: Availability zone for secondary private VSwitch (e.g. cn-wulanchabu-b)
 
+  ZoneId3:
+    Type: String
+    Default: ""
+    Description: |
+      Availability zone for the third private VSwitch (e.g. cn-wulanchabu-c),
+      used by the Agent-based multi-AZ control plane (master-3).  Empty -> the
+      third VSwitch is not created (Assisted / single-AZ layouts).
+
   VpcCidr:
     Type: String
     Default: 10.0.0.0/16
@@ -61,6 +69,14 @@ Parameters:
   PrivateSubnetCidr2:
     Type: String
     Default: 10.0.32.0/20
+
+  PrivateSubnetCidr3:
+    Type: String
+    Default: 10.0.48.0/20
+    Description: |
+      Third private subnet (ZoneId3) for the multi-AZ control plane.  Sits in the
+      next free /20 after private2; capa-worker's dynamic /24 allocator (phase 12)
+      runs later and skips it, taking 10.0.64.0/24+ instead.
 
   PublicSubnetCidr:
     Type: String
@@ -149,6 +165,10 @@ Conditions:
   HasOverrideImage: !Not [!Equals [!Ref MirrorOverrideImageId, ""]]
   HasDataSnapshot:  !Not [!Equals [!Ref MirrorDataDiskSnapshotId, ""]]
 
+Conditions:
+  # Third private VSwitch only when ZoneId3 is supplied (Agent-based multi-AZ).
+  HasZone3: !Not [!Equals [!Ref ZoneId3, ""]]
+
 Resources:
   # ── Networking ───────────────────────────────────────────────────────────────
   Vpc:
@@ -175,6 +195,16 @@ Resources:
       CidrBlock: !Ref PrivateSubnetCidr2
       ZoneId: !Ref ZoneId2
       VSwitchName: !Sub '${ClusterName}-private-vsw-2'
+
+  # Third private VSwitch (Agent-based multi-AZ control plane: master-3 in ZoneId3)
+  PrivateVSwitch3:
+    Type: ALIYUN::ECS::VSwitch
+    Condition: HasZone3
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnetCidr3
+      ZoneId: !Ref ZoneId3
+      VSwitchName: !Sub '${ClusterName}-private-vsw-3'
 
   PublicVSwitch:
     Type: ALIYUN::ECS::VSwitch
@@ -694,6 +724,10 @@ Outputs:
   PrivateVSwitch2Id:
     Value: !Ref PrivateVSwitch2
     Description: Secondary private VSwitch (ZoneId2) — pass to cluster-stack.PrivateVSwitch2Id
+  PrivateVSwitch3Id:
+    Condition: HasZone3
+    Value: !Ref PrivateVSwitch3
+    Description: Third private VSwitch (ZoneId3) — pass to cluster-stack.PrivateVSwitch3Id (multi-AZ)
   PublicVSwitchId:
     Value: !Ref PublicVSwitch
     Description: Public VSwitch — referenced by future workloads, not by cluster-stack
@@ -703,6 +737,10 @@ Outputs:
   ZoneId2:
     Value: !Ref ZoneId2
     Description: Pass through to cluster-stack.ZoneId2
+  ZoneId3:
+    Condition: HasZone3
+    Value: !Ref ZoneId3
+    Description: Pass through to cluster-stack.ZoneId3 (multi-AZ)
   NodeRamRoleName:
     Value: !Ref NodeRamRole
     Description: RAM role name — pass to cluster-stack.NodeRamRoleName

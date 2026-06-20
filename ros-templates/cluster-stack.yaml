@@ -43,12 +43,22 @@ Parameters:
   PrivateVSwitch2Id:
     Type: String
     Description: Secondary private VSwitch (zone2) — from mirror-stack PrivateVSwitch2Id
+  PrivateVSwitch3Id:
+    Type: String
+    Default: ""
+    Description: |
+      Third private VSwitch (zone3) — from mirror-stack PrivateVSwitch3Id.
+      Agent-based multi-AZ only (master-3 in zone3); empty for Assisted / single-AZ.
   ZoneId:
     Type: String
     Description: Primary zone — from mirror-stack ZoneId
   ZoneId2:
     Type: String
     Description: Secondary zone — from mirror-stack ZoneId2
+  ZoneId3:
+    Type: String
+    Default: ""
+    Description: Third zone — from mirror-stack ZoneId3 (Agent-based multi-AZ; empty otherwise)
   NodeRamRoleName:
     Type: String
     Default: openshift-node-role
@@ -149,28 +159,26 @@ Parameters:
 
   RendezvousIp:
     Type: String
-    Default: 10.0.32.5
+    Default: 10.0.16.5
     Description: |
       Agent-based only.  Fixed private IP for the rendezvous node (master-1).
-      Must live inside the VSwitch matching the master placement (all
-      3 masters live in PrivateVSwitch2 / zone2 by default, so the
-      rendezvous IP must fall within PrivateSubnetCidr2 — typically
-      10.0.32.0/20).
+      Multi-AZ layout: master-1 lives in zone1 (PrivateVSwitchId / PrivateSubnetCidr,
+      10.0.16.0/20), so the rendezvous IP must fall there (e.g. 10.0.16.5,
+      alongside the mirror ECS at 10.0.16.4).
 
   Master2Ip:
     Type: String
     Default: 10.0.32.6
     Description: |
-      Agent-based only.  Fixed private IP for master-2 (must be in the
-      same VSwitch/subnet as RendezvousIp — PrivateSubnetCidr2).  The
-      ABI static-NMState host inventory (agent-config.yaml hosts[]) pins
-      each master to its fixed IP, so all masters need a reserved address.
+      Agent-based only.  Fixed private IP for master-2 in zone2
+      (PrivateVSwitch2Id / PrivateSubnetCidr2, 10.0.32.0/20).
 
   Master3Ip:
     Type: String
-    Default: 10.0.32.7
+    Default: 10.0.48.7
     Description: |
-      Agent-based only.  Fixed private IP for master-3 (PrivateSubnetCidr2).
+      Agent-based only.  Fixed private IP for master-3 in zone3
+      (PrivateVSwitch3Id / PrivateSubnetCidr3, 10.0.48.0/20).
 
   IngressVip:
     Type: String
@@ -193,6 +201,10 @@ Conditions:
   IsAssisted:   !Equals [!Ref InstallationMethod, Assisted]
   HasWorkers:   !Not [!Equals [!Ref ComputeCount, 0]]
   HasJumpHost:  !Equals [!Ref EnableJumpHostSsh, "true"]
+  # Multi-AZ control plane (Agent-based): master-1/2/3 spread across zone1/2/3.
+  # True only when a third zone/VSwitch is supplied — i.e. the ABI multi-AZ path.
+  # Assisted keeps all masters in zone2 (zero regression).
+  HasZone3:     !Not [!Equals [!Ref ZoneId3, ""]]
 
 Resources:
   # ── Security Groups ──────────────────────────────────────────────────────
@@ -330,6 +342,12 @@ Resources:
           VSwitchId: !Ref PrivateVSwitchId
         - ZoneId: !Ref ZoneId2
           VSwitchId: !Ref PrivateVSwitch2Id
+        # zone3 added for the Agent-based multi-AZ control plane (master-3).
+        - !If
+          - HasZone3
+          - ZoneId: !Ref ZoneId3
+            VSwitchId: !Ref PrivateVSwitch3Id
+          - !Ref 'ALIYUN::NoValue'
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
           Value: owned
@@ -515,7 +533,24 @@ Resources:
         - VpcId: !Ref VpcId
           RegionId: !Ref Region
 
-  # ── ECS Instances (all in zone2 to avoid c-series stockout in zone1) ─────
+  # Reverse zone for the multi-AZ master-3 subnet (10.0.48.0/20 -> 48.0.10.in-addr.arpa)
+  ReverseZone3:
+    Type: ALIYUN::PVTZ::Zone
+    Condition: HasZone3
+    Properties:
+      ZoneName: 48.0.10.in-addr.arpa
+
+  ReverseZone3VpcBinding:
+    Type: ALIYUN::PVTZ::ZoneVpcBinder
+    Condition: HasZone3
+    DependsOn: ReverseZone3
+    Properties:
+      ZoneId: !Ref ReverseZone3
+      Vpcs:
+        - VpcId: !Ref VpcId
+          RegionId: !Ref Region
+
+  # ── ECS Instances (Agent-based: multi-AZ master-1/2/3 in zone1/2/3; Assisted: all zone2) ─────
   # Serialised via DependsOn chain so ROS does not batch a single
   # RunInstances(Amount=2+) call that Aliyun cn-wulanchabu often rejects
   # atomically even when per-instance stock is available.
@@ -538,7 +573,8 @@ Resources:
       InstanceType: !Ref ControlPlaneInstanceType
       ImageId: !Ref ImageId
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
-      VSwitchId: !Ref PrivateVSwitch2Id
+      # ABI multi-AZ: master-1 (rendezvous) in zone1.  Assisted: zone2 (unchanged).
+      VSwitchId: !If [IsAgentBased, !Ref PrivateVSwitchId, !Ref PrivateVSwitch2Id]
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
       # Agent-based: NO extra install disk.  The Alibaba ISO boot makes the agent
@@ -597,7 +633,8 @@ Resources:
       InstanceType: !Ref ControlPlaneInstanceType
       ImageId: !Ref ImageId
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
-      VSwitchId: !Ref PrivateVSwitch2Id
+      # ABI multi-AZ: master-3 in zone3.  Assisted: zone2 (unchanged).
+      VSwitchId: !If [IsAgentBased, !Ref PrivateVSwitch3Id, !Ref PrivateVSwitch2Id]
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
       DiskMappings: !If
@@ -663,6 +700,10 @@ Outputs:
     Value: !Ref ReverseZone1
   ReverseZoneId2:
     Value: !Ref ReverseZone2
+  ReverseZoneId3:
+    Condition: HasZone3
+    Value: !Ref ReverseZone3
+    Description: Reverse zone for 10.0.48.0/20 (multi-AZ master-3 PTR)
   # Agent-based ENI-first via reimage: the auto primary-ENI id of each master,
   # harvested at phase-1 (ImageId=placeholder) and resolved to a MAC by ansible
   # (DescribeNetworkInterfaces) to feed agent-config hosts[] (MAC -> hostname).

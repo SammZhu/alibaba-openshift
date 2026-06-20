@@ -40,10 +40,18 @@ Parameters:
     Type: String
   PrivateVSwitch2Id:
     Type: String
+  # Accepted for parameter-compatibility with the shared cluster_stack_params
+  # task (multi-AZ is HA-only); unused by SNO.
+  PrivateVSwitch3Id:
+    Type: String
+    Default: ""
   ZoneId:
     Type: String
   ZoneId2:
     Type: String
+  ZoneId3:
+    Type: String
+    Default: ""
   NodeRamRoleName:
     Type: String
     Default: openshift-node-role
