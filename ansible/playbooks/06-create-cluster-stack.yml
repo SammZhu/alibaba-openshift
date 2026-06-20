@@ -59,10 +59,11 @@
           before zone3 was configured (or under Assisted), and Phase 03 adopted it
           as-is rather than recreating it.
 
-          Fix: tear down the mirror stack and re-run so Phase 03 recreates it with
-          the zone3 VSwitch (the mirror data snapshot makes Phase 04 a fast
-          restore):
-            ansible-playbook playbooks/99-teardown.yml -e teardown_from=3 -e teardown_confirmed=true
+          Fix: tear down the MIRROR stack (teardown_target=mirror — NOT
+          teardown_from / NOT teardown_target=cluster, which both keep the
+          persistent mirror stack) and re-run so Phase 03 recreates it with the
+          zone3 VSwitch (the mirror data snapshot makes Phase 04 a fast restore):
+            ansible-playbook playbooks/99-teardown.yml -e teardown_target=mirror -e teardown_confirmed=true
             ansible-playbook playbooks/site-agent.yml
       when:
         - _is_abi | bool
