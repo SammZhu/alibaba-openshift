@@ -55,8 +55,23 @@ Parameters:
     Default: ""
     Description: |
       Availability zone for the third private VSwitch (e.g. cn-wulanchabu-c),
-      used by the Agent-based multi-AZ control plane (master-3).  Empty -> the
-      third VSwitch is not created (Assisted / single-AZ layouts).
+      used by the Agent-based multi-AZ control plane (master-3).  Only consulted
+      when EnableZone3 is "true".
+
+  EnableZone3:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: |
+      "true" -> create the third private VSwitch (zone3) for the Agent-based
+      multi-AZ control plane (master-3).  03 sets this to "true" only for ABI
+      multi-AZ.
+
+      Why a positive boolean flag instead of !Not [!Equals [ZoneId3, ""]]:
+      Aliyun ROS evaluates Fn::Not against Fn::Equals as FALSE even when the
+      inner Equals is plainly FALSE (verified 2026-06-20 via PreviewStack;
+      same defect documented for HasJumpHost in cluster-stack.yaml 2026-05-30).
+      Plain positive Fn::Equals ("true" -> HasZone3) is known to work.
 
   VpcCidr:
     Type: String
@@ -164,8 +179,9 @@ Conditions:
   HasJumpHost: !Equals [!Ref EnableJumpHost, true]
   HasOverrideImage: !Not [!Equals [!Ref MirrorOverrideImageId, ""]]
   HasDataSnapshot:  !Not [!Equals [!Ref MirrorDataDiskSnapshotId, ""]]
-  # Third private VSwitch only when ZoneId3 is supplied (Agent-based multi-AZ).
-  HasZone3: !Not [!Equals [!Ref ZoneId3, ""]]
+  # Third private VSwitch for the Agent-based multi-AZ control plane.
+  # Positive boolean — Aliyun ROS's Fn::Not is broken (see EnableZone3 desc).
+  HasZone3: !Equals [!Ref EnableZone3, "true"]
 
 Resources:
   # ── Networking ───────────────────────────────────────────────────────────────

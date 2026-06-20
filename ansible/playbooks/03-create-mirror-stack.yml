@@ -159,8 +159,12 @@
             ParameterValue: "{{ zone }}"
           - ParameterKey: ZoneId2
             ParameterValue: "{{ zone2 }}"
-          # zone3 only for the Agent-based multi-AZ control plane; empty -> mirror
-          # skips the 3rd VSwitch (Assisted / single-AZ).
+          # zone3 only for the Agent-based multi-AZ control plane.  EnableZone3 is
+          # the positive boolean that actually gates PrivateVSwitch3 (ROS Fn::Not
+          # is broken — Jinja computes the boolean here reliably); ZoneId3 just
+          # carries the zone value when enabled.
+          - ParameterKey: EnableZone3
+            ParameterValue: "{{ 'true' if (installation_method | default('Assisted') | lower in ['agent', 'agent-based'] and (zone3 | default('') | length > 0)) else 'false' }}"
           - ParameterKey: ZoneId3
             ParameterValue: "{{ zone3 | default('') if (installation_method | default('Assisted') | lower in ['agent', 'agent-based']) else '' }}"
           - ParameterKey: VpcCidr

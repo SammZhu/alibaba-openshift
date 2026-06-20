@@ -52,6 +52,12 @@ Parameters:
   ZoneId3:
     Type: String
     Default: ""
+  # Accepted but unused (SNO is single-node, no multi-AZ) — present so the shared
+  # cluster_stack_params can pass it without an "unknown parameter" rejection.
+  EnableZone3:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
   NodeRamRoleName:
     Type: String
     Default: openshift-node-role

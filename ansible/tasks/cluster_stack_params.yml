@@ -36,6 +36,12 @@
       # vsw3 is present before we get here when ABI multi-AZ is requested.
       - ParameterKey: ZoneId3
         ParameterValue: "{{ mirror_zone_id3 | default('') }}"
+      # Positive boolean that actually gates HasZone3 (ROS Fn::Not is broken).
+      # True iff the mirror stack really built a third VSwitch — so ZoneId3 /
+      # PrivateVSwitch3Id / EnableZone3 all move together and we never emit a
+      # zone3 mapping with an empty VSwitchId.
+      - ParameterKey: EnableZone3
+        ParameterValue: "{{ 'true' if (mirror_private_vsw_3 | default('') | length > 0) else 'false' }}"
       - ParameterKey: NodeRamRoleName
         ParameterValue: "{{ mirror_node_ram_role }}"
       - ParameterKey: JumpHostSecurityGroupId
