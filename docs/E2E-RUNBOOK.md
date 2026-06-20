@@ -53,9 +53,26 @@ Assumed configuration:
        master keeps its ENI/MAC/IP and reboots into the agent image to install.
     4. **07** (`07-install-cluster-agent`) monitors via `openshift-install agent
        wait-for`, rewrites `*.apps`, and harvests the kubeconfig.
-  `rendezvous_ip` must be a master-subnet IP (e.g. `10.0.32.5`, in
-  `PrivateSubnetCidr2`).  Masters install **straight to `/dev/vda`** (no `vdb`,
-  no clone hook): the minimal agent ISO runs its rootfs from RAM.
+  Masters install **straight to `/dev/vda`** (no `vdb`, no clone hook): the
+  minimal agent ISO runs its rootfs from RAM.
+
+  **Multi-AZ control plane (ABI).**  ABI spreads the 3 masters one-per-AZ for
+  real HA: master-1 in `zone` (`PrivateVSwitchId`, 10.0.16.0/20, alongside the
+  mirror), master-2 in `zone2` (`PrivateVSwitch2Id`, 10.0.32.0/20), master-3 in
+  `zone3` (`PrivateVSwitch3Id`, 10.0.48.0/20).  The mirror-stack creates the 3rd
+  VSwitch only when `zone3` is set (Condition `HasZone3`); the cluster-stack gates
+  the per-master VSwitch + NLB zone3 mapping + `48.0.10.in-addr.arpa` reverse zone
+  on `IsAgentBased`/`HasZone3`.  **Assisted stays all-zone2 (zero regression).**
+  Set in `group_vars/all.yml`: `zone3: cn-wulanchabu-c`,
+  `private_subnet_cidr3: 10.0.48.0/20`, `rendezvous_ip: 10.0.16.5` (master-1 in
+  zone1; master-2/3 use the ROS defaults 10.0.32.6 / 10.0.48.7).  capa-worker's
+  dynamic /24 allocator (phase 12) runs after the mirror stack and skips
+  10.0.48.0/20, taking 10.0.64.0/24+.
+  > **Tradeoff:** real HA, but if the control-plane instance type is temporarily
+  > out of stock in *any* of the 3 zones at create time, the whole stack create
+  > fails (all-zone2 was the stock-safe fallback).  Verify stock first:
+  > `aliyun ecs DescribeAvailableResource --DestinationResource InstanceType
+  > --InstanceType <type> --ZoneId <zone>`.
 
   **Air-gap.** The External-platform agent ISO is always *minimal* and fetches
   its ~1 GB rootfs over HTTP; `agent-config bootArtifactsBaseURL` points at an
