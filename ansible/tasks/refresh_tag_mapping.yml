@@ -65,6 +65,12 @@
   register: _skopeo_results
   changed_when: false
   no_log: true   # creds are in argv
+  # registry.redhat.io (AWS us-east-1) is intermittently unreachable from the
+  # operator host (cross-border TLS stalls -> rc!=0); a transient blip must not
+  # fail the whole run.  Same resilience the relay skopeo-copy already has.
+  retries: 6
+  delay: 15
+  until: _skopeo_results.rc == 0
 
 - name: Build tag-mapping.tsv (repo<TAB>tag<TAB>digest)
   ansible.builtin.copy:
