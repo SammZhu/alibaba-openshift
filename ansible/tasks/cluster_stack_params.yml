@@ -27,8 +27,15 @@
         ParameterValue: "{{ mirror_zone_id | default(zone) }}"
       - ParameterKey: ZoneId2
         ParameterValue: "{{ mirror_zone_id2 | default(zone2) }}"
+      # Strictly from the mirror stack's ACTUAL third VSwitch — never fall back to
+      # group_vars `zone3`.  ZoneId3 and PrivateVSwitch3Id must move together: if
+      # the mirror has no vsw3, ZoneId3 stays "" so HasZone3 is false and we never
+      # emit a zone3 NLB ZoneMapping / master-3 VSwitch ref with an empty
+      # PrivateVSwitch3Id — that inconsistent combo makes CreateStack reject the
+      # entire stack at request time (no_log-hidden failure).  Phase 06 asserts
+      # vsw3 is present before we get here when ABI multi-AZ is requested.
       - ParameterKey: ZoneId3
-        ParameterValue: "{{ mirror_zone_id3 | default(zone3 | default('')) }}"
+        ParameterValue: "{{ mirror_zone_id3 | default('') }}"
       - ParameterKey: NodeRamRoleName
         ParameterValue: "{{ mirror_node_ram_role }}"
       - ParameterKey: JumpHostSecurityGroupId

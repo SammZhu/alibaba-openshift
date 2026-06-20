@@ -39,6 +39,35 @@
       ansible.builtin.set_fact:
         _is_abi: "{{ installation_method | default('Assisted') | lower in ['agent', 'agent-based'] }}"
 
+    # ABI multi-AZ (master-1/2/3 across zone/zone2/zone3) needs the mirror stack
+    # to have actually built the third private VSwitch.  create_stack adopts any
+    # existing same-name mirror stack WITHOUT checking its topology, so a mirror
+    # created before zone3 was set (or under Assisted) is silently reused and has
+    # no vsw3 -> mirror_private_vsw_3 is "".  Without this gate, cluster_stack_
+    # params would emit ZoneId3="" (vsw3 missing), master-3 would land in vsw2,
+    # OR (the old fallback bug) ZoneId3=zone3 with an empty PrivateVSwitch3Id and
+    # CreateStack rejects the whole stack with a no_log-hidden error.  Fail early
+    # and actionably instead.
+    - name: Sanity — ABI multi-AZ requires the mirror's third VSwitch (zone3)
+      ansible.builtin.assert:
+        that:
+          - mirror_private_vsw_3 | default('') | length > 0
+        fail_msg: |
+          installation_method is Agent-based and zone3 ({{ zone3 }}) is set
+          (multi-AZ control plane), but the mirror stack has no third private
+          VSwitch (mirror_private_vsw_3 is empty).  This mirror stack was created
+          before zone3 was configured (or under Assisted), and Phase 03 adopted it
+          as-is rather than recreating it.
+
+          Fix: tear down the mirror stack and re-run so Phase 03 recreates it with
+          the zone3 VSwitch (the mirror data snapshot makes Phase 04 a fast
+          restore):
+            ansible-playbook playbooks/99-teardown.yml -e teardown_from=3 -e teardown_confirmed=true
+            ansible-playbook playbooks/site-agent.yml
+      when:
+        - _is_abi | bool
+        - zone3 | default('') | length > 0
+
     # AI needs the agent/discovery image up-front (single create).  ABI's
     # ENI-first phase-1 create runs BEFORE the agent image exists (01 builds it
     # from the MACs this pass harvests), so it boots the masters from a throwaway
