@@ -205,6 +205,34 @@
       changed_when: "'unchanged' not in _itms_apply.stdout"
       when: mirror_private_ip | default('') | length > 0
 
+    # Companion ImageDigestMirrorSet for the CAPA controller, which the digest-pin
+    # block above pins BY DIGEST (quay.io/samzhu/openshift-capi-alicloud@sha256:..).
+    # The ITMS only redirects TAG pulls, and the install-config IDMS only covers
+    # the openshift release repos — so the CAPA digest pull is redirected by
+    # NEITHER and escapes to public quay.io, where the mirror's manifest digest
+    # does not exist ("manifest unknown" -> ImagePullBackOff; observed 2026-06-20
+    # on the ABI multi-AZ cluster). IDMS redirects the digest pull to the mirror
+    # (which has that exact digest, since the digest was resolved FROM the mirror).
+    # Same digest+IDMS pattern 08a uses for the CAPI core image. No-op when the
+    # mirror is disabled.
+    - name: Apply ImageDigestMirrorSet for the digest-pinned CAPA controller image
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+      args:
+        stdin: |
+          apiVersion: config.openshift.io/v1
+          kind: ImageDigestMirrorSet
+          metadata:
+            name: samzhu-digest-mirror
+          spec:
+            imageDigestMirrors:
+              - source: quay.io/samzhu/openshift-capi-alicloud
+                mirrors:
+                  - {{ mirror_private_ip }}:8443/samzhu/openshift-capi-alicloud
+      register: _idms_capa_apply
+      changed_when: "'unchanged' not in _idms_capa_apply.stdout"
+      when: mirror_private_ip | default('') | length > 0
+
     - name: Render CAPA deployment set from config/ kustomize (image override)
       # `oc kustomize` renders the provider repo's config/default SSOT (CRDs + RBAC
       # + controller + webhooks). The controller image is the only thing overridden:
