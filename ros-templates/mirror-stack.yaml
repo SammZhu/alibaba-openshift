@@ -277,6 +277,19 @@ Resources:
       SourceCIDR: !Ref PrivateSubnetCidr2
       SnatIp: !GetAtt EIP.EipAddress
 
+  # Egress for the zone3 subnet (ABI multi-AZ master-3).  WITHOUT this, master-3
+  # in zone3 has no NAT route out -> chrony can't reach external NTP -> the node
+  # clock drifts (+8h in CST) -> STS signatures rejected / etcd+TLS break.  This
+  # is the same NAT-egress root cause that bit the phase-12 zone-c worker.
+  NatSNATEntry3:
+    Type: ALIYUN::VPC::SnatEntry
+    Condition: HasZone3
+    DependsOn: EIPAssociation
+    Properties:
+      SnatTableId: !GetAtt NatGateway.SNatTableId
+      SourceCIDR: !Ref PrivateSubnetCidr3
+      SnatIp: !GetAtt EIP.EipAddress
+
   # ── Shared node RAM role (used by cluster-stack instances) ─────────────────
   # Lives here so the role itself + its policy survive cluster rebuilds —
   # cluster-stack only references it by name (NodeRamRoleName output).
