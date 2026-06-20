@@ -61,6 +61,16 @@ cluster_topology:     ha
 # ── Compute sizing ───────────────────────────────────────────────────────────
 # For cluster_topology=sno the ROS layer pins control_plane_count=1 +
 # compute_count=0 via AllowedValues — values below are silently overridden.
+#
+# ⚠️ ABI multi-AZ (zone/zone2/zone3): control_plane_type MUST be available in
+# ALL THREE zones, or ROS rejects the whole cluster stack at CreateStack
+# ("InstanceType ... not support in the zone ...").  Availability is per-zone and
+# fluctuates — e.g. in cn-wulanchabu, ecs.c7/g7.2xlarge are frequently SoldOut in
+# zone-a, and the g6/c6/g8i/u1 families are not offered in zone-c.  ecs.g7.xlarge
+# (4 vCPU / 16 GiB, the OpenShift control-plane minimum) is the broadest 3-zone
+# option there.  Verify before a run with:
+#   aliyun ecs DescribeAvailableResource --RegionId <r> --ZoneId <z> \
+#     --DestinationResource InstanceType --InstanceType <type> --InstanceChargeType PostPaid
 control_plane_count:  3
 control_plane_type:   ecs.g7.xlarge
 compute_count:        0       # 0 = compact (masters schedule workloads)
