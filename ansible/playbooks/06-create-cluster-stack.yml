@@ -35,12 +35,132 @@
           Required mirror-stack outputs missing from state.yml.
           Run 03-create-mirror-stack.yml first.
 
-    - name: Sanity — ECS image was imported by Phase 02
+    - name: Resolve ABI flag + the ImageId to pass this pass
+      ansible.builtin.set_fact:
+        _is_abi: "{{ installation_method | default('Assisted') | lower in ['agent', 'agent-based'] }}"
+
+    # ABI multi-AZ (master-1/2/3 across zone/zone2/zone3) needs the mirror stack
+    # to have actually built the third private VSwitch.  create_stack adopts any
+    # existing same-name mirror stack WITHOUT checking its topology, so a mirror
+    # created before zone3 was set (or under Assisted) is silently reused and has
+    # no vsw3 -> mirror_private_vsw_3 is "".  Without this gate, cluster_stack_
+    # params would emit ZoneId3="" (vsw3 missing), master-3 would land in vsw2,
+    # OR (the old fallback bug) ZoneId3=zone3 with an empty PrivateVSwitch3Id and
+    # CreateStack rejects the whole stack with a no_log-hidden error.  Fail early
+    # and actionably instead.
+    - name: Sanity — ABI multi-AZ requires the mirror's third VSwitch (zone3)
+      ansible.builtin.assert:
+        that:
+          - mirror_private_vsw_3 | default('') | length > 0
+        fail_msg: |
+          installation_method is Agent-based and zone3 ({{ zone3 }}) is set
+          (multi-AZ control plane), but the mirror stack has no third private
+          VSwitch (mirror_private_vsw_3 is empty).  This mirror stack was created
+          before zone3 was configured (or under Assisted), and Phase 03 adopted it
+          as-is rather than recreating it.
+
+          Fix: tear down the MIRROR stack (teardown_target=mirror — NOT
+          teardown_from / NOT teardown_target=cluster, which both keep the
+          persistent mirror stack) and re-run so Phase 03 recreates it with the
+          zone3 VSwitch (the mirror data snapshot makes Phase 04 a fast restore):
+            ansible-playbook playbooks/99-teardown.yml -e teardown_target=mirror -e teardown_confirmed=true
+            ansible-playbook playbooks/site-agent.yml
+      when:
+        - _is_abi | bool
+        - zone3 | default('') | length > 0
+
+    # AI needs the agent/discovery image up-front (single create).  ABI's
+    # ENI-first phase-1 create runs BEFORE the agent image exists (01 builds it
+    # from the MACs this pass harvests), so it boots the masters from a throwaway
+    # PLACEHOLDER system image; 06b later UpdateStacks ImageId to the real agent
+    # image (in-place ReplaceSystemDisk keeps the ENI/MAC/IP).
+    - name: Sanity — ECS image was imported by Phase 02 (Assisted only)
       ansible.builtin.assert:
         that:
           - ecs_image_id is defined
           - ecs_image_id | length > 0
         fail_msg: "Run 02-import-image.yml first."
+      when: not (_is_abi | bool)
+
+    # ABI phase-1 placeholder: a throwaway system image only needed so the
+    # masters + their auto primary ENIs come up (06b reimages them to the agent
+    # image).  Prefer Alibaba Cloud Linux 3 — the cloud-native image: free,
+    # always present, fast-booting, no marketplace subscription.  Overridable
+    # via abi_placeholder_image_id.
+    #
+    # NOTE on field values (verified 2026-06-19, cn-wulanchabu): the public OS is
+    # Platform="Aliyun" (NOT "Alibaba Cloud Linux"), OSNameEn has a DOUBLE space
+    # ("Alibaba Cloud Linux  3.2104 ..."), and the plain base image id is
+    # aliyun_3_x64_20G_alibase_<date>.vhd.  We match on the ImageId prefix (most
+    # robust).  Also DO NOT pass --InstanceType: it reorders results so third-
+    # party distros (Ubuntu/Rocky/...) fill page 1 and push Aliyun off it.  Fetch
+    # two pages and select across both.
+    - name: ABI — list system Linux images for the placeholder (2 pages)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeImages
+          - --RegionId
+          - "{{ region }}"
+          - --ImageOwnerAlias
+          - system
+          - --OSType
+          - linux
+          - --Architecture
+          - x86_64
+          - --Status
+          - Available
+          - --PageSize
+          - "100"
+          - --PageNumber
+          - "{{ item }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _abi_images_pages
+      changed_when: false
+      loop: [1, 2]
+      when:
+        - _is_abi | bool
+        - abi_placeholder_image_id | default('') | length == 0
+
+    - name: ABI — flatten the image list across pages
+      ansible.builtin.set_fact:
+        _abi_all_images: >-
+          {{ _abi_images_pages.results | default([]) | map(attribute='stdout')
+             | map('from_json') | map(attribute='Images') | map(attribute='Image')
+             | flatten }}
+      when:
+        - _is_abi | bool
+        - abi_placeholder_image_id | default('') | length == 0
+
+    - name: ABI — select placeholder image (prefer Alibaba Cloud Linux 3 base)
+      vars:
+        _acl3:   "{{ _abi_all_images | default([]) | selectattr('ImageId','defined') | selectattr('ImageId','match','^aliyun_3_x64_20G_alibase_') | map(attribute='ImageId') | list | sort }}"
+        _aliyun: "{{ _abi_all_images | default([]) | selectattr('Platform','defined') | selectattr('Platform','equalto','Aliyun') | map(attribute='ImageId') | list | sort }}"
+        _any:    "{{ _abi_all_images | default([]) | selectattr('ImageId','defined') | map(attribute='ImageId') | list }}"
+      ansible.builtin.set_fact:
+        _abi_placeholder_image: >-
+          {{ abi_placeholder_image_id
+             if (abi_placeholder_image_id | default('') | length > 0)
+             else (_acl3[-1] if (_acl3 | length > 0)
+                   else (_aliyun[-1] if (_aliyun | length > 0)
+                         else (_any[0] if (_any | length > 0) else ''))) }}
+      when: _is_abi | bool
+
+    - name: ABI — show chosen placeholder image
+      ansible.builtin.debug:
+        msg: "ABI phase-1 placeholder image = {{ _abi_placeholder_image }}"
+      when: _is_abi | bool
+
+    - name: ABI — fail if no placeholder image found
+      ansible.builtin.fail:
+        msg: |
+          No bootable system image found for {{ control_plane_type }} in {{ region }}.
+          Set abi_placeholder_image_id in group_vars to a known-good system image id.
+      when:
+        - _is_abi | bool
+        - _abi_placeholder_image | default('') | length == 0
 
     - name: Read SSH public key (informational; RHCOS gets keys via ignition)
       ansible.builtin.slurp:
@@ -59,63 +179,10 @@
         _effective_control_plane_count: "{{ 1 if (cluster_topology | default('ha')) == 'sno' else (control_plane_count | int) }}"
         _effective_compute_count: "{{ 0 if (cluster_topology | default('ha')) == 'sno' else (compute_count | int) }}"
 
-    - name: Build cluster-stack Parameters
-      ansible.builtin.set_fact:
-        _cluster_stack_params:
-          # ── mirror-stack outputs passed through ──────────────────────
-          - ParameterKey: VpcId
-            ParameterValue: "{{ mirror_vpc_id }}"
-          - ParameterKey: VpcCidr
-            ParameterValue: "{{ mirror_vpc_cidr | default(vpc_cidr) }}"
-          - ParameterKey: PrivateVSwitchId
-            ParameterValue: "{{ mirror_private_vsw_1 }}"
-          - ParameterKey: PrivateVSwitch2Id
-            ParameterValue: "{{ mirror_private_vsw_2 }}"
-          - ParameterKey: ZoneId
-            ParameterValue: "{{ mirror_zone_id | default(zone) }}"
-          - ParameterKey: ZoneId2
-            ParameterValue: "{{ mirror_zone_id2 | default(zone2) }}"
-          - ParameterKey: NodeRamRoleName
-            ParameterValue: "{{ mirror_node_ram_role }}"
-          # JumpHostSecurityGroupId: the actual SG id (or "none" sentinel).
-          # EnableJumpHostSsh: separate boolean — see cluster-stack.yaml
-          # comment for why we don't compute the boolean from the SG id
-          # via !Not [!Equals [...]] (Aliyun ROS bug, observed 2026-05-30).
-          - ParameterKey: JumpHostSecurityGroupId
-            ParameterValue: "{{ jump_host_sg_id if (jump_host_sg_id | default('') | length > 0) else 'none' }}"
-          - ParameterKey: EnableJumpHostSsh
-            ParameterValue: "{{ 'true' if (jump_host_sg_id | default('') | length > 0) else 'false' }}"
-          # ── cluster-specific ─────────────────────────────────────────
-          - ParameterKey: ClusterName
-            ParameterValue: "{{ cluster_name }}"
-          - ParameterKey: BaseDomain
-            ParameterValue: "{{ base_domain }}"
-          - ParameterKey: Region
-            ParameterValue: "{{ region }}"
-          - ParameterKey: ImageId
-            ParameterValue: "{{ ecs_image_id }}"
-          - ParameterKey: ControlPlaneCount
-            ParameterValue: "{{ _effective_control_plane_count | string }}"
-          - ParameterKey: ControlPlaneInstanceType
-            ParameterValue: "{{ control_plane_type }}"
-          - ParameterKey: ComputeCount
-            ParameterValue: "{{ _effective_compute_count | string }}"
-          - ParameterKey: ComputeInstanceType
-            ParameterValue: "{{ compute_type }}"
-          - ParameterKey: SystemDiskCategory
-            ParameterValue: "{{ system_disk_category }}"
-          - ParameterKey: SystemDiskSize
-            ParameterValue: "{{ system_disk_size | string }}"
-          - ParameterKey: InstallDiskSize
-            ParameterValue: "{{ install_disk_size | string }}"
-          - ParameterKey: RendezvousIp
-            ParameterValue: "{{ rendezvous_ip }}"
-          - ParameterKey: IngressVip
-            ParameterValue: "{{ ingress_vip }}"
-          - ParameterKey: InstallationMethod
-            ParameterValue: "{{ installation_method }}"
-          - ParameterKey: SshPublicKey
-            ParameterValue: "{{ _ssh_pub_slurp.content | b64decode | trim }}"
+    - name: Build cluster-stack Parameters (ABI phase-1 uses placeholder ImageId)
+      ansible.builtin.include_tasks: ../tasks/cluster_stack_params.yml
+      vars:
+        cluster_stack_image_id: "{{ _abi_placeholder_image if (_is_abi | bool) else ecs_image_id }}"
 
     # cluster_topology selects between HA (3-master + NLB) and SNO (1 ECS,
     # no NLB).  Defaults to 'ha' for back-compat.  See docs/SNO-MODE.md.
@@ -145,12 +212,61 @@
       ansible.builtin.set_fact:
         api_lb_endpoint:  "{{ (_cs_outputs | selectattr('OutputKey','equalto','ApiLBEndpoint')        | first).OutputValue }}"
         worker_sg:        "{{ (_cs_outputs | selectattr('OutputKey','equalto','WorkerSecurityGroup') | first).OutputValue }}"
+        # Instances always exist (placeholder at ABI phase-1), so MasterIp{1,2,3}
+        # GetAtt the actual primary-NIC IP — which for ABI equals the fixed param.
         master_ip1:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp1')           | first).OutputValue }}"
         master_ip2:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp2')           | first).OutputValue }}"
         master_ip3:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp3')           | first).OutputValue }}"
         reverse_zone_id1: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId1')      | first).OutputValue }}"
         reverse_zone_id2: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId2')      | first).OutputValue }}"
+        reverse_zone_id3: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId3')      | list | first | default({})).OutputValue | default('') }}"
         dynamic_manifest: "{{ (_cs_outputs | selectattr('OutputKey','equalto','DynamicCustomManifest')| first).OutputValue }}"
+
+    # ENI-first via reimage: phase-1 booted the masters from the placeholder
+    # image so their auto primary ENIs now exist.  Resolve each primary-NIC id
+    # (stack output) to its MAC, then feed the MACs into agent-config hosts[] at
+    # 01 (MAC -> hostname binding).  This is why 06 runs before 01 for ABI.
+    - name: ABI — collect master primary-NIC ids from stack outputs
+      ansible.builtin.set_fact:
+        _abi_nic_ids:
+          - "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master1PrimaryNic') | first).OutputValue }}"
+          - "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master2PrimaryNic') | first).OutputValue }}"
+          - "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master3PrimaryNic') | first).OutputValue }}"
+      when: _is_abi | bool
+
+    - name: ABI — resolve each primary NIC to its MAC
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeNetworkInterfaces
+          - --RegionId
+          - "{{ region }}"
+          - --NetworkInterfaceId.1
+          - "{{ item }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _abi_nic_desc
+      changed_when: false
+      loop: "{{ _abi_nic_ids | default([]) }}"
+      when: _is_abi | bool
+
+    - name: ABI — set master MAC facts
+      ansible.builtin.set_fact:
+        master_mac1: "{{ (_abi_nic_desc.results[0].stdout | from_json).NetworkInterfaceSets.NetworkInterfaceSet[0].MacAddress }}"
+        master_mac2: "{{ (_abi_nic_desc.results[1].stdout | from_json).NetworkInterfaceSets.NetworkInterfaceSet[0].MacAddress }}"
+        master_mac3: "{{ (_abi_nic_desc.results[2].stdout | from_json).NetworkInterfaceSets.NetworkInterfaceSet[0].MacAddress }}"
+      when: _is_abi | bool
+
+    - name: ABI — persist MACs + placeholder image to state (consumed by 01 / 06b)
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        new_state:
+          master_mac1: "{{ master_mac1 }}"
+          master_mac2: "{{ master_mac2 }}"
+          master_mac3: "{{ master_mac3 }}"
+          abi_placeholder_image_used: "{{ _abi_placeholder_image }}"
+      when: _is_abi | bool
 
     - name: Save dynamic CCM config to {{ output_dir }}/alibaba-ccm-config.yaml
       ansible.builtin.copy:
@@ -182,6 +298,54 @@
               | selectattr('ZoneName','equalto', cluster_name + '.' + base_domain)
               | list | first | default({})).ZoneId | default('') }}
 
+    # PTR records: reverse DNS for each master fixed IP → <cluster>-master-N.
+    # AI sets node hostnames itself via assisted-service requested_hostname, so
+    # it doesn't need these and the new 06 didn't create them — keep that path
+    # untouched (ABI-only).  ABI's RHCOS (no cloud-init / guest agent) takes its
+    # hostname from DHCP option 12 or reverse-DNS, so without these PTRs the node
+    # names fall back to MAC-derived junk.  Zone is chosen by the IP's 3rd octet
+    # (16→zone1, 48→zone3 [multi-AZ master-3], else zone2) so it works for both
+    # the single-AZ (all-32) and multi-AZ (16/32/48) master layouts.
+    - name: Add PTR records for control plane nodes (reverse DNS → node hostname)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - pvtz
+          - AddZoneRecord
+          - --ZoneId
+          - "{{ reverse_zone_id1 if item.ip.split('.')[2] == '16' else (reverse_zone_id3 if item.ip.split('.')[2] == '48' else reverse_zone_id2) }}"
+          - --Rr
+          - "{{ item.ip.split('.')[-1] }}"
+          - --Type
+          - PTR
+          - --Value
+          - "{{ cluster_name }}-master-{{ item.idx }}.{{ cluster_name }}.{{ base_domain }}."
+          - --Ttl
+          - "60"
+          - --profile
+          - "{{ aliyun_profile }}"
+      loop:
+        - { ip: "{{ master_ip1 }}", idx: "1" }
+        - { ip: "{{ master_ip2 }}", idx: "2" }
+        - { ip: "{{ master_ip3 }}", idx: "3" }
+      register: _ptr_results
+      failed_when: false
+      changed_when: true
+      when:
+        - installation_method | default('Assisted') | lower in ['agent', 'agent-based']
+        - item.ip | length > 0
+        - (reverse_zone_id1 if item.ip.split('.')[2] == '16' else (reverse_zone_id3 if item.ip.split('.')[2] == '48' else reverse_zone_id2)) | length > 0
+
+    - name: Warn on PTR record failures (non-fatal — record may already exist)
+      ansible.builtin.debug:
+        msg: "WARNING: PTR for master-{{ item.item.idx }} ({{ item.item.ip }}) rc={{ item.rc }} stderr={{ item.stderr | default('') }}"
+      loop: "{{ _ptr_results.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.idx | default('?') }}"
+      when:
+        - item.rc is defined
+        - item.rc != 0
+
     - name: Save cluster-stack facts to state
       ansible.builtin.include_tasks: ../tasks/save_state.yml
       vars:
@@ -195,6 +359,7 @@
           forward_zone_id: "{{ forward_zone_id }}"
           reverse_zone_id1: "{{ reverse_zone_id1 }}"
           reverse_zone_id2: "{{ reverse_zone_id2 }}"
+          reverse_zone_id3: "{{ reverse_zone_id3 | default('') }}"
           dynamic_manifest_file: "{{ output_dir }}/alibaba-ccm-config.yaml"
 
     - name: Phase 06 (cluster-stack) done

@@ -95,6 +95,24 @@
         that: teardown_confirmed | bool or _confirm.user_input == 'yes'
         fail_msg: "Aborted"
 
+    # ── 0. OSS transit sweep (backstop) ──────────────────────────────────
+    # tasks/ship_via_oss.yml deletes each transit object right after the mirror
+    # pulls it, but an aborted 04/06a run can leave oss://<bucket>/transit/*
+    # objects.  Sweep them best-effort on every teardown (cheap; bucket may not
+    # exist or be empty → ignored).
+    - name: Sweep leftover OSS transit objects
+      ansible.builtin.shell: |
+        set -uo pipefail
+        read AK SK <<<"$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret' ~/.aliyun/config.json)"
+        aliyun oss rm "oss://{{ oss_bucket }}/transit/" --recursive -f \
+          --access-key-id="$AK" --access-key-secret="$SK" \
+          --region="{{ region }}" --endpoint="oss-{{ region }}.aliyuncs.com" || true
+      register: _oss_transit_sweep
+      changed_when: "'Succeed' in (_oss_transit_sweep.stdout | default('')) or 'removed' in (_oss_transit_sweep.stdout | default('')|lower)"
+      failed_when: false
+      no_log: true
+      when: oss_bucket | default('') | length > 0
+
     # ── 0a. PVC-delete-first reclaim (PRIMARY NAS/disk cleanup) ──────────
     # The clean way to reclaim CSI-provisioned NAS filesystems + cloud disks is to
     # delete the PVCs WHILE THE CLUSTER IS STILL UP: the CSI controller then calls
@@ -335,11 +353,23 @@
               forward_zone_id: ''
               reverse_zone_id1: ''
               reverse_zone_id2: ''
+              # ABI per-cluster transients: the agent image, harvested ENI MACs
+              # and the placeholder id are all single-use (baked install-config /
+              # 24h certs / MACs from the now-deleted ENIs), so always clear them
+              # — the next run rebuilds from scratch.  Harmless for AI (unused).
+              master_mac1: ''
+              master_mac2: ''
+              master_mac3: ''
+              abi_placeholder_image_used: ''
+              kubeconfig_path: ''
               # When cluster_includes_ai=true, also clear AI/image/iso fields
               # so the next 01 doesn't try to adopt the just-deleted cluster.
+              # For ABI the agent image is single-use too → clear it as well (the
+              # image itself is cascade-deleted by the block below, which now also
+              # triggers on ABI cluster teardown).
               cluster_id:   "{{ '' if (cluster_includes_ai | default(false) | bool) else (cluster_id | default('')) }}"
               infra_env_id: "{{ '' if (cluster_includes_ai | default(false) | bool) else (infra_env_id | default('')) }}"
-              ecs_image_id: "{{ '' if (cluster_includes_ai | default(false) | bool) else (ecs_image_id | default('')) }}"
+              ecs_image_id: "{{ '' if (cluster_includes_ai | default(false) | bool or installation_method | default('Assisted') | lower in ['agent', 'agent-based']) else (ecs_image_id | default('')) }}"
               iso_path:     "{{ '' if (cluster_includes_ai | default(false) | bool) else (iso_path | default('')) }}"
 
     # ── 2. AI cluster + infra-env + ECS image ────────────────────────────────
@@ -363,6 +393,8 @@
         (teardown_target in ['mirror', 'both'] and not (teardown_preserves_ai | bool))
         or
         (teardown_target == 'cluster' and (cluster_includes_ai | bool))
+        or
+        (teardown_target == 'cluster' and installation_method | default('Assisted') | lower in ['agent', 'agent-based'])
       block:
         # Assisted-only: ABI (installation_method=Agent-based) has no assisted
         # cluster / infra-env and no assisted-service to call, so skip these

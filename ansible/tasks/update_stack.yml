@@ -1,0 +1,80 @@
+---
+# Shared "update an existing ROS stack" task — the UpdateStack counterpart of
+# create_stack.yml.  Used by the Agent-based phase-2 (06b-reimage-masters.yml):
+# the masters already exist booted from the placeholder image, and we re-submit
+# the SAME parameters but with ImageId now = the agent image; ROS applies that
+# as an in-place ReplaceSystemDisk (keeps each instance's ENI/MAC/IP) so the
+# masters reboot into the agent image.
+#
+# Inputs (caller sets via include_tasks vars):
+#   _cs_stack_name        Stack name (for temp file + messages)
+#   _cs_stack_id          StackId to update (from state cluster_stack_id)
+#   _cs_template_path     Local path to the YAML template
+#   _cs_parameters        Full list of {ParameterKey, ParameterValue}
+# Outputs:
+#   _cs_outputs           Refreshed list of {OutputKey, OutputValue}
+
+- name: "update_stack [{{ _cs_stack_name }}] — write Parameters JSON to temp file"
+  ansible.builtin.copy:
+    dest: "/tmp/{{ _cs_stack_name }}-update-params.json"
+    content: "{{ _cs_parameters | to_nice_json }}"
+    mode: "0600"
+
+- name: "update_stack [{{ _cs_stack_name }}] — submit UpdateStack"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<PYEOF
+    import json, subprocess, sys
+    params = json.load(open("/tmp/{{ _cs_stack_name }}-update-params.json"))
+    cli_params = []
+    for i, p in enumerate(params):
+        cli_params.extend([
+            f"--Parameters.{i+1}.ParameterKey", p["ParameterKey"],
+            f"--Parameters.{i+1}.ParameterValue", p["ParameterValue"],
+        ])
+    cmd = ["aliyun", "ros", "UpdateStack",
+           "--RegionId", "{{ region }}",
+           "--StackId", "{{ _cs_stack_id }}",
+           "--TemplateBody", open("{{ _cs_template_path }}").read(),
+           "--profile", "{{ aliyun_profile }}",
+           *cli_params]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        # NotSupported "the resource is the same / no update" → treat as no-op
+        if "NotSupported" in r.stderr and "not changed" in r.stderr.lower():
+            print("NOOP"); sys.exit(0)
+        sys.stderr.write(r.stderr); sys.exit(r.returncode)
+    print(json.loads(r.stdout)["StackId"])
+    PYEOF
+  register: _cs_update_result
+  no_log: true
+
+- name: "update_stack [{{ _cs_stack_name }}] — remove temp params file"
+  ansible.builtin.file:
+    path: "/tmp/{{ _cs_stack_name }}-update-params.json"
+    state: absent
+
+- name: "update_stack [{{ _cs_stack_name }}] — poll until UPDATE_COMPLETE"
+  ansible.builtin.command:
+    argv:
+      - aliyun
+      - ros
+      - GetStack
+      - --RegionId
+      - "{{ region }}"
+      - --StackId
+      - "{{ _cs_stack_id }}"
+      - --profile
+      - "{{ aliyun_profile }}"
+  register: _cs_upoll
+  retries: 60
+  delay: 30
+  until: (_cs_upoll.stdout | from_json).Status in ['UPDATE_COMPLETE', 'CREATE_COMPLETE']
+  failed_when: (_cs_upoll.stdout | from_json).Status in
+               ['UPDATE_FAILED', 'UPDATE_ROLLBACK_FAILED', 'UPDATE_ROLLBACK_COMPLETE',
+                'CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE', 'DELETE_FAILED']
+  changed_when: false
+
+- name: "update_stack [{{ _cs_stack_name }}] — extract refreshed outputs"
+  ansible.builtin.set_fact:
+    _cs_outputs: "{{ (_cs_upoll.stdout | from_json).Outputs | default([]) }}"

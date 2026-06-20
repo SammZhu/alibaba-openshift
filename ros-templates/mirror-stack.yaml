@@ -50,6 +50,29 @@ Parameters:
     Type: String
     Description: Availability zone for secondary private VSwitch (e.g. cn-wulanchabu-b)
 
+  ZoneId3:
+    Type: String
+    Default: ""
+    Description: |
+      Availability zone for the third private VSwitch (e.g. cn-wulanchabu-c),
+      used by the Agent-based multi-AZ control plane (master-3).  Only consulted
+      when EnableZone3 is "true".
+
+  EnableZone3:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: |
+      "true" -> create the third private VSwitch (zone3) for the Agent-based
+      multi-AZ control plane (master-3).  03 sets this to "true" only for ABI
+      multi-AZ.
+
+      Why a positive boolean flag instead of !Not [!Equals [ZoneId3, ""]]:
+      Aliyun ROS evaluates Fn::Not against Fn::Equals as FALSE even when the
+      inner Equals is plainly FALSE (verified 2026-06-20 via PreviewStack;
+      same defect documented for HasJumpHost in cluster-stack.yaml 2026-05-30).
+      Plain positive Fn::Equals ("true" -> HasZone3) is known to work.
+
   VpcCidr:
     Type: String
     Default: 10.0.0.0/16
@@ -61,6 +84,14 @@ Parameters:
   PrivateSubnetCidr2:
     Type: String
     Default: 10.0.32.0/20
+
+  PrivateSubnetCidr3:
+    Type: String
+    Default: 10.0.48.0/20
+    Description: |
+      Third private subnet (ZoneId3) for the multi-AZ control plane.  Sits in the
+      next free /20 after private2; capa-worker's dynamic /24 allocator (phase 12)
+      runs later and skips it, taking 10.0.64.0/24+ instead.
 
   PublicSubnetCidr:
     Type: String
@@ -141,13 +172,29 @@ Parameters:
     Default: ""
     Description: |
       Optional snapshot ID for the data disk (/var/lib/quay-storage).  When
-      non-empty, the data disk is created from this snapshot instead of blank.
+      non-empty, the data disk is created from this snapshot instead of blank
+      (the DiskMappings SnapshotId references it directly — no condition needed).
       cloud-init will detect existing XFS and skip mkfs.
+
+  EnableOverrideImage:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: |
+      "true" -> use MirrorOverrideImageId as the mirror ECS system image instead
+      of the auto-discovered RHEL image.  Positive boolean because Aliyun ROS's
+      Fn::Not is broken (see EnableZone3); 03 sets it from whether an override id
+      was supplied.
 
 Conditions:
   HasJumpHost: !Equals [!Ref EnableJumpHost, true]
-  HasOverrideImage: !Not [!Equals [!Ref MirrorOverrideImageId, ""]]
-  HasDataSnapshot:  !Not [!Equals [!Ref MirrorDataDiskSnapshotId, ""]]
+  # Positive booleans throughout — Aliyun ROS's Fn::Not mis-evaluates (always
+  # false) even when the inner Fn::Equals is plainly false (verified 2026-06-20
+  # via PreviewStack; first hit 2026-05-30 on HasJumpHost).  The ansible layer
+  # computes these booleans in Jinja and passes them as Enable* params.
+  HasOverrideImage: !Equals [!Ref EnableOverrideImage, "true"]
+  # Third private VSwitch for the Agent-based multi-AZ control plane.
+  HasZone3: !Equals [!Ref EnableZone3, "true"]
 
 Resources:
   # ── Networking ───────────────────────────────────────────────────────────────
@@ -175,6 +222,16 @@ Resources:
       CidrBlock: !Ref PrivateSubnetCidr2
       ZoneId: !Ref ZoneId2
       VSwitchName: !Sub '${ClusterName}-private-vsw-2'
+
+  # Third private VSwitch (Agent-based multi-AZ control plane: master-3 in ZoneId3)
+  PrivateVSwitch3:
+    Type: ALIYUN::ECS::VSwitch
+    Condition: HasZone3
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnetCidr3
+      ZoneId: !Ref ZoneId3
+      VSwitchName: !Sub '${ClusterName}-private-vsw-3'
 
   PublicVSwitch:
     Type: ALIYUN::ECS::VSwitch
@@ -218,6 +275,19 @@ Resources:
     Properties:
       SnatTableId: !GetAtt NatGateway.SNatTableId
       SourceCIDR: !Ref PrivateSubnetCidr2
+      SnatIp: !GetAtt EIP.EipAddress
+
+  # Egress for the zone3 subnet (ABI multi-AZ master-3).  WITHOUT this, master-3
+  # in zone3 has no NAT route out -> chrony can't reach external NTP -> the node
+  # clock drifts (+8h in CST) -> STS signatures rejected / etcd+TLS break.  This
+  # is the same NAT-egress root cause that bit the phase-12 zone-c worker.
+  NatSNATEntry3:
+    Type: ALIYUN::VPC::SnatEntry
+    Condition: HasZone3
+    DependsOn: EIPAssociation
+    Properties:
+      SnatTableId: !GetAtt NatGateway.SNatTableId
+      SourceCIDR: !Ref PrivateSubnetCidr3
       SnatIp: !GetAtt EIP.EipAddress
 
   # ── Shared node RAM role (used by cluster-stack instances) ─────────────────
@@ -497,6 +567,9 @@ Resources:
               - oss:ListBuckets
               # Write: Agent-based Installer uploads the agent ISO to OSS from
               # the mirror ECS (in-VPC, internal endpoint) before ImportImage.
+              # (The minimal-ISO rootfs is served by an in-VPC HTTP server on the
+              # mirror ECS — see MirrorSecurityGroup 8080 — not via OSS, because
+              # the bucket blocks public-read object ACLs.)
               - oss:PutObject
               - oss:DeleteObject
             Resource: ['*']
@@ -532,6 +605,10 @@ Resources:
           PortRange: 8443/8443
           SourceCidrIp: !Ref VpcCidr
           Description: Quay HTTPS (VPC-internal pulls from cluster nodes)
+        - IpProtocol: tcp
+          PortRange: 8080/8080
+          SourceCidrIp: !Ref VpcCidr
+          Description: ABI rootfs HTTP (Agent-based minimal-ISO bootArtifactsBaseURL, VPC-internal)
         - IpProtocol: tcp
           PortRange: 22/22
           SourceCidrIp: !Ref VpcCidr
@@ -687,6 +764,10 @@ Outputs:
   PrivateVSwitch2Id:
     Value: !Ref PrivateVSwitch2
     Description: Secondary private VSwitch (ZoneId2) — pass to cluster-stack.PrivateVSwitch2Id
+  PrivateVSwitch3Id:
+    Condition: HasZone3
+    Value: !Ref PrivateVSwitch3
+    Description: Third private VSwitch (ZoneId3) — pass to cluster-stack.PrivateVSwitch3Id (multi-AZ)
   PublicVSwitchId:
     Value: !Ref PublicVSwitch
     Description: Public VSwitch — referenced by future workloads, not by cluster-stack
@@ -696,6 +777,10 @@ Outputs:
   ZoneId2:
     Value: !Ref ZoneId2
     Description: Pass through to cluster-stack.ZoneId2
+  ZoneId3:
+    Condition: HasZone3
+    Value: !Ref ZoneId3
+    Description: Pass through to cluster-stack.ZoneId3 (multi-AZ)
   NodeRamRoleName:
     Value: !Ref NodeRamRole
     Description: RAM role name — pass to cluster-stack.NodeRamRoleName

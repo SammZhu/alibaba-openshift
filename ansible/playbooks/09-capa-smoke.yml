@@ -142,24 +142,36 @@
         _capa_repo: "{{ capa_smoke_image.split(':')[:-1] | join(':') }}"
         _capa_tag: "{{ capa_smoke_image.split(':') | last }}"
 
-    - name: Read the ImageDigestMirrorSet map
+    # The CAPA provider repo (quay.io/samzhu/openshift-capi-alicloud) is
+    # tag-pinned, so 08 redirects it via an ImageTagMirrorSet (ITMS), NOT the
+    # install-config ImageDigestMirrorSet (IDMS, which only carries the two
+    # digest-mirrored release repos).  Read BOTH and resolve the mirror from
+    # whichever holds this source (digest- or tag-mirrored).
+    - name: Read the image mirror sets (IDMS + ITMS)
       ansible.builtin.command:
-        argv: [oc, "--kubeconfig", /root/kubeconfig, get, imagedigestmirrorset, -o, json]
-      register: _idms_json
+        argv: [oc, "--kubeconfig", /root/kubeconfig, get, "imagedigestmirrorset,imagetagmirrorset", -o, json]
+      register: _mirror_sets_json
       changed_when: false
 
-    - name: Resolve the mirror for the controller image repo (from IDMS)
+    - name: Collect all spec blocks
+      ansible.builtin.set_fact:
+        _mirror_specs: "{{ (_mirror_sets_json.stdout | from_json)['items'] | map(attribute='spec') | list }}"
+
+    - name: Resolve the mirror for the controller image repo (IDMS or ITMS)
       ansible.builtin.set_fact:
         _capa_mirror: >-
-          {{ (_idms_json.stdout | from_json)['items']
-             | map(attribute='spec') | map(attribute='imageDigestMirrors') | flatten
+          {{ ( (_mirror_specs | map(attribute='imageDigestMirrors', default=[]) | flatten)
+             + (_mirror_specs | map(attribute='imageTagMirrors',    default=[]) | flatten) )
              | selectattr('source', 'equalto', _capa_repo)
-             | map(attribute='mirrors') | flatten | first }}
+             | map(attribute='mirrors') | flatten | first | default('') }}
 
     - name: Assert a mirror exists for the controller image repo
       ansible.builtin.assert:
         that: _capa_mirror | default('') | trim | length > 0
-        fail_msg: "No IDMS mirror found for {{ _capa_repo }} — push the image into the mirror first."
+        fail_msg: >-
+          No IDMS/ITMS mirror found for {{ _capa_repo }}.  Run 08-deploy-post-install.yml
+          first (it applies the samzhu-tag-mirror ITMS) and ensure the image was
+          pushed into the mirror.
 
     - name: Extract the cluster pull secret (mirror auth for oc image info)
       ansible.builtin.command:

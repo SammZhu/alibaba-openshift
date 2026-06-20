@@ -43,12 +43,32 @@ Parameters:
   PrivateVSwitch2Id:
     Type: String
     Description: Secondary private VSwitch (zone2) — from mirror-stack PrivateVSwitch2Id
+  PrivateVSwitch3Id:
+    Type: String
+    Default: ""
+    Description: |
+      Third private VSwitch (zone3) — from mirror-stack PrivateVSwitch3Id.
+      Agent-based multi-AZ only (master-3 in zone3); empty for Assisted / single-AZ.
   ZoneId:
     Type: String
     Description: Primary zone — from mirror-stack ZoneId
   ZoneId2:
     Type: String
     Description: Secondary zone — from mirror-stack ZoneId2
+  ZoneId3:
+    Type: String
+    Default: ""
+    Description: Third zone — from mirror-stack ZoneId3 (Agent-based multi-AZ; only consulted when EnableZone3=true)
+  EnableZone3:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: |
+      "true" -> Agent-based multi-AZ: place master-3 in zone3 (PrivateVSwitch3Id)
+      and add the zone3 NLB ZoneMapping + reverse PrivateZone.  06 sets this to
+      "true" only when the mirror stack actually has a third VSwitch.
+      Positive boolean because Aliyun ROS's Fn::Not is broken (see the
+      EnableJumpHostSsh note above; re-verified 2026-06-20 via PreviewStack).
   NodeRamRoleName:
     Type: String
     Default: openshift-node-role
@@ -107,6 +127,15 @@ Parameters:
     Type: Number
     Default: 0
     MinValue: 0
+  EnableWorkers:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: |
+      "true" -> create the ROS worker InstanceGroup (ComputeCount replicas).
+      06 sets this from ComputeCount > 0.  Positive boolean because Aliyun ROS's
+      Fn::Not is broken (see EnableZone3).  Note: this project normally runs
+      compute_count=0 and adds workers via CAPA (phase 12), so this stays false.
   ComputeInstanceType:
     Type: String
     Default: ecs.c7.xlarge
@@ -134,33 +163,41 @@ Parameters:
   ImageId:
     Type: String
     Description: |
-      Custom ECS image ID imported from the OpenShift Discovery ISO.
-      Produced by ansible Phase 02 (02-import-image.yml).
+      ECS image the control-plane instances boot from.
+
+      Assisted: the custom image imported from the discovery ISO (Phase 02).
+
+      Agent-based (ENI-first via reimage): on the FIRST create this is a
+      throwaway *placeholder* system image — the instances come up with their
+      fixed IPs + auto primary ENIs so we can harvest the ENI MACs (which feed
+      agent-config hosts[] -> deterministic hostnames).  After the agent image
+      is built, a stack UPDATE swaps ImageId to it; ROS performs an in-place
+      ReplaceSystemDisk (an "interruption", not a replacement), so each
+      instance keeps its primary ENI + MAC + fixed IP and reboots into the
+      agent image to self-install.
 
   RendezvousIp:
     Type: String
-    Default: 10.0.32.5
+    Default: 10.0.16.5
     Description: |
       Agent-based only.  Fixed private IP for the rendezvous node (master-1).
-      Must live inside the VSwitch matching the master placement (all
-      3 masters live in PrivateVSwitch2 / zone2 by default, so the
-      rendezvous IP must fall within PrivateSubnetCidr2 — typically
-      10.0.32.0/20).
+      Multi-AZ layout: master-1 lives in zone1 (PrivateVSwitchId / PrivateSubnetCidr,
+      10.0.16.0/20), so the rendezvous IP must fall there (e.g. 10.0.16.5,
+      alongside the mirror ECS at 10.0.16.4).
 
   Master2Ip:
     Type: String
     Default: 10.0.32.6
     Description: |
-      Agent-based only.  Fixed private IP for master-2 (must be in the
-      same VSwitch/subnet as RendezvousIp — PrivateSubnetCidr2).  The
-      ABI static-NMState host inventory (agent-config.yaml hosts[]) pins
-      each master to its fixed IP, so all masters need a reserved address.
+      Agent-based only.  Fixed private IP for master-2 in zone2
+      (PrivateVSwitch2Id / PrivateSubnetCidr2, 10.0.32.0/20).
 
   Master3Ip:
     Type: String
-    Default: 10.0.32.7
+    Default: 10.0.48.7
     Description: |
-      Agent-based only.  Fixed private IP for master-3 (PrivateSubnetCidr2).
+      Agent-based only.  Fixed private IP for master-3 in zone3
+      (PrivateVSwitch3Id / PrivateSubnetCidr3, 10.0.48.0/20).
 
   IngressVip:
     Type: String
@@ -181,8 +218,15 @@ Parameters:
 Conditions:
   IsAgentBased: !Equals [!Ref InstallationMethod, Agent-based]
   IsAssisted:   !Equals [!Ref InstallationMethod, Assisted]
-  HasWorkers:   !Not [!Equals [!Ref ComputeCount, 0]]
+  # Positive boolean — Aliyun ROS's Fn::Not is broken (see EnableZone3/
+  # EnableJumpHostSsh).  06 sets EnableWorkers from ComputeCount > 0.
+  HasWorkers:   !Equals [!Ref EnableWorkers, "true"]
   HasJumpHost:  !Equals [!Ref EnableJumpHostSsh, "true"]
+  # Multi-AZ control plane (Agent-based): master-1/2/3 spread across zone1/2/3.
+  # True only when a third zone/VSwitch is supplied — i.e. the ABI multi-AZ path.
+  # Assisted keeps all masters in zone2 (zero regression).
+  # Positive boolean — Aliyun ROS's Fn::Not is broken (see EnableZone3 desc).
+  HasZone3:     !Equals [!Ref EnableZone3, "true"]
 
 Resources:
   # ── Security Groups ──────────────────────────────────────────────────────
@@ -220,6 +264,19 @@ Resources:
           PortRange: 443/443
           SourceCidrIp: !Ref VpcCidr
           Description: Ingress HTTPS (router-default hostNetwork on masters)
+        # Agent-based only: the rendezvous node runs assisted-service on 8090.
+        # Masters reach each other intra-SG by default, but the monitoring host
+        # — the mirror ECS (different SG) running `openshift-install agent
+        # wait-for`, and the jump host — is NOT, so without this the wait-for
+        # gets "Agent Rest API never initialized" even though the install
+        # succeeds.  Install-time only; assisted-service stops post-install.
+        - !If
+          - IsAgentBased
+          - IpProtocol: tcp
+            PortRange: 8090/8090
+            SourceCidrIp: !Ref VpcCidr
+            Description: Agent-based assisted-service API (install-time; wait-for from mirror/jump)
+          - !Ref 'ALIYUN::NoValue'
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
           Value: owned
@@ -307,6 +364,12 @@ Resources:
           VSwitchId: !Ref PrivateVSwitchId
         - ZoneId: !Ref ZoneId2
           VSwitchId: !Ref PrivateVSwitch2Id
+        # zone3 added for the Agent-based multi-AZ control plane (master-3).
+        - !If
+          - HasZone3
+          - ZoneId: !Ref ZoneId3
+            VSwitchId: !Ref PrivateVSwitch3Id
+          - !Ref 'ALIYUN::NoValue'
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
           Value: owned
@@ -440,7 +503,7 @@ Resources:
       ZoneId: !Ref PrivateZone
       Rr: etcd-0
       Type: A
-      Value: !GetAtt RendezvousInstance.PrivateIp
+      Value: !If [IsAgentBased, !Ref RendezvousIp, !GetAtt RendezvousInstance.PrivateIp]
       Ttl: 60
 
   EtcdRecord1:
@@ -450,7 +513,7 @@ Resources:
       ZoneId: !Ref PrivateZone
       Rr: etcd-1
       Type: A
-      Value: !GetAtt ControlPlaneInstance2.PrivateIp
+      Value: !If [IsAgentBased, !Ref Master2Ip, !GetAtt ControlPlaneInstance2.PrivateIp]
       Ttl: 60
 
   EtcdRecord2:
@@ -460,7 +523,7 @@ Resources:
       ZoneId: !Ref PrivateZone
       Rr: etcd-2
       Type: A
-      Value: !GetAtt ControlPlaneInstance3.PrivateIp
+      Value: !If [IsAgentBased, !Ref Master3Ip, !GetAtt ControlPlaneInstance3.PrivateIp]
       Ttl: 60
 
   # ── Reverse DNS zones (PTR records added by Phase 03 post-creation) ──────
@@ -492,24 +555,61 @@ Resources:
         - VpcId: !Ref VpcId
           RegionId: !Ref Region
 
-  # ── ECS Instances (all in zone2 to avoid c-series stockout in zone1) ─────
+  # Reverse zone for the multi-AZ master-3 subnet (10.0.48.0/20 -> 48.0.10.in-addr.arpa)
+  ReverseZone3:
+    Type: ALIYUN::PVTZ::Zone
+    Condition: HasZone3
+    Properties:
+      ZoneName: 48.0.10.in-addr.arpa
+
+  ReverseZone3VpcBinding:
+    Type: ALIYUN::PVTZ::ZoneVpcBinder
+    Condition: HasZone3
+    DependsOn: ReverseZone3
+    Properties:
+      ZoneId: !Ref ReverseZone3
+      Vpcs:
+        - VpcId: !Ref VpcId
+          RegionId: !Ref Region
+
+  # ── ECS Instances (Agent-based: multi-AZ master-1/2/3 in zone1/2/3; Assisted: all zone2) ─────
   # Serialised via DependsOn chain so ROS does not batch a single
   # RunInstances(Amount=2+) call that Aliyun cn-wulanchabu often rejects
   # atomically even when per-instance stock is available.
+  #
+  # ENI-first via reimage (Agent-based): phase-1 boots these from a placeholder
+  # ImageId with their fixed IPs (auto primary ENI); ansible harvests each auto
+  # ENI's MAC (GetAtt PrimaryNetworkInterfaceId -> DescribeNetworkInterfaces) to
+  # feed agent-config hosts[]; phase-2 UpdateStack swaps ImageId to the agent
+  # image -> in-place ReplaceSystemDisk keeps the ENI/MAC/IP and reboots into
+  # the agent image.  So the masters always carry their fixed PrivateIpAddress
+  # on the auto primary NIC -- no separate ENI resource, single NIC.
   RendezvousInstance:
     Type: ALIYUN::ECS::Instance
     Properties:
       InstanceName: !Sub '${ClusterName}-master-1'
+      # ABI only: gives RHCOS a real hostname via DHCP/IMDS instead of the
+      # MAC-derived fallback.  AI sets node names itself (requested_hostname),
+      # so leave it unset there to keep AI behaviour byte-for-byte unchanged.
+      HostName: !If [IsAgentBased, !Sub '${ClusterName}-master-1', !Ref 'ALIYUN::NoValue']
       InstanceType: !Ref ControlPlaneInstanceType
       ImageId: !Ref ImageId
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
-      VSwitchId: !Ref PrivateVSwitch2Id
+      # ABI multi-AZ: master-1 (rendezvous) in zone1.  Assisted: zone2 (unchanged).
+      VSwitchId: !If [IsAgentBased, !Ref PrivateVSwitchId, !Ref PrivateVSwitch2Id]
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
-      DiskMappings:
-        - Category: !Ref SystemDiskCategory
-          Size: !Ref InstallDiskSize
-          DiskName: !Sub '${ClusterName}-master-1-install'
+      # Agent-based: NO extra install disk.  The Alibaba ISO boot makes the agent
+      # ISO the system disk (/dev/vda); the minimal ISO runs its rootfs from RAM
+      # so /dev/vda is free, and with no second disk the assisted-installer
+      # installs RHCOS directly to /dev/vda -> reboot boots RHCOS (no vdb->vda
+      # clone hook needed).  Assisted keeps the /dev/vdb install disk + clone hook.
+      DiskMappings: !If
+        - IsAgentBased
+        - !Ref 'ALIYUN::NoValue'
+        - - Category: !Ref SystemDiskCategory
+            Size: !Ref InstallDiskSize
+            DiskName: !Sub '${ClusterName}-master-1-install'
       AllocatePublicIP: false
       PrivateIpAddress: !If [IsAgentBased, !Ref RendezvousIp, !Ref 'ALIYUN::NoValue']
       RamRoleName: !Ref NodeRamRoleName
@@ -524,16 +624,19 @@ Resources:
     DependsOn: RendezvousInstance
     Properties:
       InstanceName: !Sub '${ClusterName}-master-2'
+      HostName: !If [IsAgentBased, !Sub '${ClusterName}-master-2', !Ref 'ALIYUN::NoValue']
       InstanceType: !Ref ControlPlaneInstanceType
       ImageId: !Ref ImageId
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
       VSwitchId: !Ref PrivateVSwitch2Id
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
-      DiskMappings:
-        - Category: !Ref SystemDiskCategory
-          Size: !Ref InstallDiskSize
-          DiskName: !Sub '${ClusterName}-master-2-install'
+      DiskMappings: !If
+        - IsAgentBased
+        - !Ref 'ALIYUN::NoValue'
+        - - Category: !Ref SystemDiskCategory
+            Size: !Ref InstallDiskSize
+            DiskName: !Sub '${ClusterName}-master-2-install'
       AllocatePublicIP: false
       PrivateIpAddress: !If [IsAgentBased, !Ref Master2Ip, !Ref 'ALIYUN::NoValue']
       RamRoleName: !Ref NodeRamRoleName
@@ -548,16 +651,20 @@ Resources:
     DependsOn: ControlPlaneInstance2
     Properties:
       InstanceName: !Sub '${ClusterName}-master-3'
+      HostName: !If [IsAgentBased, !Sub '${ClusterName}-master-3', !Ref 'ALIYUN::NoValue']
       InstanceType: !Ref ControlPlaneInstanceType
       ImageId: !Ref ImageId
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
-      VSwitchId: !Ref PrivateVSwitch2Id
+      # ABI multi-AZ: master-3 in zone3.  Assisted: zone2 (unchanged).
+      VSwitchId: !If [IsAgentBased, !Ref PrivateVSwitch3Id, !Ref PrivateVSwitch2Id]
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
-      DiskMappings:
-        - Category: !Ref SystemDiskCategory
-          Size: !Ref InstallDiskSize
-          DiskName: !Sub '${ClusterName}-master-3-install'
+      DiskMappings: !If
+        - IsAgentBased
+        - !Ref 'ALIYUN::NoValue'
+        - - Category: !Ref SystemDiskCategory
+            Size: !Ref InstallDiskSize
+            DiskName: !Sub '${ClusterName}-master-3-install'
       AllocatePublicIP: false
       PrivateIpAddress: !If [IsAgentBased, !Ref Master3Ip, !Ref 'ALIYUN::NoValue']
       RamRoleName: !Ref NodeRamRoleName
@@ -600,6 +707,9 @@ Outputs:
     Value: !Sub '${ClusterName}.${BaseDomain}'
   RendezvousInstanceId:
     Value: !Ref RendezvousInstance
+  # Instances always exist (placeholder image at ABI phase-1, real image at AI
+  # create / ABI phase-2), so GetAtt PrivateIp is always valid.  For ABI these
+  # equal the fixed RendezvousIp/Master2Ip/Master3Ip params.
   MasterIp1:
     Value: !GetAtt RendezvousInstance.PrivateIp
   MasterIp2:
@@ -612,6 +722,22 @@ Outputs:
     Value: !Ref ReverseZone1
   ReverseZoneId2:
     Value: !Ref ReverseZone2
+  ReverseZoneId3:
+    Condition: HasZone3
+    Value: !Ref ReverseZone3
+    Description: Reverse zone for 10.0.48.0/20 (multi-AZ master-3 PTR)
+  # Agent-based ENI-first via reimage: the auto primary-ENI id of each master,
+  # harvested at phase-1 (ImageId=placeholder) and resolved to a MAC by ansible
+  # (DescribeNetworkInterfaces) to feed agent-config hosts[] (MAC -> hostname).
+  Master1PrimaryNic:
+    Condition: IsAgentBased
+    Value: !GetAtt RendezvousInstance.PrimaryNetworkInterfaceId
+  Master2PrimaryNic:
+    Condition: IsAgentBased
+    Value: !GetAtt ControlPlaneInstance2.PrimaryNetworkInterfaceId
+  Master3PrimaryNic:
+    Condition: IsAgentBased
+    Value: !GetAtt ControlPlaneInstance3.PrimaryNetworkInterfaceId
   InstallConfig:
     Description: install-config.yaml (paste into Red Hat console or save for agent-create)
     Value: !Sub |

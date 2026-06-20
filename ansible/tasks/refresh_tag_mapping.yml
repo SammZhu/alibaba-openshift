@@ -36,7 +36,13 @@
     method: GET
     headers: { Authorization: "Bearer {{ ai_access_token }}" }
     return_content: true
+    status_code: 200
   register: _ai_versions
+  # api.openshift.com is cross-border-flaky right now (intermittent "Connection
+  # reset by peer", status -1).  Retry instead of failing the whole 04 run.
+  retries: 6
+  delay: 15
+  until: _ai_versions.status == 200
 
 - name: Read Red Hat pull secret (for skopeo registry.redhat.io creds)
   ansible.builtin.slurp:
@@ -65,6 +71,12 @@
   register: _skopeo_results
   changed_when: false
   no_log: true   # creds are in argv
+  # registry.redhat.io (AWS us-east-1) is intermittently unreachable from the
+  # operator host (cross-border TLS stalls -> rc!=0); a transient blip must not
+  # fail the whole run.  Same resilience the relay skopeo-copy already has.
+  retries: 6
+  delay: 15
+  until: _skopeo_results.rc == 0
 
 - name: Build tag-mapping.tsv (repo<TAB>tag<TAB>digest)
   ansible.builtin.copy:

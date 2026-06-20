@@ -1,0 +1,27 @@
+---
+# Phase 06a (Agent-based) — render install-config + agent-config and build the
+# agent ISO via `openshift-install agent create image` (on the mirror ECS), then
+# import it to an ECS image.
+#
+# ABI's ISO-build step (the Assisted-only equivalent is 01-prepare-iso.yml).
+# Invoked by site-agent.yml AFTER 03/04/05 (mirror) AND AFTER 06 phase-1, which
+# booted the masters on a placeholder image and harvested their primary-ENI MACs
+# into state.  agent-config hosts[] then binds each MAC -> hostname (deterministic
+# node names incl. the rendezvous).  06b then reimages the masters to the image
+# this builds.  The Assisted playbook is left untouched (zero AI regression).
+- name: Build OpenShift agent ISO + import image (Agent-based Installer)
+  hosts: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
+    - ansible.builtin.include_tasks: ../tasks/mirror_defaults.yml
+
+    - name: Assert installation_method is agent
+      ansible.builtin.assert:
+        that: installation_method | default('assisted') | lower in ['agent', 'agent-based']
+        fail_msg: >-
+          06a-build-agent-iso.yml is for installation_method=agent.
+          Use 01-prepare-iso.yml (via site.yml) for the Assisted Installer.
+
+    - ansible.builtin.include_tasks: ../tasks/iso_agent.yml

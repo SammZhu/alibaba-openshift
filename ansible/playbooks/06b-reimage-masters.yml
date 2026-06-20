@@ -1,0 +1,92 @@
+---
+# Phase 06b — Agent-based ENI-first phase-2: reimage masters to the agent image.
+#
+# Runs AFTER 06a-build-agent-iso.yml has built + imported the agent image.
+# 06 (phase-1) created the cluster-stack and booted the 3 masters from a
+# PLACEHOLDER system image with their fixed IPs (auto primary ENIs), and
+# harvested those ENIs' MACs into state (which 06a baked into agent-config
+# hosts[]).  This playbook re-submits the SAME stack with ImageId=ecs_image_id
+# via UpdateStack; ROS performs an in-place ReplaceSystemDisk on each master
+# (an "interruption", not a replacement), so each instance KEEPS its primary
+# ENI + MAC + fixed IP and reboots into the agent image to self-install — so the
+# MACs in agent-config hosts[] match the booting nodes → deterministic
+# hostnames, including the rendezvous/node-zero.
+#
+# Agent-based ONLY.  The Assisted path never runs this (06 boots the real image
+# in one shot because it already has it).
+
+- name: Reimage control-plane masters to the agent image (ABI ENI-first phase-2)
+  hosts: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
+    - ansible.builtin.include_tasks: ../tasks/mirror_defaults.yml
+
+    - name: Guard — Agent-based only
+      ansible.builtin.assert:
+        that:
+          - installation_method | default('Assisted') | lower in ['agent', 'agent-based']
+        fail_msg: "06b is Agent-based only; the Assisted path creates instances in 06."
+
+    - name: Sanity — phase-1 stack + agent image present
+      ansible.builtin.assert:
+        that:
+          - cluster_stack_id is defined and cluster_stack_id | length > 0
+          - ecs_image_id is defined and ecs_image_id | length > 0
+        fail_msg: |
+          Need both the phase-1 cluster_stack_id (run 06-create-cluster-stack.yml)
+          and ecs_image_id (run 06a-build-agent-iso.yml) in state.yml first.
+
+    - name: Read SSH public key (informational; RHCOS gets keys via ignition)
+      ansible.builtin.slurp:
+        src: "{{ ssh_pub_key_file }}"
+      register: _ssh_pub_slurp
+
+    - name: Resolve effective control-plane / compute counts per cluster_topology
+      ansible.builtin.set_fact:
+        _effective_control_plane_count: "{{ 1 if (cluster_topology | default('ha')) == 'sno' else (control_plane_count | int) }}"
+        _effective_compute_count: "{{ 0 if (cluster_topology | default('ha')) == 'sno' else (compute_count | int) }}"
+
+    - name: Resolve ROS template path per cluster_topology
+      ansible.builtin.set_fact:
+        _cs_template_file: >-
+          {{ 'cluster-stack-sno.yaml'
+             if (cluster_topology | default('ha')) == 'sno'
+             else 'cluster-stack.yaml' }}
+
+    # Same parameters as the phase-1 create, but ImageId now = the agent image.
+    # Only ImageId changes → ROS reimages each master in place (keeps ENI/MAC/IP).
+    - name: Build cluster-stack Parameters with the agent ImageId
+      ansible.builtin.include_tasks: ../tasks/cluster_stack_params.yml
+      vars:
+        cluster_stack_image_id: "{{ ecs_image_id }}"
+
+    - name: UpdateStack — reimage masters to the agent image (in-place)
+      ansible.builtin.include_tasks: ../tasks/update_stack.yml
+      vars:
+        _cs_stack_name: "{{ cluster_name }}-cluster"
+        _cs_stack_id: "{{ cluster_stack_id }}"
+        _cs_template_path: "{{ repo_root }}/ros-templates/{{ _cs_template_file }}"
+        _cs_parameters: "{{ _cluster_stack_params }}"
+
+    - name: Map refreshed outputs to facts
+      ansible.builtin.set_fact:
+        api_lb_endpoint:  "{{ (_cs_outputs | selectattr('OutputKey','equalto','ApiLBEndpoint') | first).OutputValue }}"
+        master_ip1:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp1')     | first).OutputValue }}"
+        master_ip2:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp2')     | first).OutputValue }}"
+        master_ip3:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp3')     | first).OutputValue }}"
+
+    - name: Persist refreshed endpoint to state
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        new_state:
+          api_lb_endpoint: "{{ api_lb_endpoint }}"
+
+    - name: Phase 06b done
+      ansible.builtin.debug:
+        msg: |
+          ✓ Masters reimaged to the agent image (ENI/MAC/IP preserved).
+          Masters: {{ master_ip1 }} / {{ master_ip2 }} / {{ master_ip3 }}
+          Nodes reboot into the agent image and self-install.
+          Next: ansible-playbook ansible/playbooks/07-install-cluster-agent.yml

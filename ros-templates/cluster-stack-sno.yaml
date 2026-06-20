@@ -40,10 +40,24 @@ Parameters:
     Type: String
   PrivateVSwitch2Id:
     Type: String
+  # Accepted for parameter-compatibility with the shared cluster_stack_params
+  # task (multi-AZ is HA-only); unused by SNO.
+  PrivateVSwitch3Id:
+    Type: String
+    Default: ""
   ZoneId:
     Type: String
   ZoneId2:
     Type: String
+  ZoneId3:
+    Type: String
+    Default: ""
+  # Accepted but unused (SNO is single-node, no multi-AZ) — present so the shared
+  # cluster_stack_params can pass it without an "unknown parameter" rejection.
+  EnableZone3:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
   NodeRamRoleName:
     Type: String
     Default: openshift-node-role
@@ -79,6 +93,12 @@ Parameters:
     Default: 0
     AllowedValues: [0]
     Description: SNO has no separate workers.
+  # Accepted but unused (SNO has no workers) — present so the shared
+  # cluster_stack_params can pass it without an "unknown parameter" rejection.
+  EnableWorkers:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
   ComputeInstanceType:
     Type: String
     Default: ""

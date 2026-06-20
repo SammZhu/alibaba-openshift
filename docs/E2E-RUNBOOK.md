@@ -31,18 +31,67 @@ Assumed configuration:
 - `installation_method: Assisted` (this runbook covers the Assisted path via
   `site.yml`).  The **Agent-based Installer (ABI)** is also supported via
   `site-agent.yml` (`installation_method: Agent-based`) — fully air-gapped, no
-  assisted-service dependency.  ABI uses **fixed-IP-via-DHCP** (the ROS stack
-  pins the master IPs, the VPC's cloud DHCP delivers them) with an empty
-  `agent-config` `hosts[]` — confirmed via `scripts/abi-eni-spike.sh` that this
-  is the clean Alibaba path (static NMState would force a MAC circular
-  dependency).  The agent ISO is built **on the mirror ECS** (in-VPC): the
-  operator host only renders the configs and orchestrates over ssh; the mirror
-  ECS runs `openshift-install agent create image` (release pulled from its own
-  localhost:8443), injects the clone-vdb-to-vda hook into the live ignition via
-  coreos-installer (podman: show -> jq-merge -> embed --force), then uploads the
-  ISO to OSS (internal endpoint) + `ImportImage` via its instance RAM role — all
-  in-VPC.  So the **mirror** must be up before ABI runs; the operator host needs
-  only ssh/scp + jq.  Live HA validation pending.
+  assisted-service dependency.
+
+  **ABI network model — ENI-first via reimage (MAC↔hostname binding).**  For
+  deterministic node names (including the rendezvous/node-zero, which an earlier
+  DHCP-only + empty-`hosts[]` attempt left named after its MAC) the agent-config
+  `hosts[]` binds each master's primary-ENI MAC → hostname, so the MACs must be
+  known *before* the ISO is built.  ROS can't attach a pre-created ENI as an
+  instance's primary NIC, so the cluster-stack is built in two phases:
+    1. **06** (phase-1) creates the SGs/NLB/DNS and boots the 3 masters from a
+       throwaway **placeholder** system image (Alibaba Cloud Linux; override via
+       `abi_placeholder_image_id`) with their fixed IPs → auto primary ENIs.  It
+       harvests each master's primary-ENI MAC into `state.yml`
+       (`PrimaryNetworkInterfaceId` output → `DescribeNetworkInterfaces`).
+    2. **06a** (`06a-build-agent-iso`) builds the agent ISO with `agent-config`
+       `hosts[]` binding each MAC → `<cluster>-master-N` (+ `rootDeviceHints:
+       /dev/vda`), then imports it to an ECS image (`ecs_image_id`).
+    3. **06b** (`06b-reimage-masters`) `UpdateStack`s the cluster-stack with
+       `ImageId = ecs_image_id`; ROS applies it as an in-place
+       **ReplaceSystemDisk** (an "interruption", not a replacement) so each
+       master keeps its ENI/MAC/IP and reboots into the agent image to install.
+    4. **07** (`07-install-cluster-agent`) monitors via `openshift-install agent
+       wait-for`, rewrites `*.apps`, and harvests the kubeconfig.
+  Masters install **straight to `/dev/vda`** (no `vdb`, no clone hook): the
+  minimal agent ISO runs its rootfs from RAM.
+
+  **Multi-AZ control plane (ABI).**  ABI spreads the 3 masters one-per-AZ for
+  real HA: master-1 in `zone` (`PrivateVSwitchId`, 10.0.16.0/20, alongside the
+  mirror), master-2 in `zone2` (`PrivateVSwitch2Id`, 10.0.32.0/20), master-3 in
+  `zone3` (`PrivateVSwitch3Id`, 10.0.48.0/20).  The mirror-stack creates the 3rd
+  VSwitch only when `zone3` is set (Condition `HasZone3`); the cluster-stack gates
+  the per-master VSwitch + NLB zone3 mapping + `48.0.10.in-addr.arpa` reverse zone
+  on `IsAgentBased`/`HasZone3`.  **Assisted stays all-zone2 (zero regression).**
+  Set in `group_vars/all.yml`: `zone3: cn-wulanchabu-c`,
+  `private_subnet_cidr3: 10.0.48.0/20`, `rendezvous_ip: 10.0.16.5` (master-1 in
+  zone1; master-2/3 use the ROS defaults 10.0.32.6 / 10.0.48.7).  capa-worker's
+  dynamic /24 allocator (phase 12) runs after the mirror stack and skips
+  10.0.48.0/20, taking 10.0.64.0/24+.
+  > **Tradeoff:** real HA, but if the control-plane instance type is temporarily
+  > out of stock in *any* of the 3 zones at create time, the whole stack create
+  > fails (all-zone2 was the stock-safe fallback).  Verify stock first:
+  > `aliyun ecs DescribeAvailableResource --DestinationResource InstanceType
+  > --InstanceType <type> --ZoneId <zone>`.
+
+  **Air-gap.** The External-platform agent ISO is always *minimal* and fetches
+  its ~1 GB rootfs over HTTP; `agent-config bootArtifactsBaseURL` points at an
+  in-VPC HTTP server on the mirror ECS (`:8080`), so no public rhcos mirror.
+  The ISO is built **on the mirror ECS** (in-VPC): the operator host only
+  renders configs + orchestrates over ssh; the mirror ECS runs
+  `openshift-install agent create image` (release pulled from its own
+  `localhost:8443`), uploads to OSS (internal endpoint) + `ImportImage` via its
+  instance RAM role.  So the **mirror** must be up before ABI runs.
+
+  **Monitoring.** 07 is the authoritative ABI monitor: `openshift-install agent
+  wait-for bootstrap-complete` then `... install-complete` on the mirror ECS,
+  launched backgrounded (`poll: 0`, tracked via `async_status` → a meaningful
+  "(N retries left)" countdown, full output dumped on completion).  For a fully
+  streaming view run `scripts/abi-monitor.sh` in a second terminal (same
+  `agent wait-for`).  Needs the cluster-stack SG to allow `:8090` from the VPC
+  CIDR (the template adds this for Agent-based).  Live HA install validated
+  end-to-end 2026-06-19 (3 nodes Ready incl. rendezvous=`<cluster>-master-1`,
+  34/34 cluster operators Available).
 - compact 3-node (`compute_count: 0`) — workers schedule on masters
 
 ---
