@@ -164,8 +164,6 @@ Conditions:
   HasJumpHost: !Equals [!Ref EnableJumpHost, true]
   HasOverrideImage: !Not [!Equals [!Ref MirrorOverrideImageId, ""]]
   HasDataSnapshot:  !Not [!Equals [!Ref MirrorDataDiskSnapshotId, ""]]
-
-Conditions:
   # Third private VSwitch only when ZoneId3 is supplied (Agent-based multi-AZ).
   HasZone3: !Not [!Equals [!Ref ZoneId3, ""]]
 
