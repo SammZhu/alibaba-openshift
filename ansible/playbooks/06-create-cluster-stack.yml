@@ -179,6 +179,50 @@
         _effective_control_plane_count: "{{ 1 if (cluster_topology | default('ha')) == 'sno' else (control_plane_count | int) }}"
         _effective_compute_count: "{{ 0 if (cluster_topology | default('ha')) == 'sno' else (compute_count | int) }}"
 
+    # ABI preflight on control_plane_type — fail fast (before the ~30-min ISO
+    # build + reimage) on the two instance-type traps hit live 2026-06-21:
+    #   (a) too few cores: the agent install requires 8 for SNO (single node runs
+    #       everything), 4 for a multi-node master.
+    #   (b) NVMe-required types (gen-8 c8i/g8i/c8a): reimage to the virtio-only
+    #       RHCOS agent image fails "requires NVMe but the image does not support
+    #       NVMe".  Need NvmeSupport != required (gen-6/7 = unsupported = virtio).
+    # (Zone availability — e.g. g7.2xlarge not offered in cn-wulanchabu-a — is not
+    #  checked here; PreviewStack is authoritative for that.)
+    - name: ABI — describe control-plane instance type (cores + NVMe)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeInstanceTypes
+          - --RegionId
+          - "{{ region }}"
+          - --InstanceTypes.1
+          - "{{ control_plane_type }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _abi_cp_itype
+      changed_when: false
+      when: _is_abi | bool
+
+    - name: ABI — assert control-plane instance type fits the role (cores + non-NVMe)
+      vars:
+        _abi_it: "{{ (_abi_cp_itype.stdout | from_json).InstanceTypes.InstanceType[0] }}"
+        _abi_min_cores: "{{ 8 if (cluster_topology | default('ha')) == 'sno' else 4 }}"
+      ansible.builtin.assert:
+        that:
+          - _abi_it.CpuCoreCount | int >= (_abi_min_cores | int)
+          - (_abi_it.NvmeSupport | default('unsupported')) != 'required'
+        fail_msg: |
+          control_plane_type {{ control_plane_type }} is unsuitable for ABI
+          {{ 'SNO' if (cluster_topology | default('ha')) == 'sno' else 'HA' }}:
+            cores={{ _abi_it.CpuCoreCount }} (need >= {{ _abi_min_cores }}),
+            NvmeSupport={{ _abi_it.NvmeSupport | default('?') }} (must NOT be 'required';
+            the RHCOS agent image is virtio-only).
+          Use a gen-6/7 type with enough cores — e.g. ecs.g6.2xlarge (8/32) or
+          ecs.c7.2xlarge (8/16) for SNO; ecs.g7.xlarge (4/16) for HA multi-AZ.
+          Also confirm it builds in the master's zone (PreviewStack).
+      when: _is_abi | bool
+
     - name: Build cluster-stack Parameters (ABI phase-1 uses placeholder ImageId)
       ansible.builtin.include_tasks: ../tasks/cluster_stack_params.yml
       vars:
@@ -226,12 +270,16 @@
     # image so their auto primary ENIs now exist.  Resolve each primary-NIC id
     # (stack output) to its MAC, then feed the MACs into agent-config hosts[] at
     # 01 (MAC -> hostname binding).  This is why 06 runs before 01 for ABI.
-    - name: ABI — collect master primary-NIC ids from stack outputs
+    # Count-aware (SNO=1, HA=3): build the primary-NIC id list by looping over the
+    # effective control-plane count and picking Master{N}PrimaryNic.  The old hard
+    # 3-way list broke SNO ("No first item" — Master2/3PrimaryNic don't exist).
+    - name: ABI — collect master primary-NIC ids from stack outputs (count-aware)
       ansible.builtin.set_fact:
-        _abi_nic_ids:
-          - "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master1PrimaryNic') | first).OutputValue }}"
-          - "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master2PrimaryNic') | first).OutputValue }}"
-          - "{{ (_cs_outputs | selectattr('OutputKey','equalto','Master3PrimaryNic') | first).OutputValue }}"
+        _abi_nic_ids: >-
+          {{ _abi_nic_ids | default([])
+             + [ (_cs_outputs | selectattr('OutputKey','equalto', 'Master' ~ item ~ 'PrimaryNic')
+                  | map(attribute='OutputValue') | first) ] }}
+      loop: "{{ range(1, (_effective_control_plane_count | int) + 1) | list }}"
       when: _is_abi | bool
 
     - name: ABI — resolve each primary NIC to its MAC
@@ -251,17 +299,29 @@
       loop: "{{ _abi_nic_ids | default([]) }}"
       when: _is_abi | bool
 
-    - name: ABI — set master MAC facts
+    - name: ABI — set master MAC list (ordered, length = control-plane count)
       ansible.builtin.set_fact:
-        master_mac1: "{{ (_abi_nic_desc.results[0].stdout | from_json).NetworkInterfaceSets.NetworkInterfaceSet[0].MacAddress }}"
-        master_mac2: "{{ (_abi_nic_desc.results[1].stdout | from_json).NetworkInterfaceSets.NetworkInterfaceSet[0].MacAddress }}"
-        master_mac3: "{{ (_abi_nic_desc.results[2].stdout | from_json).NetworkInterfaceSets.NetworkInterfaceSet[0].MacAddress }}"
+        abi_master_macs: >-
+          {{ _abi_nic_desc.results
+             | map(attribute='stdout') | map('from_json')
+             | map(attribute='NetworkInterfaceSets.NetworkInterfaceSet')
+             | map('first') | map(attribute='MacAddress') | list }}
       when: _is_abi | bool
 
-    - name: ABI — persist MACs + placeholder image to state (consumed by 01 / 06b)
+    # Back-compat individual facts (state/teardown still reference master_mac1/2/3);
+    # empty string for indices the topology doesn't have (SNO has only master_mac1).
+    - name: ABI — back-compat individual MAC facts
+      ansible.builtin.set_fact:
+        master_mac1: "{{ abi_master_macs[0] | default('') }}"
+        master_mac2: "{{ abi_master_macs[1] | default('') }}"
+        master_mac3: "{{ abi_master_macs[2] | default('') }}"
+      when: _is_abi | bool
+
+    - name: ABI — persist MACs + placeholder image to state (consumed by 06a / 06b)
       ansible.builtin.include_tasks: ../tasks/save_state.yml
       vars:
         new_state:
+          abi_master_macs: "{{ abi_master_macs }}"
           master_mac1: "{{ master_mac1 }}"
           master_mac2: "{{ master_mac2 }}"
           master_mac3: "{{ master_mac3 }}"

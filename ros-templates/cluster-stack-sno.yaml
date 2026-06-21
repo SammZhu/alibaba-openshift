@@ -173,6 +173,17 @@ Resources:
           PortRange: 30000/32767
           SourceCidrIp: !Ref VpcCidr
           Description: NodePort services (VPC-internal)
+        # Agent-based only: the rendezvous node runs assisted-service on 8090.
+        # The mirror ECS (different SG) running `openshift-install agent wait-for`
+        # is not intra-SG, so without this the wait-for gets "Cannot access
+        # Rendezvous Host". Install-time only; assisted-service stops post-install.
+        - !If
+          - IsAgentBased
+          - IpProtocol: tcp
+            PortRange: 8090/8090
+            SourceCidrIp: !Ref VpcCidr
+            Description: Agent-based assisted-service API (install-time; wait-for from mirror/jump)
+          - !Ref 'ALIYUN::NoValue'
       Tags:
         - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
           Value: owned
@@ -289,7 +300,11 @@ Resources:
       InstanceType: !Ref ControlPlaneInstanceType
       ImageId: !Ref ImageId
       SecurityGroupId: !Ref ControlPlaneSecurityGroup
-      VSwitchId: !Ref PrivateVSwitch2Id
+      # ABI: master goes in zone1 (PrivateVSwitchId, 10.0.16.x) to match the HA
+      # multi-AZ master-1 and the default rendezvous_ip (10.0.16.5) — so the fixed
+      # RendezvousIp falls in the master's subnet out of the box.  AI keeps zone2
+      # (PrivateVSwitch2Id, auto-allocated IP) — unchanged, zero regression.
+      VSwitchId: !If [IsAgentBased, !Ref PrivateVSwitchId, !Ref PrivateVSwitch2Id]
       SystemDiskCategory: !Ref SystemDiskCategory
       SystemDiskSize: !Ref SystemDiskSize
       DiskMappings:
@@ -316,6 +331,11 @@ Outputs:
     Value: !Sub '${ClusterName}.${BaseDomain}'
   RendezvousInstanceId:
     Value: !Ref RendezvousInstance
+  # ABI ENI-first: 06 reads this to resolve the master's primary-NIC MAC for the
+  # agent-config hosts[] MAC->hostname binding (same as HA Master1PrimaryNic).
+  Master1PrimaryNic:
+    Condition: IsAgentBased
+    Value: !GetAtt RendezvousInstance.PrimaryNetworkInterfaceId
   MasterIp1:
     Value: !GetAtt RendezvousInstance.PrivateIp
   MasterIp2:

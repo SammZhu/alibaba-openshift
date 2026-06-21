@@ -10,21 +10,10 @@ apiVersion: v1
 metadata:
   name: {{ cluster_name }}
 baseDomain: {{ base_domain }}
-# Bootstrap/discovery-phase NTP.  The chrony MachineConfig
-# (50-chrony-aliyun-internal-*) only takes effect AFTER the cluster is up (MCO),
-# so during discovery+bootstrap every node uses RHCOS's default (foreign) pool
-# servers — unreachable from China.  An egress-less AZ (e.g. the multi-AZ zone3
-# master-3, whose NAT SNAT entry was missing/late) then drifts +8h and fails the
-# bootstrap "Host clock is not synchronized" validation.  additionalNTPSources
-# points chrony at Alibaba Cloud INTERNAL NTP — reachable inside the VPC WITHOUT
-# any egress (like IMDS 100.100.100.200) — from the very first boot, so all AZs
-# keep correct time regardless of NAT.  100.100.5.1 is the literal internal NTP
-# IP (verified reachable), kept alongside the hostnames in case bootstrap DNS is
-# not yet up.
-additionalNTPSources:
-  - ntp.cloud.aliyuncs.com
-  - ntp1.cloud.aliyuncs.com
-  - 100.100.5.1
+# NOTE: bootstrap/discovery-phase NTP (Alibaba internal NTP) lives in
+# agent-config.yaml as additionalNTPSources — it is NOT a valid install-config
+# field (openshift-install rejects "unknown field additionalNTPSources" and the
+# agent asset store then panics in wait-for).
 networking:
   clusterNetwork:
     - cidr: 10.128.0.0/14

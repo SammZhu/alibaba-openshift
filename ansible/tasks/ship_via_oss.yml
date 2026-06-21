@@ -37,9 +37,15 @@
     _ship_sk: "{{ _ship_aksk.stdout.split(' ')[1] }}"
   no_log: true
 
+# run_cli: no_log (AK/SK in argv) + retries + surfaces the OSS error (stderr, no
+# secrets) on final failure — instead of an opaque "non-zero return code".
 - name: "ship_via_oss [{{ ship_object }}] — operator uploads to OSS (public endpoint)"
-  ansible.builtin.command:
-    argv:
+  ansible.builtin.include_tasks: ../tasks/run_cli.yml
+  vars:
+    rc_label: "OSS upload {{ ship_object }}"
+    rc_retries: 3
+    rc_delay: 15
+    rc_argv:
       - aliyun
       - oss
       - cp
@@ -50,23 +56,18 @@
       - "--access-key-secret={{ _ship_sk }}"
       - "--region={{ region }}"
       - "--endpoint={{ _ship_pub_endpoint }}"
-  register: _ship_up
-  retries: 3
-  delay: 15
-  until: _ship_up.rc == 0
-  changed_when: true
-  no_log: true   # AK/SK in argv
 
 - name: "ship_via_oss [{{ ship_object }}] — mirror pulls from OSS (internal endpoint, RAM role)"
-  ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'aliyun oss cp oss://{{ oss_bucket }}/{{ _ship_key }} {{ ship_remote }} -f
-    --mode=EcsRamRole --ecs-role-name "{{ _ship_mirror_role }}"
-    --region={{ region }} --endpoint={{ _ship_int_endpoint }}'
-  register: _ship_dl
-  retries: 3
-  delay: 15
-  until: _ship_dl.rc == 0
-  changed_when: true
+  ansible.builtin.include_tasks: ../tasks/run_cli.yml
+  vars:
+    rc_label: "OSS download {{ ship_object }} (mirror)"
+    rc_no_log: false        # RAM role — no secret in the command
+    rc_retries: 3
+    rc_delay: 15
+    rc_cmd: >-
+      {{ _ssh_root_mirror }} 'aliyun oss cp oss://{{ oss_bucket }}/{{ _ship_key }} {{ ship_remote }} -f
+      --mode=EcsRamRole --ecs-role-name "{{ _ship_mirror_role }}"
+      --region={{ region }} --endpoint={{ _ship_int_endpoint }}'
 
 - name: "ship_via_oss [{{ ship_object }}] — delete the OSS transit object"
   ansible.builtin.command:

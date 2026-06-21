@@ -34,6 +34,52 @@ No other changes needed — the ROS template's outputs are name-compatible
 with the HA template (MasterIp2/MasterIp3/WorkerSecurityGroup return
 empty strings).
 
+### Agent-based (ABI) SNO
+
+SNO also works air-gapped via the Agent-based Installer — set both knobs and
+run `site-agent.yml` instead of `site.yml`:
+
+```yaml
+# ansible/group_vars/all.yml
+cluster_topology:    sno
+installation_method: Agent-based
+rendezvous_ip:       10.0.16.5         # default is fine — see below
+control_plane_type:  ecs.g6.2xlarge   # 8 vCPU, NON-NVMe — see "instance type" below
+```
+
+```bash
+ansible-playbook -i inventory.yml playbooks/site-agent.yml
+```
+
+Same ENI-first/reimage flow as ABI HA, just one node: 06 boots the single master
+from a placeholder image and harvests its primary-NIC MAC, 06a bakes a one-host
+`agent-config.yaml` (`<cluster>-master-1`), 06b reimages it to the agent image in
+place. The count is driven by `cluster_topology` end to end
+(`_eff_control_plane_count=1`, `abi_master_macs` has one entry, the SNO template
+emits one `RendezvousInstance` + `Master1PrimaryNic`).
+
+The **ABI SNO master lands in zone1** (`PrivateVSwitchId`, 10.0.16.x) to match
+the HA multi-AZ master-1 and the default `rendezvous_ip: 10.0.16.5`, so the fixed
+rendezvous IP falls in the master's subnet with no extra config. (AI SNO keeps
+zone2 with an auto-allocated IP — unchanged.)
+
+**Instance type — `control_plane_type` must satisfy three constraints for ABI SNO**
+(06 preflight-asserts the first two; PreviewStack catches the third):
+- **≥ 8 vCPU** — the agent install requires 8 cores for SNO (single node runs the
+  whole control plane + workloads; multi-node masters only need 4, so the HA
+  default `ecs.g7.xlarge` is too small for SNO).
+- **non-NVMe** — the RHCOS agent image is virtio-only. Gen-8 types (`c8i`/`g8i`/
+  `c8a`, `NvmeSupport=required`) fail the 06b reimage with *"requires NVMe but the
+  image does not support NVMe"*. Use gen-6/7 (`NvmeSupport=unsupported`).
+- **available in the master's zone (zone1 / cn-wulanchabu-a)** — e.g. `ecs.g7.2xlarge`
+  is *not offered* in cn-wulanchabu-a even though it is 8-vCPU/non-NVMe.
+
+Verified-good for cn-wulanchabu zone1: **`ecs.g6.2xlarge`** (8 vCPU / 32 GB,
+recommended — RAM headroom for the all-in-one node) or `ecs.c7.2xlarge` (8/16).
+Check a candidate with:
+`aliyun ecs DescribeInstanceTypes --InstanceTypes.1 <type>` (CpuCoreCount,
+NvmeSupport) + an `aliyun ros PreviewStack` against cluster-stack-sno.yaml.
+
 ---
 
 ## 2. What SNO actually is

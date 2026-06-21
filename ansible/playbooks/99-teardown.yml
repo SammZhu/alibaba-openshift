@@ -360,6 +360,7 @@
               master_mac1: ''
               master_mac2: ''
               master_mac3: ''
+              abi_master_macs: []
               abi_placeholder_image_used: ''
               kubeconfig_path: ''
               # When cluster_includes_ai=true, also clear AI/image/iso fields

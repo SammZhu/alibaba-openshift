@@ -47,33 +47,68 @@
     print(json.loads(r.stdout)["StackId"])
     PYEOF
   register: _cs_update_result
+  # See create_stack.yml: keep no_log (params/template may carry secrets) but do
+  # not abort opaquely — surface the ROS stderr (no secrets) below.
   no_log: true
+  failed_when: false
 
 - name: "update_stack [{{ _cs_stack_name }}] — remove temp params file"
   ansible.builtin.file:
     path: "/tmp/{{ _cs_stack_name }}-update-params.json"
     state: absent
 
-- name: "update_stack [{{ _cs_stack_name }}] — poll until UPDATE_COMPLETE"
-  ansible.builtin.command:
-    argv:
-      - aliyun
-      - ros
-      - GetStack
-      - --RegionId
-      - "{{ region }}"
-      - --StackId
-      - "{{ _cs_stack_id }}"
-      - --profile
-      - "{{ aliyun_profile }}"
-  register: _cs_upoll
-  retries: 60
-  delay: 30
-  until: (_cs_upoll.stdout | from_json).Status in ['UPDATE_COMPLETE', 'CREATE_COMPLETE']
-  failed_when: (_cs_upoll.stdout | from_json).Status in
-               ['UPDATE_FAILED', 'UPDATE_ROLLBACK_FAILED', 'UPDATE_ROLLBACK_COMPLETE',
-                'CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE', 'DELETE_FAILED']
-  changed_when: false
+# Surface the UpdateStack ROS error (shared helper — see tasks/surface_failure.yml).
+- name: "update_stack [{{ _cs_stack_name }}] — surface UpdateStack error"
+  ansible.builtin.include_tasks: ../tasks/surface_failure.yml
+  vars:
+    sf_result: "{{ _cs_update_result }}"
+    sf_label: "UpdateStack '{{ _cs_stack_name }}'"
+
+- name: "update_stack [{{ _cs_stack_name }}] — poll until UPDATE_COMPLETE (+ explain on failure)"
+  block:
+    - name: "update_stack [{{ _cs_stack_name }}] — poll until UPDATE_COMPLETE"
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - GetStack
+          - --RegionId
+          - "{{ region }}"
+          - --StackId
+          - "{{ _cs_stack_id }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _cs_upoll
+      retries: 60
+      delay: 30
+      until: (_cs_upoll.stdout | from_json).Status in ['UPDATE_COMPLETE', 'CREATE_COMPLETE']
+      failed_when: (_cs_upoll.stdout | from_json).Status in
+                   ['UPDATE_FAILED', 'UPDATE_ROLLBACK_FAILED', 'UPDATE_ROLLBACK_COMPLETE',
+                    'CREATE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE', 'DELETE_FAILED']
+      changed_when: false
+  rescue:
+    # Per-resource UpdateStack failure (e.g. "requires NVMe but the image does not
+    # support NVMe") lives in the events, not the status — fetch + surface it.
+    - name: "update_stack [{{ _cs_stack_name }}] — fetch stack events for the failure reason"
+      ansible.builtin.command:
+        argv: [aliyun, ros, ListStackEvents, --RegionId, "{{ region }}",
+               --StackId, "{{ _cs_stack_id }}", --profile, "{{ aliyun_profile }}"]
+      register: _cs_uevs
+      changed_when: false
+      failed_when: false
+    - name: "update_stack [{{ _cs_stack_name }}] — surface failed-resource reasons + fail"
+      vars:
+        _failed: "{{ (_cs_uevs.stdout | default('{}') | from_json).Events | default([])
+                     | selectattr('Status','search','FAILED') | list }}"
+      ansible.builtin.fail:
+        msg: |
+          Stack '{{ _cs_stack_name }}' UpdateStack did not reach UPDATE_COMPLETE.
+          ── failed resources ──────────────────────────────────────
+          {% for e in _failed %}
+          {{ e.LogicalResourceId | default('?') }} ({{ e.ResourceType | default('?') }}): {{ e.StatusReason | default('') }}
+          {% endfor %}
+          {% if not _failed %}(no FAILED events returned; check the ROS console for {{ _cs_stack_id }}){% endif %}
+          ──────────────────────────────────────────────────────────
 
 - name: "update_stack [{{ _cs_stack_name }}] — extract refreshed outputs"
   ansible.builtin.set_fact:
