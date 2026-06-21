@@ -179,6 +179,50 @@
         _effective_control_plane_count: "{{ 1 if (cluster_topology | default('ha')) == 'sno' else (control_plane_count | int) }}"
         _effective_compute_count: "{{ 0 if (cluster_topology | default('ha')) == 'sno' else (compute_count | int) }}"
 
+    # ABI preflight on control_plane_type — fail fast (before the ~30-min ISO
+    # build + reimage) on the two instance-type traps hit live 2026-06-21:
+    #   (a) too few cores: the agent install requires 8 for SNO (single node runs
+    #       everything), 4 for a multi-node master.
+    #   (b) NVMe-required types (gen-8 c8i/g8i/c8a): reimage to the virtio-only
+    #       RHCOS agent image fails "requires NVMe but the image does not support
+    #       NVMe".  Need NvmeSupport != required (gen-6/7 = unsupported = virtio).
+    # (Zone availability — e.g. g7.2xlarge not offered in cn-wulanchabu-a — is not
+    #  checked here; PreviewStack is authoritative for that.)
+    - name: ABI — describe control-plane instance type (cores + NVMe)
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ecs
+          - DescribeInstanceTypes
+          - --RegionId
+          - "{{ region }}"
+          - --InstanceTypes.1
+          - "{{ control_plane_type }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _abi_cp_itype
+      changed_when: false
+      when: _is_abi | bool
+
+    - name: ABI — assert control-plane instance type fits the role (cores + non-NVMe)
+      vars:
+        _abi_it: "{{ (_abi_cp_itype.stdout | from_json).InstanceTypes.InstanceType[0] }}"
+        _abi_min_cores: "{{ 8 if (cluster_topology | default('ha')) == 'sno' else 4 }}"
+      ansible.builtin.assert:
+        that:
+          - _abi_it.CpuCoreCount | int >= (_abi_min_cores | int)
+          - (_abi_it.NvmeSupport | default('unsupported')) != 'required'
+        fail_msg: |
+          control_plane_type {{ control_plane_type }} is unsuitable for ABI
+          {{ 'SNO' if (cluster_topology | default('ha')) == 'sno' else 'HA' }}:
+            cores={{ _abi_it.CpuCoreCount }} (need >= {{ _abi_min_cores }}),
+            NvmeSupport={{ _abi_it.NvmeSupport | default('?') }} (must NOT be 'required';
+            the RHCOS agent image is virtio-only).
+          Use a gen-6/7 type with enough cores — e.g. ecs.g6.2xlarge (8/32) or
+          ecs.c7.2xlarge (8/16) for SNO; ecs.g7.xlarge (4/16) for HA multi-AZ.
+          Also confirm it builds in the master's zone (PreviewStack).
+      when: _is_abi | bool
+
     - name: Build cluster-stack Parameters (ABI phase-1 uses placeholder ImageId)
       ansible.builtin.include_tasks: ../tasks/cluster_stack_params.yml
       vars:
