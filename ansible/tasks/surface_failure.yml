@@ -15,15 +15,14 @@
 #   sf_label  : human label for the message (REQUIRED)
 
 - name: "surface_failure [{{ sf_label }}] — show stderr + fail on error"
+  # stderr ONLY: errors go to stderr; secrets (tokens etc.) often go to stdout, so
+  # we never surface stdout here.  For standard CLI tasks prefer tasks/run_cli.yml
+  # (bundled run + no_log + surface, argv-first) — this helper is for surfacing a
+  # command that the caller already ran inline (e.g. create_stack's python heredoc).
   ansible.builtin.fail:
     msg: |
       {{ sf_label }} failed (rc={{ sf_result.rc | default('?') }}).
       ── stderr ────────────────────────────────────────────────
       {{ sf_result.stderr | default('(no stderr captured)') | trim }}
       ──────────────────────────────────────────────────────────
-      {% if (sf_result.stdout | default('') | trim) %}
-      ── stdout (tail) ─────────────────────────────────────────
-      {{ (sf_result.stdout | default('')).split('\n')[-12:] | join('\n') }}
-      ──────────────────────────────────────────────────────────
-      {% endif %}
   when: (sf_result.rc | default(0) | int) != 0

@@ -1,0 +1,63 @@
+---
+# Robust no_log CLI runner — secrets protected AND errors always surfaced.
+# ONE include does run + no_log + failed_when:false + surface, so a caller cannot
+# misuse it (forgetting failed_when -> opaque abort; forgetting no_log -> leak).
+#
+# Caller sets EXACTLY ONE of rc_argv / rc_cmd:
+#   rc_label : human label for messages                                   (REQUIRED)
+#   rc_argv  : argv LIST — PREFERRED: no shell parsing, secrets stay discrete args
+#   rc_cmd   : shell string — only when argv can't express it (pipes / heredoc /
+#              ssh-wrapped commands)
+# Optional:
+#   rc_no_log      : default true.  Set false for non-secret commands.
+#   rc_changed     : changed_when value, default true.
+#   rc_retries     : retry the command until rc==0, default 1 (single shot).
+#   rc_delay       : seconds between retries, default 0.
+#   rc_show_stdout : default false.  Surface stdout too on failure — ONLY when the
+#                    command's stdout carries no secret (token-fetchers put the
+#                    secret on stdout, so the default is OFF; errors live on stderr).
+# Output: `rc` — the registered result; use rc.stdout / rc.rc on success.
+
+- name: "run_cli [{{ rc_label }}] — exec (argv)"
+  ansible.builtin.command:
+    argv: "{{ rc_argv }}"
+  register: _rc_argv
+  no_log: "{{ rc_no_log | default(true) }}"
+  failed_when: false              # never abort opaquely — surface below
+  changed_when: "{{ rc_changed | default(true) }}"
+  retries: "{{ rc_retries | default(1) }}"
+  delay: "{{ rc_delay | default(0) }}"
+  until: _rc_argv.rc == 0         # retry transient failures; last result drops to surface
+  when: rc_argv is defined
+
+- name: "run_cli [{{ rc_label }}] — exec (shell)"
+  ansible.builtin.shell: "{{ rc_cmd }}"
+  register: _rc_shell
+  no_log: "{{ rc_no_log | default(true) }}"
+  failed_when: false
+  changed_when: "{{ rc_changed | default(true) }}"
+  retries: "{{ rc_retries | default(1) }}"
+  delay: "{{ rc_delay | default(0) }}"
+  until: _rc_shell.rc == 0
+  when: rc_argv is not defined
+
+- name: "run_cli [{{ rc_label }}] — unify result"
+  ansible.builtin.set_fact:
+    rc: "{{ _rc_argv if (rc_argv is defined) else _rc_shell }}"
+  no_log: true          # rc may carry secret stdout — don't echo the whole dict
+
+- name: "run_cli [{{ rc_label }}] — surface stderr + fail on error"
+  # NOT no_log: prints rc.stderr only (CLI ErrorCode/Message — no secrets, which
+  # are in argv/files/stdout, not stderr).  stdout only if the caller opts in.
+  ansible.builtin.fail:
+    msg: |
+      {{ rc_label }} failed (rc={{ rc.rc | default('?') }}).
+      ── stderr ────────────────────────────────────────────────
+      {{ rc.stderr | default('(no stderr captured)') | trim }}
+      ──────────────────────────────────────────────────────────
+      {% if (rc_show_stdout | default(false)) and (rc.stdout | default('') | trim) %}
+      ── stdout (tail) ─────────────────────────────────────────
+      {{ (rc.stdout | default('')).split('\n')[-15:] | join('\n') }}
+      ──────────────────────────────────────────────────────────
+      {% endif %}
+  when: (rc.rc | default(0) | int) != 0
