@@ -1,0 +1,29 @@
+---
+# Reusable error-surfacing for a no_log command.  Pairs with running a
+# secret-bearing command as:  shell/command + no_log: true + failed_when: false
+# + register: <X>  — then `include_tasks surface_failure.yml` with sf_result=<X>.
+#
+# Why: no_log protects secrets in the command's argv/params/output, but also
+# hides the CLI stderr — so a failure shows only "non-zero return code".  This
+# task is NOT no_log and prints only stderr (the ROS/aliyun/oc/skopeo
+# ErrorCode/Message — no secrets, since secrets go via files/argv of the no_log
+# task, not here), then fails.  Resource-level errors that live in stack events
+# (not stderr) are surfaced by the caller instead (see create_stack.yml rescue).
+#
+# Caller sets:
+#   sf_result : the registered result of the no_log command (REQUIRED)
+#   sf_label  : human label for the message (REQUIRED)
+
+- name: "surface_failure [{{ sf_label }}] — show stderr + fail on error"
+  ansible.builtin.fail:
+    msg: |
+      {{ sf_label }} failed (rc={{ sf_result.rc | default('?') }}).
+      ── stderr ────────────────────────────────────────────────
+      {{ sf_result.stderr | default('(no stderr captured)') | trim }}
+      ──────────────────────────────────────────────────────────
+      {% if (sf_result.stdout | default('') | trim) %}
+      ── stdout (tail) ─────────────────────────────────────────
+      {{ (sf_result.stdout | default('')).split('\n')[-12:] | join('\n') }}
+      ──────────────────────────────────────────────────────────
+      {% endif %}
+  when: (sf_result.rc | default(0) | int) != 0

@@ -57,14 +57,12 @@
     path: "/tmp/{{ _cs_stack_name }}-update-params.json"
     state: absent
 
-- name: "update_stack [{{ _cs_stack_name }}] — surface UpdateStack ROS error + fail"
-  ansible.builtin.fail:
-    msg: |
-      UpdateStack '{{ _cs_stack_name }}' failed (rc={{ _cs_update_result.rc | default('?') }}).
-      ── ROS error ─────────────────────────────────────────────
-      {{ _cs_update_result.stderr | default('(no stderr captured)') | trim }}
-      ──────────────────────────────────────────────────────────
-  when: (_cs_update_result.rc | default(0) | int) != 0
+# Surface the UpdateStack ROS error (shared helper — see tasks/surface_failure.yml).
+- name: "update_stack [{{ _cs_stack_name }}] — surface UpdateStack error"
+  ansible.builtin.include_tasks: ../tasks/surface_failure.yml
+  vars:
+    sf_result: "{{ _cs_update_result }}"
+    sf_label: "UpdateStack '{{ _cs_stack_name }}'"
 
 - name: "update_stack [{{ _cs_stack_name }}] — poll until UPDATE_COMPLETE (+ explain on failure)"
   block:

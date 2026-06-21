@@ -111,18 +111,13 @@
     state: absent
   when: _cs_existing_stack.Status is not defined
 
-- name: "create_stack [{{ _cs_stack_name }}] — surface ROS error + fail"
-  # NOT no_log: prints the CLI stderr (the ROS ErrorCode/Message), which contains
-  # no secrets — the template/params went via a file, not argv.
-  ansible.builtin.fail:
-    msg: |
-      CreateStack '{{ _cs_stack_name }}' failed (rc={{ _cs_create_result.rc | default('?') }}).
-      ── ROS error ─────────────────────────────────────────────
-      {{ _cs_create_result.stderr | default('(no stderr captured)') | trim }}
-      ──────────────────────────────────────────────────────────
-  when:
-    - _cs_existing_stack.Status is not defined
-    - (_cs_create_result.rc | default(0) | int) != 0
+# Surface the CreateStack ROS error (shared helper — see tasks/surface_failure.yml).
+- name: "create_stack [{{ _cs_stack_name }}] — surface CreateStack error"
+  ansible.builtin.include_tasks: ../tasks/surface_failure.yml
+  vars:
+    sf_result: "{{ _cs_create_result }}"
+    sf_label: "CreateStack '{{ _cs_stack_name }}'"
+  when: _cs_existing_stack.Status is not defined
 
 - name: "create_stack [{{ _cs_stack_name }}] — capture stack ID"
   ansible.builtin.set_fact:
