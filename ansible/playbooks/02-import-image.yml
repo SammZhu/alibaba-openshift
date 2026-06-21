@@ -93,9 +93,15 @@
               | regex_replace('.*:\s*(\d+)', '\1')) | int }}
       when: oss_stat.rc == 0
 
+    # run_cli: the previous command had AK/SK in argv WITHOUT no_log (a leak on
+    # failure/-v) — run_cli no_logs the run + retries + surfaces the OSS error.
     - name: Upload ISO to OSS (skipped when size matches)
-      ansible.builtin.command:
-        argv:
+      ansible.builtin.include_tasks: ../tasks/run_cli.yml
+      vars:
+        rc_label: "OSS upload discovery ISO"
+        rc_retries: 3
+        rc_delay: 15
+        rc_argv:
           - aliyun
           - oss
           - cp
@@ -105,7 +111,6 @@
           - "--access-key-id={{ _oss_ak }}"
           - "--access-key-secret={{ _oss_sk }}"
           - -f
-      register: upload_result
       when: oss_stat.rc != 0 or (_remote_size | default(0) | int) != iso_stat.stat.size
 
     # ── Ensure RAM role for ECS→OSS import (first-time setup) ─────────────

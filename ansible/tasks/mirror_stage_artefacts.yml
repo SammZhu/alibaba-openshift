@@ -61,8 +61,12 @@
   when: _mr_oss_stat.rc != 0
 
 - name: Mirror — upload installer to OSS
-  ansible.builtin.command:
-    argv:
+  ansible.builtin.include_tasks: ../tasks/run_cli.yml
+  vars:
+    rc_label: "OSS upload mirror-registry installer"
+    rc_retries: 3
+    rc_delay: 15
+    rc_argv:
       - aliyun
       - oss
       - cp
@@ -75,7 +79,6 @@
       - "--parallel=10"
       - "--force"
   when: _mr_oss_stat.rc != 0
-  no_log: true
 
 - name: Mirror — write local version-marker file
   ansible.builtin.copy:
@@ -84,8 +87,10 @@
     mode: "0644"
 
 - name: Mirror — upload version marker to OSS (always; cheap; cloud-init reads it)
-  ansible.builtin.command:
-    argv:
+  ansible.builtin.include_tasks: ../tasks/run_cli.yml
+  vars:
+    rc_label: "OSS upload mirror-registry-version marker"
+    rc_argv:
       - aliyun
       - oss
       - cp
@@ -95,7 +100,6 @@
       - "--access-key-id={{ _oss_ak }}"
       - "--access-key-secret={{ _oss_sk }}"
       - "--force"
-  no_log: true
 
 # ── Also stage the OpenShift patch version marker ─────────────────────────────
 # Cloud-init constructs the versioned URL for oc + oc-mirror download.  The
@@ -149,8 +153,10 @@
     mode: "0644"
 
 - name: Mirror — upload OpenShift patch version marker to OSS
-  ansible.builtin.command:
-    argv:
+  ansible.builtin.include_tasks: ../tasks/run_cli.yml
+  vars:
+    rc_label: "OSS upload openshift-patch-version marker"
+    rc_argv:
       - aliyun
       - oss
       - cp
@@ -160,7 +166,6 @@
       - "--access-key-id={{ _oss_ak }}"
       - "--access-key-secret={{ _oss_sk }}"
       - "--force"
-  no_log: true
 
 - name: Mirror — report staged artefacts
   ansible.builtin.debug:
