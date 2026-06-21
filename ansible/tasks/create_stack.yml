@@ -97,13 +97,32 @@
     PYEOF
   register: _cs_create_result
   when: _cs_existing_stack.Status is not defined
+  # no_log protects the params/template (may carry SshPrivateKey etc.).  We do NOT
+  # abort here: instead capture the result and surface the ROS error (stderr only,
+  # which carries no secrets) in the next task — otherwise a failed CreateStack
+  # shows only "non-zero return code" and the real reason (e.g. "InstanceType ...
+  # not support in the zone", "requires NVMe", "Invalid condition") is hidden.
   no_log: true
+  failed_when: false
 
 - name: "create_stack [{{ _cs_stack_name }}] — remove temp params file"
   ansible.builtin.file:
     path: "/tmp/{{ _cs_stack_name }}-params.json"
     state: absent
   when: _cs_existing_stack.Status is not defined
+
+- name: "create_stack [{{ _cs_stack_name }}] — surface ROS error + fail"
+  # NOT no_log: prints the CLI stderr (the ROS ErrorCode/Message), which contains
+  # no secrets — the template/params went via a file, not argv.
+  ansible.builtin.fail:
+    msg: |
+      CreateStack '{{ _cs_stack_name }}' failed (rc={{ _cs_create_result.rc | default('?') }}).
+      ── ROS error ─────────────────────────────────────────────
+      {{ _cs_create_result.stderr | default('(no stderr captured)') | trim }}
+      ──────────────────────────────────────────────────────────
+  when:
+    - _cs_existing_stack.Status is not defined
+    - (_cs_create_result.rc | default(0) | int) != 0
 
 - name: "create_stack [{{ _cs_stack_name }}] — capture stack ID"
   ansible.builtin.set_fact:
@@ -117,25 +136,51 @@
   vars:
     new_state: "{{ {_cs_state_key_id: _cs_stack_id} }}"
 
-- name: "create_stack [{{ _cs_stack_name }}] — poll until CREATE_COMPLETE"
-  ansible.builtin.command:
-    argv:
-      - aliyun
-      - ros
-      - GetStack
-      - --RegionId
-      - "{{ region }}"
-      - --StackId
-      - "{{ _cs_stack_id }}"
-      - --profile
-      - "{{ aliyun_profile }}"
-  register: _cs_poll
-  retries: 60
-  delay: 30
-  until: (_cs_poll.stdout | from_json).Status in ['CREATE_COMPLETE','UPDATE_COMPLETE']
-  failed_when: (_cs_poll.stdout | from_json).Status in
-               ['CREATE_FAILED','ROLLBACK_FAILED','ROLLBACK_COMPLETE','DELETE_FAILED']
-  changed_when: false
+- name: "create_stack [{{ _cs_stack_name }}] — poll until CREATE_COMPLETE (+ explain on failure)"
+  block:
+    - name: "create_stack [{{ _cs_stack_name }}] — poll until CREATE_COMPLETE"
+      ansible.builtin.command:
+        argv:
+          - aliyun
+          - ros
+          - GetStack
+          - --RegionId
+          - "{{ region }}"
+          - --StackId
+          - "{{ _cs_stack_id }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _cs_poll
+      retries: 60
+      delay: 30
+      until: (_cs_poll.stdout | from_json).Status in ['CREATE_COMPLETE','UPDATE_COMPLETE']
+      failed_when: (_cs_poll.stdout | from_json).Status in
+                   ['CREATE_FAILED','ROLLBACK_FAILED','ROLLBACK_COMPLETE','DELETE_FAILED']
+      changed_when: false
+  rescue:
+    # The stack reached a terminal-failure state (or timed out).  The per-resource
+    # reason (e.g. "requires NVMe but the image does not support NVMe") lives in
+    # the stack events, not the GetStack status — fetch + surface it.
+    - name: "create_stack [{{ _cs_stack_name }}] — fetch stack events for the failure reason"
+      ansible.builtin.command:
+        argv: [aliyun, ros, ListStackEvents, --RegionId, "{{ region }}",
+               --StackId, "{{ _cs_stack_id }}", --profile, "{{ aliyun_profile }}"]
+      register: _cs_evs
+      changed_when: false
+      failed_when: false
+    - name: "create_stack [{{ _cs_stack_name }}] — surface failed-resource reasons + fail"
+      vars:
+        _failed: "{{ (_cs_evs.stdout | default('{}') | from_json).Events | default([])
+                     | selectattr('Status','search','FAILED') | list }}"
+      ansible.builtin.fail:
+        msg: |
+          Stack '{{ _cs_stack_name }}' did not reach CREATE_COMPLETE.
+          ── failed resources ──────────────────────────────────────
+          {% for e in _failed %}
+          {{ e.LogicalResourceId | default('?') }} ({{ e.ResourceType | default('?') }}): {{ e.StatusReason | default('') }}
+          {% endfor %}
+          {% if not _failed %}(no FAILED events returned; check the ROS console for {{ _cs_stack_id }}){% endif %}
+          ──────────────────────────────────────────────────────────
 
 - name: "create_stack [{{ _cs_stack_name }}] — extract outputs"
   ansible.builtin.set_fact:
