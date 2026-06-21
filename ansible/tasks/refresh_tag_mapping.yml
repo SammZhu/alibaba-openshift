@@ -116,9 +116,15 @@
     _rtm_oss_sk: "{{ _rtm_oss_creds_raw.stdout.split(' ')[1] }}"
   no_log: true
 
+# run_cli: no_log (the previous task had AK/SK in argv WITHOUT no_log — a leak on
+# failure) + retries + surfaces the OSS error.
 - name: Upload tag-mapping.tsv to OSS (sibling of tarball)
-  ansible.builtin.command:
-    argv:
+  ansible.builtin.include_tasks: ../tasks/run_cli.yml
+  vars:
+    rc_label: "OSS upload tag-mapping.tsv"
+    rc_retries: 3
+    rc_delay: 15
+    rc_argv:
       - aliyun
       - oss
       - cp
@@ -128,5 +134,4 @@
       - "--access-key-id={{ _rtm_oss_ak }}"
       - "--access-key-secret={{ _rtm_oss_sk }}"
       - -f
-  changed_when: true
   no_log: true
