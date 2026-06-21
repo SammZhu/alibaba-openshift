@@ -29,6 +29,16 @@ metadata:
   name: {{ cluster_name }}
 rendezvousIP: {{ rendezvous_ip }}
 bootArtifactsBaseURL: http://{{ mirror_private_ip }}:8080
+# Bootstrap/discovery-phase NTP — Alibaba Cloud INTERNAL NTP, reachable inside
+# the VPC WITHOUT egress (like IMDS 100.100.100.200).  The chrony MachineConfig
+# (50-chrony-aliyun-internal-*) only applies AFTER the cluster is up (MCO); this
+# covers the discovery+bootstrap window so a node never drifts (+8h CST) and
+# fails the "Host clock is not synchronized" validation, regardless of NAT.
+# This is an agent-config field (NOT install-config — that one panics wait-for).
+additionalNTPSources:
+  - ntp.cloud.aliyuncs.com
+  - ntp1.cloud.aliyuncs.com
+  - 100.100.5.1
 # One host entry per master, count-driven by abi_master_macs (06 harvests it:
 # SNO=1, HA=3).  loop.index gives master-1, master-2, ...
 {% if (abi_master_macs | default([])) | length > 0 %}
