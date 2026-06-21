@@ -291,7 +291,17 @@
   ansible.builtin.shell: |
     {{ _ssh_root_mirror }} 'set -e
     export TMPDIR={{ _m_tmp }} XDG_CACHE_HOME={{ _m_build_dir }}/.cache
-    if [ -f {{ _m_iso }} ]; then echo "agent ISO already present, skipping create (resume)"; exit 0; fi
+    # Resume ONLY a genuinely-complete prior build.  agent create image CONSUMES
+    # (deletes) install-config.yaml + agent-config.yaml on success, so their
+    # absence = the existing ISO matches those inputs -> safe to skip.  If the
+    # freshly-rendered configs are still present next to an old ISO (e.g. a config
+    # change like this run, or a half-finished build), the ISO is STALE -> rebuild
+    # (regenerates the asset store too, else `agent wait-for` reads a stale store
+    # and panics: asset.Asset is nil, not *agentconfig.AgentHosts).
+    if [ -f {{ _m_iso }} ] && [ ! -f {{ _m_install_dir }}/install-config.yaml ] && [ ! -f {{ _m_install_dir }}/agent-config.yaml ]; then
+      echo "agent ISO present + inputs consumed -> genuine resume, skipping create"; exit 0
+    fi
+    rm -f {{ _m_iso }} {{ _m_install_dir }}/.openshift_install_state.json
     openshift-install agent create image --dir {{ _m_install_dir }} --log-level=info'
   changed_when: true
   # LIVE-VERIFY: confirm the release override pullspec + that the installer
