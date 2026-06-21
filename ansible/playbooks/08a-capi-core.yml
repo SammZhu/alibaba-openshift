@@ -157,6 +157,35 @@
       register: _core_apply
       changed_when: "'unchanged' not in _core_apply.stdout"
 
+    # ── Stop the CVO from fighting our cluster-api core CRDs ──────────────────
+    # OCP ships these CRDs in the release, but cluster-capi-operator does NOT run
+    # on platform=external — so the CVO endlessly fails to reconcile ITS (older,
+    # OCP 4.20 = cluster-api v1.10.4, v1beta1-only) version over the v1.12.7 set
+    # we install (clusterversion Failing=True: "Could not update CRD
+    # ipaddresses.ipam.cluster.x-k8s.io ... the object is invalid").  We own these
+    # CRDs (our v1beta2 controller needs them), so mark them unmanaged in the CVO
+    # overrides.  Aligning versions instead would force a provider v1beta2->v1beta1
+    # downgrade (the Alibaba provider is built on api/core/v1beta2).
+    - name: "08a — collect cluster-api core CRD names from the rendered manifest"
+      ansible.builtin.set_fact:
+        _capi_core_crds: "{{ _core_rendered.stdout | from_yaml_all
+                             | selectattr('kind', 'equalto', 'CustomResourceDefinition')
+                             | map(attribute='metadata.name') | list }}"
+
+    - name: "08a — build CVO override entries (unmanaged) for those CRDs"
+      ansible.builtin.set_fact:
+        _cvo_overrides: "{{ _cvo_overrides | default([]) + [{'group': 'apiextensions.k8s.io',
+                            'kind': 'CustomResourceDefinition', 'namespace': '',
+                            'name': item, 'unmanaged': true}] }}"
+      loop: "{{ _capi_core_crds }}"
+
+    - name: "08a — mark cluster-api core CRDs unmanaged in the CVO (stop Failing=True)"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", patch, clusterversion, version,
+               --type=merge, -p, "{{ {'spec': {'overrides': _cvo_overrides}} | to_json }}"]
+      register: _cvo_patch
+      changed_when: "'no change' not in (_cvo_patch.stdout | default(''))"
+
     - name: Wait for capi-controller-manager rollout
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, capi-system,
