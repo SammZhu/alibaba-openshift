@@ -111,6 +111,13 @@ spec:
       metadataOptions: {httpEndpoint: enabled, httpTokens: optional, httpTokensAfterBoot: required}
       tags:
         - {key: openshift-worker-pool, value: capa-multiaz}
+        # Group CAPA worker ECS with the rest of the OpenShift cluster's resources
+        # so they're identifiable in the ECS console / by tag. The provider's own
+        # cluster tag uses the CAPI cluster name ("caworkers", the external-managed
+        # fake cluster), NOT the OCP cluster name — these workers would otherwise be
+        # un-attributable to {{ cluster_name }}. (Provider passthrough: spec.tags →
+        # toSDKTags → RunInstances.Tag.)
+        - {key: openshift-cluster, value: {{ cluster_name }}}
 {% for z in worker_zones %}
 ---
 # Worker pool for zone {{ z.zone }}. All replicas of this MachineDeployment land
