@@ -41,13 +41,29 @@ while true; do
     echo "[machinedeployment/machineset replicas]"; $J "export KUBECONFIG=/root/kubeconfig; oc get machinedeployment,machineset -A --no-headers 2>/dev/null | awk '{print \$1, \$2, \$3, \$4, \$5, \$6}'" 2>/dev/null
     echo "[machinehealthcheck]"; $J "export KUBECONFIG=/root/kubeconfig; oc get machinehealthcheck -A --no-headers 2>/dev/null" 2>/dev/null
     echo "[recent machine/remediation/scale events]"; $J "export KUBECONFIG=/root/kubeconfig; oc get events -A --sort-by=.lastTimestamp 2>/dev/null | grep -iE 'machine|remediat|scal|unhealthy|rollout|delet' | tail -6" 2>/dev/null
-    # cloud signal: running ECS in this cluster (by tag) vs machine count
-    echo "[ECS by cluster tag]"; aliyun ecs DescribeInstances --RegionId "$REGION" --profile "$PROFILE" --PageSize 100 \
-      --Tag.1.Key "kubernetes.io/cluster/${CLUSTER}" 2>/dev/null \
+    # cloud signal: ALL ECS, categorised by tag (NOT filtered to one tag). The
+    # original mystery-ECS hunt failed because CAPA worker / smoke ECS do NOT carry
+    # kubernetes.io/cluster/<ocp-cluster> — they're tagged with the CAPI cluster name
+    # (caworkers / smoke-test) + openshift-worker-pool, so a single-tag filter on the
+    # OCP cluster missed them and a transient surge looked like it appeared from
+    # nowhere. Listing all instances and bucketing by tag surfaces the transient.
+    echo "[ECS — all, by tag bucket]"; aliyun ecs DescribeInstances --RegionId "$REGION" --profile "$PROFILE" --PageSize 100 2>/dev/null \
       | python3 -c "import sys,json
 try:
  d=json.load(sys.stdin); ins=d.get('Instances',{}).get('Instance',[])
- print(' running ECS:', len([i for i in ins if i.get('Status')=='Running']), [i.get('InstanceName') or i.get('InstanceId') for i in ins])
+ run=[i for i in ins if i.get('Status')=='Running']
+ def tags(i): return {t['TagKey']:t['TagValue'] for t in i.get('Tags',{}).get('Tag',[])}
+ def bucket(i):
+  t=tags(i)
+  if 'kubernetes.io/cluster/${CLUSTER}' in t or t.get('openshift-cluster')=='${CLUSTER}': return 'ocp'
+  if t.get('openshift-worker-pool') or 'kubernetes.io/cluster/caworkers' in t: return 'capa-worker'
+  if 'kubernetes.io/cluster/smoke-test' in t: return 'smoke'
+  return 'other'
+ from collections import Counter
+ c=Counter(bucket(i) for i in run)
+ print(' running ECS:', len(run), 'by-bucket:', dict(c))
+ for i in run:
+  print('   ', i.get('InstanceId'), bucket(i), i.get('ZoneId'), (tags(i).get('k8s.io/cluster-api-machine') or i.get('InstanceName')))
 except Exception as e: print(' (ecs query failed:', e, ')')" 2>/dev/null
   } >> "$LOG" 2>&1
   sleep "$INTERVAL"
