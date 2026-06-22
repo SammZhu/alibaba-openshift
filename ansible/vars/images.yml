@@ -11,7 +11,7 @@
 #   - openshift-capi-alicloud config/manager/deployment.yaml  static `image:` fallback
 #     (08 sed-overrides it with capa_image at deploy time, but keep it current)
 capa_image_repo: "quay.io/samzhu/openshift-capi-alicloud"
-capa_image_tag: "v0.1.22"
+capa_image_tag: "v0.1.23"
 capa_image: "{{ capa_image_repo }}:{{ capa_image_tag }}"
 
 # CSI operator release version (the operator's OWN semver, independent of the
