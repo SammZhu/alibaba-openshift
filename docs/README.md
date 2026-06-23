@@ -32,7 +32,7 @@ support HA (multi-AZ) and SNO, then share `site-post.yml` for the worker plane.
 | [CAPA-DAY2-OPS](CAPA-DAY2-OPS.md) | **Day-2 ops master reference**: resource ownership, external CP, scale / rolling / drain, MHC, delete-safety (G8), IMDS hardening (G14), air-gap image strategy. |
 | [CAPA-MULTI-AZ](CAPA-MULTI-AZ.md) | Multi-AZ worker pools — one MachineDeployment per zone (B2). |
 | [CAPA-AUTOSCALER](CAPA-AUTOSCALER.md) | Cluster Autoscaler (clusterapi provider) + scale-from-zero (B3 / #63). |
-| [CAPA-WORKER-JOIN](CAPA-WORKER-JOIN.md) | Route B worker join (aliyun-platform RHCOS + user-data Ignition). |
+| [CAPA-WORKER-JOIN](CAPA-WORKER-JOIN.md) | Worker join *mechanism* (boot image → Ignition → CSR → providerID). Route B (`11`) itself is **legacy** — superseded by Phase 12. |
 | [CAPA-SMOKE](CAPA-SMOKE.md) | CAPA smoke-test runbook. |
 | [CAPI-CORE](CAPI-CORE.md) | Self-bundled Cluster API core (CRDs + controller). |
 

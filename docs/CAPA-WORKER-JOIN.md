@@ -1,5 +1,13 @@
 # CAPA worker join — Route B (aliyun-platform RHCOS + user-data Ignition)
 
+> ⚠️ **Route B (`11-capa-routeb-join.yml`) is legacy** — superseded by the
+> declarative multi-AZ MachineDeployment pools in
+> [`12-capa-machinedeployment.yml`](../ansible/playbooks/12-capa-machinedeployment.yml)
+> ([CAPA-MULTI-AZ](CAPA-MULTI-AZ.md), [COMPONENTS-AND-ORDER](COMPONENTS-AND-ORDER.md)).
+> **Do not run `11` alongside `12`** (it adds a stray standalone worker). This page
+> is kept for the underlying join *mechanism* (boot image → Ignition → CSR →
+> providerID), which still applies to Phase 12 — not as the recommended path.
+
 How a CAPA-provisioned ECS becomes a **real OpenShift worker node** on Alibaba
 Cloud, the upstream-standard way — no Assisted Installer day-2.
 
