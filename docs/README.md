@@ -12,7 +12,7 @@ support HA (multi-AZ) and SNO, then share `site-post.yml` for the worker plane.
 
 | Doc | What |
 |-----|------|
-| [E2E-RUNBOOK](E2E-RUNBOOK.md) | End-to-end install runbook — **both AI (`site.yml`) and ABI (`site-agent.yml`)**, then `site-post`. |
+| [E2E-RUNBOOK](E2E-RUNBOOK.md) | End-to-end install runbook — **[AI · §4](E2E-RUNBOOK.md#4-assisted-installer-ai--three-stage-run-recommended)** (`site.yml`) · **[ABI · §4b](E2E-RUNBOOK.md#4b-agent-based-installer-abi-end-to-end)** (`site-agent.yml`), then `site-post`. |
 | [COMPONENTS-AND-ORDER](COMPONENTS-AND-ORDER.md) | What gets deployed and in what order (incl. the `08a → 08 → 10 → 12` site-post chain). |
 | [POST-INSTALL](POST-INSTALL.md) | Post-install components (CAPA / CSI / OADP). |
 | [SNO-MODE](SNO-MODE.md) | Single-Node OpenShift (AI **and** ABI SNO). |
