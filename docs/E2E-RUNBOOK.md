@@ -191,7 +191,7 @@ imageset-config.yaml + tag-mapping.tsv).
 
 ---
 
-## 4. Three-stage run (recommended)
+## 4. Assisted Installer (AI) — three-stage run (recommended)
 
 Run each stage in `tmux`/`screen`, validate before advancing.  All
 playbooks are individually idempotent.
