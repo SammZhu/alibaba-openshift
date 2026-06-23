@@ -312,6 +312,35 @@
       register: csi_apply
       changed_when: "'unchanged' not in csi_apply.stdout"
 
+    # ── Air-gap: point CSI operand (sidecar) images at the mirror ─────────────
+    # The operator defaults its external CSI sidecars to upstream
+    # registry.k8s.io/sig-storage digests (so a direct / operatorhub.io install
+    # works on vanilla Kubernetes). On the air-gap path the mirror serves these
+    # under registry.cn-hangzhou.aliyuncs.com/acs/<name>:<tag> (04-prepare-mirror
+    # Group A in-region + Group B cross-border re-tag), and the cluster's IDMS/ITMS
+    # redirects acs/* → mirror. Override the operator's RELATED_IMAGE_* env to those
+    # acs refs so the sidecars resolve via the mirror. No-op on non-air-gap clusters.
+    - name: Air-gap — override CSI operand images via RELATED_IMAGE_* env
+      when: mirror_private_ip is defined and (mirror_private_ip | string | length) > 0
+      ansible.builtin.command:
+        argv:
+          - oc
+          - --kubeconfig
+          - "{{ kubeconfig_file }}"
+          - -n
+          - alibaba-cloud-csi-operator-system
+          - set
+          - env
+          - deployment/alibaba-cloud-csi-operator-controller-manager
+          - RELATED_IMAGE_CSI_PROVISIONER=registry.cn-hangzhou.aliyuncs.com/acs/csi-provisioner:v3.5.0
+          - RELATED_IMAGE_CSI_ATTACHER=registry.cn-hangzhou.aliyuncs.com/acs/csi-attacher:v4.3.0
+          - RELATED_IMAGE_CSI_RESIZER=registry.cn-hangzhou.aliyuncs.com/acs/csi-resizer:v1.8.0
+          - RELATED_IMAGE_CSI_SNAPSHOTTER=registry.cn-hangzhou.aliyuncs.com/acs/csi-snapshotter:v6.3.0
+          - RELATED_IMAGE_CSI_NODE_DRIVER_REGISTRAR=registry.cn-hangzhou.aliyuncs.com/acs/csi-node-driver-registrar:v2.8.0
+          - RELATED_IMAGE_LIVENESSPROBE=registry.cn-hangzhou.aliyuncs.com/acs/livenessprobe:v2.10.0
+      register: csi_relimg_env
+      changed_when: "'updated' in csi_relimg_env.stdout"
+
     - name: Wait for AlibabaCloudCSIDriver CRD Established
       ansible.builtin.command:
         argv:
