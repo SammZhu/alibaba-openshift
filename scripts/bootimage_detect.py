@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -71,16 +72,34 @@ def load_ai_versions(path, include_prereleases):
     return minors, max_z
 
 
-def fetch_stream_for_minor(branch):
-    """Fetch the installer rhcos.json for a release-X.Y branch; None on 404."""
+def fetch_stream_for_minor(branch, retries=4, backoff=2.0):
+    """Fetch the installer rhcos.json for a release-X.Y branch; None on 404.
+
+    Transient network failures (connection reset / TLS handshake drop / timeout /
+    429 / 5xx) are retried with exponential backoff — a flaky runner network
+    must not fail the whole detection. A real 404 still returns None, other 4xx
+    still raise immediately.
+    """
     url = INSTALLER_RHCOS.format(branch=branch)
-    try:
-        with urllib.request.urlopen(url, timeout=30) as r:
-            return json.loads(r.read().decode())
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return None
-        raise
+    last = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                return json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            if e.code not in (429, 500, 502, 503, 504):
+                raise
+            last = e
+        except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
+            last = e
+        if attempt < retries - 1:
+            delay = backoff * (2 ** attempt)
+            sys.stderr.write(
+                f"[detect] {url} transient error ({last}); retry in {delay:.0f}s\n")
+            time.sleep(delay)
+    raise RuntimeError(f"failed to fetch {url} after {retries} attempts: {last}")
 
 
 def fetch_stream_for_version(version):
