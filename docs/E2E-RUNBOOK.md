@@ -321,6 +321,90 @@ included in `site.yml`.
 
 ---
 
+## 4b. Agent-based Installer (ABI) end-to-end
+
+The fully air-gapped path (no assisted-service). Same mirror foundation as the AI
+run; the cluster bring-up differs (ENI-first/reimage — see the model in
+[§1](#1-audience-and-scope)). Drives `site-agent.yml`. Validated live 2026-06-22
+(HA multi-AZ + SNO). For SNO specifics also see
+[SNO-MODE.md](SNO-MODE.md#agent-based-abi-sno).
+
+### 4b.0 group_vars (ABI-specific)
+
+```yaml
+installation_method: Agent-based
+cluster_topology:    ha            # or: sno
+rendezvous_ip:       10.0.16.5     # zone1 subnet; default is fine (master-1 lands in zone1)
+# control_plane_type — ABI has hard constraints (06 preflight-asserts cores+NVMe):
+#   HA  → must be sellable in ALL master AZs + >=4 vCPU      e.g. ecs.g7.xlarge
+#   SNO → >=8 vCPU AND non-NVMe AND sellable in zone-a       e.g. ecs.g6.2xlarge
+control_plane_type:  ecs.g7.xlarge
+# HA multi-AZ also needs: zone / zone2 / zone3 + private_subnet_cidr3
+```
+
+Run the env-free preflight first (templates / instance type cores+NVMe / zone /
+prereq files): `scripts/preflight-dryrun.sh` → expect `0 FAIL`.
+
+### 4b.1 Run
+
+Mirror stages (`03/04/05`) are identical to the AI run (Stage 2 above) — do those
+first (or let `site-agent.yml` drive them). Then:
+
+```bash
+tmux new -d -s install \
+  "env PYTHONUNBUFFERED=1 \
+   ansible-playbook -i inventory.yml playbooks/site-agent.yml \
+   2>&1 | tee /tmp/install.log"
+tail -f /tmp/install.log
+```
+
+`site-agent.yml` order: `00 → 03/04/05 → 06 → 06a → 06b → 07` (no separate `02`;
+image import is folded into `06a`):
+
+| Phase | Does | `state.yml` gains |
+|---|---|---|
+| `06-create-cluster-stack` | phase-1: SGs/NLB/DNS + boot masters from a **placeholder** image (`abi_placeholder_image_id`), harvest each primary-ENI MAC | `abi_master_macs` (list), `master_mac1/2/3` |
+| `06a-build-agent-iso` | build agent ISO **on the mirror ECS** with `agent-config hosts[]` (MAC↔`<cluster>-master-N`), import to ECS image | `ecs_image_id` (agent image) |
+| `06b-reimage-masters` | `UpdateStack` `ImageId=ecs_image_id` → in-place ReplaceSystemDisk (keeps ENI/MAC/IP), reboot into agent image | — |
+| `07-install-cluster-agent` | `openshift-install agent wait-for` (bootstrap → install-complete), `*.apps` rewrite | kubeconfig on disk + jump host |
+
+> **Monitoring**: `07`'s `agent wait-for` runs async (stdout buffered). For a live
+> stream use `scripts/abi-monitor.sh`, or `tail` `wait-bootstrap.log` /
+> `wait-install.log` on the mirror ECS.
+
+### 4b.2 Verify
+
+```bash
+# nodes named <cluster>-master-N (NOT a MAC) and Ready:
+ssh -i $sshkey root@$jumphost 'oc --kubeconfig=/root/kubeconfig get nodes'
+# all cluster operators healthy (empty output = all green):
+ssh -i $sshkey root@$jumphost 'oc --kubeconfig=/root/kubeconfig get co --no-headers' | awk '$3$4$5 != "TrueFalseFalse"'
+# HA: the 3 masters land in distinct AZs (a/b/c)
+aliyun ecs DescribeInstances --RegionId $region | jq '.Instances.Instance[] | select(.InstanceName|contains("master")) | {InstanceName, ZoneId}'
+```
+
+`node-zero`/rendezvous showing `<cluster>-master-1` (not `00-16-3e-…`) confirms the
+MAC↔hostname binding worked; matching MACs before/after the 06b reimage confirm the
+in-place ReplaceSystemDisk kept ENI/MAC/IP.
+
+### 4b.3 ABI-specific gotchas (live-hardened)
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `CreateStack`/`UpdateStack` rejected (often `no_log`-hidden); SNO 8-core assert fails; reimage *"requires NVMe"* | `control_plane_type` wrong for ABI | SNO needs ≥8 vCPU **non-NVMe** sellable in zone-a (`ecs.g6.2xlarge`); HA needs a type sellable in **all** AZs (`ecs.g7.xlarge`). Verify with `DescribeInstanceTypes` (cores/NvmeSupport) + `PreviewStack` (zone). |
+| `openshift-install` panics / `unknown field additionalNTPSources` | NTP put in install-config | `additionalNTPSources` is an **agent-config.yaml** field, not install-config. |
+| `06a` reuses a stale ISO after a config change | resume guard | `agent create image` consumes its inputs on success; 06a only skips when the configs are already consumed, else it rebuilds — don't hand-edit the ISO. |
+| wait-for: *"Cannot access Rendezvous Host"* | mirror→rendezvous `:8090` blocked | cluster-stack opens 8090 from VpcCidr under `IsAgentBased` (already in template). |
+| bootstrap loops on *"clock is not synchronized"* (esp. a multi-AZ master with no egress) | no NTP reachable in that subnet during bootstrap | mirror-stack adds the NAT SnatEntry per AZ; `additionalNTPSources` (internal aliyun NTP) covers the pre-MachineConfig window. |
+
+### 4b.4 Worker plane
+
+Same as AI: run `site-post.yml` (order `08a → 08 → 10 → 12`) — see
+[COMPONENTS-AND-ORDER](COMPONENTS-AND-ORDER.md#3-deployment-order-and-why) and
+[POST-INSTALL](POST-INSTALL.md).
+
+---
+
 ## 5. Idempotent re-run
 
 Every phase is safe to re-run.  Specifically, **after a successful install,
