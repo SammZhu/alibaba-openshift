@@ -8,6 +8,13 @@ endpoint，而 Phase 07 结束时 kubeconfig 刚好被 scp 到跳板。
 > 原理见 [`docs/csi-driver-design.md`](csi-driver-design.md)（v0.4 设计文档，
 > 含与 AWS ROSA EBS CSI Operator 对比、CDI StorageProfile 机制等）。
 
+> ⚠️ **前置顺序**：08 之前必须先跑 **`08a-capi-core.yml`**（自带 CAPI core）。
+> 08 装的是 CAPA **provider**，依赖 CAPI core 的 `machines.cluster.x-k8s.io`；
+> 漏了 08a 会让 controller CrashLoop（`no matches for kind "Machine"`）。完整
+> worker 平面链 = **`08a → 08 → 10-prepare-worker-bootimage → 12-capa-machinedeployment`**
+> （`site-post.yml` 已按此顺序编排）。`10` 产出 `worker_boot_image_id`，`12` 依赖它。
+> 完整顺序与坑见 [COMPONENTS-AND-ORDER](COMPONENTS-AND-ORDER.md#3-deployment-order-and-why)。
+
 ## 当前部署的组件
 
 | 组件 | 由 08 自动部署？ | 入口 |

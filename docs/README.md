@@ -4,12 +4,18 @@ Reference docs for the OpenShift-on-Alibaba deploy automation (ansible). Grouped
 by topic; each links the authoritative doc.
 
 ## Install & end-to-end
+
+Two installation methods, switched by `installation_method` in `group_vars`:
+**Assisted Installer (AI)** → `site.yml`, and **Agent-based Installer (ABI)** →
+`site-agent.yml` (fully air-gapped; ENI-first/reimage MAC↔hostname binding). Both
+support HA (multi-AZ) and SNO, then share `site-post.yml` for the worker plane.
+
 | Doc | What |
 |-----|------|
-| [E2E-RUNBOOK](E2E-RUNBOOK.md) | End-to-end install runbook (`site.yml` → `site-post`). |
-| [COMPONENTS-AND-ORDER](COMPONENTS-AND-ORDER.md) | What gets deployed and in what order. |
+| [E2E-RUNBOOK](E2E-RUNBOOK.md) | End-to-end install runbook — **both AI (`site.yml`) and ABI (`site-agent.yml`)**, then `site-post`. |
+| [COMPONENTS-AND-ORDER](COMPONENTS-AND-ORDER.md) | What gets deployed and in what order (incl. the `08a → 08 → 10 → 12` site-post chain). |
 | [POST-INSTALL](POST-INSTALL.md) | Post-install components (CAPA / CSI / OADP). |
-| [SNO-MODE](SNO-MODE.md) | Single-Node OpenShift (fast-path) mode. |
+| [SNO-MODE](SNO-MODE.md) | Single-Node OpenShift (AI **and** ABI SNO). |
 | [TEARDOWN](TEARDOWN.md) | `99-teardown.yml` modes (cluster / mirror / both). |
 
 ## Air-gap mirror & boot image

@@ -67,10 +67,29 @@ has initialized it**, and **CAPA only works once CAPI core is present**.
 | # | Step | Why this order |
 |---|---|---|
 | 0 | Foundation: cluster on `platform: external`, RHCOS aliyun image, credentials | everything below assumes these |
-| 1 | **CCM** (Phase 01) | must be present from node bring-up — *every* node (control plane included) comes up tainted `uninitialized` and is unusable until CCM clears it |
-| 2 | **CAPI core** (`clusterctl init`, Phase 11) | the framework CAPA plugs into; without it there are no Machine/MachineDeployment objects to drive CAPA |
-| 3 | **CAPA** (Phase 08/11) | provisions workers; consumes CAPI core, relies on CCM (step 1) to make those workers usable |
-| 4 | **CSI** (P3-CSI) | independent; install any time after the cluster is up, before workloads that need persistent volumes |
+| 1 | **CCM** (in cluster install) | must be present from node bring-up — *every* node (control plane included) comes up tainted `uninitialized` and is unusable until CCM clears it |
+| 2 | **CAPI core** (`08a-capi-core.yml`) | the framework CAPA plugs into; without it there are no Machine/MachineDeployment objects to drive CAPA. Self-bundled (offline), **not** `clusterctl init` |
+| 3 | **CAPA provider + CSI** (`08-deploy-post-install.yml`) | provisions workers; consumes CAPI core (step 2), relies on CCM (step 1) to make those workers usable |
+| 4 | **Worker boot image** (`10-prepare-worker-bootimage.yml`) | imports the aliyun RHCOS worker image (`worker_boot_image_id`) that Phase 12's Machines boot from |
+| 5 | **Worker pools** (`12-capa-machinedeployment.yml`) | declarative multi-AZ MachineDeployments → actual worker ECS |
+
+### Playbook order (site-post)
+
+The convenience wrapper `site-post.yml` runs the **default chain in this exact
+order** (counterpart to `site.yml` / `site-agent.yml`, which bring up the cluster):
+
+```
+08a-capi-core  →  08-deploy-post-install  →  10-prepare-worker-bootimage  →  12-capa-machinedeployment
+```
+
+> ⚠️ **`08a` must run before `08`.** `08` deploys the CAPA *provider*, which needs
+> CAPI core's `machines.cluster.x-k8s.io` kind. Run `08` first (or skip `08a`) and
+> the controller CrashLoops with *"no matches for kind \"Machine\""*. Likewise `12`
+> needs `worker_boot_image_id` from `10`.
+>
+> Optional validation hooks (not in the deploy path): `09-capa-smoke.yml`,
+> `13-csi-smoke.yml`. `11-capa-routeb-join.yml` is the legacy single-Machine Route B
+> — **superseded by `12`; do not run both** (it adds a stray standalone worker).
 
 **If the order is wrong / a piece is missing:**
 

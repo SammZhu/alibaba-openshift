@@ -165,24 +165,31 @@ as parameters.
 **Tearing down the cluster does not touch the mirror**, so the next
 install skips the ~30 min mirror prep entirely.
 
+**Installation method** (set in `group_vars`): `installation_method: Assisted`
+→ `site.yml` (AI), or `installation_method: Agent-based` → `site-agent.yml`
+(ABI, fully air-gapped). Both support HA (multi-AZ) and SNO (`cluster_topology:
+sno`), then share `site-post.yml` for the CAPA/CSI worker plane. Use the
+convenience wrappers rather than running every phase by hand:
+
 ```bash
-# One-time:
-ansible-playbook ansible/playbooks/00-preflight.yml
-ansible-playbook ansible/playbooks/01-prepare-iso.yml
-ansible-playbook ansible/playbooks/02-import-image.yml
-ansible-playbook ansible/playbooks/03-create-mirror-stack.yml    # ← persistent
-ansible-playbook ansible/playbooks/04-prepare-mirror.yml         # ← one-time
-ansible-playbook ansible/playbooks/05-verify-mirror.yml          # ← + snapshots
-ansible-playbook ansible/playbooks/06-create-cluster-stack.yml   # ← short-lived
-ansible-playbook ansible/playbooks/07-install-cluster.yml
-ansible-playbook ansible/playbooks/08-deploy-post-install.yml
+# Assisted Installer (AI):
+ansible-playbook -i ansible/inventory.yml ansible/playbooks/site.yml
+# — or — Agent-based Installer (ABI, air-gapped):
+ansible-playbook -i ansible/inventory.yml ansible/playbooks/site-agent.yml
+
+# Worker plane (CAPA + CSI), order 08a → 08 → 10 → 12:
+ansible-playbook -i ansible/inventory.yml ansible/playbooks/site-post.yml
 
 # Cluster rebuild only (mirror survives, ~30 min faster):
 ansible-playbook ansible/playbooks/99-teardown.yml \
   -e teardown_target=cluster -e teardown_confirmed=true
-ansible-playbook ansible/playbooks/06-create-cluster-stack.yml
-ansible-playbook ansible/playbooks/07-install-cluster.yml
+ansible-playbook -i ansible/inventory.yml ansible/playbooks/site.yml   # or site-agent.yml
 ```
+
+> `site.yml` drives `00 → 07`; `site-agent.yml` drives the ABI variant
+> (`00 → 03/04/05 → 06 → 06a → 06b → 07`). Full step-by-step, prerequisites and
+> the ABI ENI-first/reimage model: **[docs/E2E-RUNBOOK.md](docs/E2E-RUNBOOK.md)**
+> (doc index: [docs/README.md](docs/README.md)).
 
 ### Flow B — Monolithic (legacy, single ROS stack)
 
