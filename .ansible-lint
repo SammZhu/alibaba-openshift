@@ -1,0 +1,34 @@
+# ansible-lint config — a REGRESSION gate, not a cosmetic rewrite.
+#
+# Why this shape: this repo intentionally drives Alibaba ROS (declarative stacks)
+# and remote mirror-ECS / jump-host work through `ansible.builtin.shell` over SSH
+# command strings — those hosts are not ansible-managed inventory, so the file/
+# get_url/stat/k8s modules structurally cannot replace that shell (see the
+# QUICKSTART / deploy notes). The tree is already clean of the rules that matter
+# for shell HYGIENE (command-instead-of-module, no-changed-when, risky-shell-pipe,
+# command-instead-of-shell, no-free-form, risky-file-permissions, syntax-check).
+#
+# So we gate exactly those: a future PR that adds `shell: mkdir /x` instead of the
+# file module, a shell task with no changed_when, a `curl | bash` pipe, or free-
+# form module args will FAIL. The cosmetic buckets the current tree happens to
+# violate (yaml formatting, name casing/length, jinja filter spacing) are demoted
+# to WARNINGS — visible in output, but non-blocking — so we get the gate WITHOUT a
+# ~500-line style churn across working, live-verified playbooks.
+
+exclude_paths:
+  - ansible/legacy/
+  - docs/legacy/
+  - .github/
+
+# Non-blocking: shown as warnings, do not fail CI. These are style/cosmetic and
+# pervasive in the existing tree; enforcing them would be a mass rewrite, not a
+# regression gate. Tighten later if desired (fix a bucket, then remove it here).
+warn_list:
+  - yaml            # yamllint-style: colons, commas, line-length, comments
+  - name            # name[missing|casing|template|play] — naming conventions
+  - jinja[spacing]  # filter-arg spacing inside {{ }}
+  - var-naming      # existing var names (e.g. a lone no-jinja hit)
+
+# Nothing is skipped outright — everything not warn-listed above stays a hard
+# error, including the shell/correctness rules this gate exists to enforce.
+skip_list: []
