@@ -62,7 +62,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install ansible-lint (pinned)
-        run: pip install "ansible-lint==6.22.2"
+        run: pip install "ansible-lint==26.6.0"     # 原来是 6.22.2
 
       - name: Run ansible-lint
         run: ansible-lint -q ansible/
