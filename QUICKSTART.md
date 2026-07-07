@@ -3,6 +3,14 @@
 从零部署一套 OpenShift 集群到阿里云，**端到端约 90 分钟**，全程 Ansible
 驱动。包含 CCM、（可选）私有 mirror、（post-install）CSI / CAPA。
 
+> [!TIP]
+> **只需要其中一部分？** 这个仓库装**整套** OpenShift on 阿里云。如果你已经有集群、
+> 只想要其中一块，直接去对应的兄弟工程（都带一条命令的无云 `make demo`）：
+> - 只加 **ECS worker 节点** → [`openshift-capi-alicloud`](https://github.com/SammZhu/openshift-capi-alicloud)（day-2 worker plane）
+> - 只要 **块 / 文件存储（CSI）** → [`alibaba-cloud-csi-operator`](https://github.com/SammZhu/alibaba-cloud-csi-operator)
+>
+> 装整套时，本仓库会在 **post-install（`site-post`）** 阶段自动把这两者部署进集群。
+
 > **想看每一步细节 / 故障排查 / 命令解释**：[`ansible/README.md`](ansible/README.md)
 > **想理解架构 / 为什么是双栈**：[`README.md`](README.md)
 > **手动 / 控制台方式（不跑 Ansible）**：[`QUICKSTART-LEGACY.md`](QUICKSTART-LEGACY.md)
@@ -40,12 +48,20 @@ vi ansible/group_vars/all.yml
 
 ## 1. 端到端跑（~90 min）
 
+选安装方式（在 `group_vars/all.yml` 用 `installation_method` 切换）：
+
 ```sh
 cd ansible
-ansible-playbook playbooks/site.yml     # Phase 00 → 07
+# Assisted Installer（AI，默认）：
+ansible-playbook playbooks/site.yml           # Phase 00 → 07
+# — 或 — Agent-based Installer（ABI，air-gapped / ENI-first reimage）：
+ansible-playbook playbooks/site-agent.yml     # Phase 00 → 07（ABI 变体）
 ```
 
-`site.yml` 跑完后 cluster 已 install-complete，kubeconfig 已 scp 到跳板。
+> 两条路径产出同一个集群；ABI 的 ENI-first/reimage 模型（占位镜像起→采 MAC→
+> agent-config 绑→UpdateStack 换镜像）见 [`docs/E2E-RUNBOOK.md`](docs/E2E-RUNBOOK.md)。
+
+`site.yml` / `site-agent.yml` 跑完后 cluster 已 install-complete，kubeconfig 已 scp 到跳板。
 Phase 08（CAPA / CSI / OADP 等 post-install）需在跳板上跑：
 
 ```sh
