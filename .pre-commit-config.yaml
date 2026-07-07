@@ -21,9 +21,11 @@ repos:
   # Config: .ansible-lint (cosmetic -> warnings); baseline: .ansible-lint-ignore
   # (existing findings grandfathered). Blocks NEW no-changed-when /
   # risky-shell-pipe / command-instead-of-* so shell can't silently get worse.
-  # Version pinned to match CI for an identical gate.
+  # Version pinned to match CI for an identical gate. Note: ansible-lint 6.x
+  # crashes on ansible-core >= 2.19 (removed ansible.parsing.yaml.constructor);
+  # 26.x matches modern core, which is what CI's Python 3.11 resolves.
   - repo: https://github.com/ansible/ansible-lint
-    rev: v6.22.2
+    rev: v26.6.0
     hooks:
       - id: ansible-lint
         args: ["-q", "ansible/"]
