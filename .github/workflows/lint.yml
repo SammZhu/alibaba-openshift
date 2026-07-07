@@ -45,3 +45,24 @@ jobs:
       - name: Bash syntax check (boot-image scripts)
         run: |
           bash -n scripts/bootimage-gate.sh
+  
+  ansible-lint:
+    # Regression gate for shell/correctness hygiene. Config in .ansible-lint
+    # (cosmetic -> warnings); existing findings grandfathered in
+    # .ansible-lint-ignore. A NEW no-changed-when / risky-shell-pipe /
+    # command-instead-of-{module,shell} in a NEW file fails here.
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ansible-lint (pinned)
+        run: pip install "ansible-lint==6.22.2"
+
+      - name: Run ansible-lint
+        run: ansible-lint -q ansible/
