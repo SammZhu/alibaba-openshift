@@ -1,0 +1,46 @@
+# ansible-lint BASELINE — grandfathered existing violations (file + rule).
+#
+# These are pre-existing shell/correctness findings in live-verified playbooks,
+# mostly the intentional remote-over-SSH pattern (podman/oc/tar/aliyun through
+# `{{ _ssh_root_mirror }}` on non-managed hosts) where risky-shell-pipe /
+# no-changed-when / command-instead-of-* can't be cleanly resolved. They are
+# ignored so the gate is GREEN today; the point of the gate is to stop NEW
+# violations in NEW files, not to force a churn of working code.
+#
+# Matching is per (file, rule) — a new violation of one of these rules in a file
+# NOT listed here fails CI. To (re)generate after a deliberate cleanup:
+#   ansible-lint --generate-ignore ansible/
+#   # then drop the cosmetic buckets (name*/yaml*/jinja*/var-naming*) — those are
+#   # demoted to warnings in .ansible-lint, not baselined.
+#
+# Cosmetic rules (yaml formatting, task naming, jinja spacing) are NOT here — see
+# warn_list in .ansible-lint. Burn this list down over time; don't grow it.
+ansible/playbooks/00-preflight.yml risky-shell-pipe
+ansible/playbooks/01-prepare-iso.yml no-handler
+ansible/playbooks/02-import-image.yml no-changed-when
+ansible/playbooks/02-import-image.yml risky-shell-pipe
+ansible/playbooks/03-create-stack-LEGACY.yml no-changed-when
+ansible/playbooks/04-prepare-mirror.yml no-changed-when
+ansible/playbooks/04-prepare-mirror.yml risky-shell-pipe
+ansible/playbooks/05-verify-mirror.yml no-changed-when
+ansible/playbooks/07-install-cluster.yml no-changed-when
+ansible/playbooks/08-deploy-post-install.yml risky-shell-pipe
+ansible/playbooks/08a-capi-core.yml command-instead-of-module
+ansible/playbooks/08a-capi-core.yml risky-shell-pipe
+ansible/playbooks/09-capa-smoke.yml risky-shell-pipe
+ansible/playbooks/11-capa-routeb-join.yml risky-shell-pipe
+ansible/playbooks/99-teardown-LEGACY.yml no-changed-when
+ansible/tasks/create_stack.yml no-changed-when
+ansible/tasks/install_agent.yml command-instead-of-shell
+ansible/tasks/install_agent.yml risky-shell-pipe
+ansible/tasks/iso_agent.yml command-instead-of-module
+ansible/tasks/iso_agent.yml command-instead-of-shell
+ansible/tasks/iso_agent.yml ignore-errors
+ansible/tasks/iso_agent.yml no-relative-paths
+ansible/tasks/iso_agent.yml risky-shell-pipe
+ansible/tasks/mirror_stage_artefacts.yml risky-shell-pipe
+ansible/tasks/refresh_tag_mapping.yml no-tabs
+ansible/tasks/refresh_tag_mapping.yml risky-shell-pipe
+ansible/tasks/run_cli.yml command-instead-of-shell
+ansible/tasks/ship_via_oss.yml risky-shell-pipe
+ansible/tasks/update_stack.yml no-changed-when
