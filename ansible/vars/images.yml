@@ -21,6 +21,14 @@ capa_image: "{{ capa_image_repo }}:{{ capa_image_tag }}"
 # 04-prepare-mirror.yml — the operator, bundle and catalog images all share this tag.
 # The deploy itself (08 `kustomize build .../config/default`) reads the tag from the
 # operator repo's config/manager/kustomization.yaml, bumped in the same release.
+#
+# Tag here, digest in the OLM bundle — two consumers, one version. This air-gap /
+# kustomize path is TAG-based on purpose: the mirror re-tags images into the local
+# ACR (acs/*), which gives them NEW digests, so upstream digests are meaningless
+# here. The operatorhub OLM bundle pins the SAME v0.1.7 image by @sha256 (a
+# separate path). Both track the same release version — just don't convert this
+# file to digests.
+#
 # Keep in sync (outside ansible var loading, can't read this):
 #   - scripts/build-mirror-tarball.sh   CSI image tags
 csi_operator_image_repo: "quay.io/samzhu/alibaba-cloud-csi-operator"
