@@ -263,7 +263,12 @@ Resources:
 
   NatSNATEntry:
     Type: ALIYUN::VPC::SnatEntry
-    DependsOn: EIPAssociation
+    # DependsOn the VSwitch too: the SNAT entry registers a snat routeEntry
+    # bound to the private subnet's VSwitch, so on teardown the SNAT entry
+    # must be deleted BEFORE the VSwitch — otherwise VSwitch delete fails with
+    # DependencyViolation.Snat (SourceCIDR is a plain CIDR string, giving ROS
+    # no implicit edge to order the deletion).  Verified on Apsara 2026-08-06.
+    DependsOn: [EIPAssociation, PrivateVSwitch]
     Properties:
       SnatTableId: !GetAtt NatGateway.SNatTableId
       SourceCIDR: !Ref PrivateSubnetCidr
@@ -271,7 +276,7 @@ Resources:
 
   NatSNATEntry2:
     Type: ALIYUN::VPC::SnatEntry
-    DependsOn: EIPAssociation
+    DependsOn: [EIPAssociation, PrivateVSwitch2]
     Properties:
       SnatTableId: !GetAtt NatGateway.SNatTableId
       SourceCIDR: !Ref PrivateSubnetCidr2
@@ -284,7 +289,7 @@ Resources:
   NatSNATEntry3:
     Type: ALIYUN::VPC::SnatEntry
     Condition: HasZone3
-    DependsOn: EIPAssociation
+    DependsOn: [EIPAssociation, PrivateVSwitch3]
     Properties:
       SnatTableId: !GetAtt NatGateway.SNatTableId
       SourceCIDR: !Ref PrivateSubnetCidr3
