@@ -44,6 +44,13 @@ cloud_env:           {}         # apsara -> { CLOUD_PLATFORM: apsara, AK: .., SK
 # into MirrorImageId/JumpHostImageId params).  DescribeImages -> ImageId (== the
 # .vhd name on ste3), e.g. aliyun_4_x86_64_20G_alibase_20260407.vhd
 apsara_image_id:     ""
+# apsara only: OSS (object storage) endpoint — Apsara has its own, not
+# oss-<region>.aliyuncs.com.  Determine it from your Apsara console / OSS docs
+# (e.g. oss-<region>.<apsara-domain>), then `aliyun oss`/ossutil targets it via
+# tasks/oss_endpoint.yml.  OSS is a data-plane service (not the RPC gateway) —
+# it does NOT go through apsara-rpc/cloudcli; the operator host still needs the
+# aliyun CLI (or ossutil) able to reach this endpoint.
+apsara_oss_endpoint: ""
 
 # ── OADP / OSS backup (optional, day-2) ──────────────────────────────────────
 # Backs up cluster resources + PV data to Alibaba Cloud OSS (S3-compatible) via
