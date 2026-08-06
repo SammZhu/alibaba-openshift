@@ -77,7 +77,14 @@ def main():
         env["SCHEME"] = "https"
         env.setdefault("INSECURE", "1")
 
-    os.execvpe("apsara-rpc", ["apsara-rpc", name, version, action] + filtered, env)
+    # Prefer the apsara-rpc binary built next to this script (scripts/apsara/
+    # apsara-rpc/apsara-rpc); fall back to PATH.  Ansible's `environment:` does
+    # not extend PATH, so relative resolution keeps the wrapper self-contained.
+    here = os.path.dirname(os.path.realpath(__file__))
+    rpc = os.path.join(here, "apsara-rpc", "apsara-rpc")
+    if not os.path.exists(rpc):
+        rpc = "apsara-rpc"
+    os.execvpe(rpc, [rpc, name, version, action] + filtered, env)
 
 
 if __name__ == "__main__":

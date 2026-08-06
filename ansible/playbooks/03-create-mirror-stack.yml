@@ -204,6 +204,21 @@
           - ParameterKey: MirrorDataDiskSnapshotId
             ParameterValue: "{{ mirror_snapshot_data_id if _mirror_restore_from_snapshot else '' }}"
 
+    # apsara_ize.py converts the DataSource image lookups (auto-discovering the
+    # RHEL/Aliyun-Linux image on public cloud) into explicit MirrorImageId /
+    # JumpHostImageId parameters — Apsara has no DataSource::ECS::Images.  Supply
+    # them here (apsara only); public cloud's template has no such parameters.
+    - name: (apsara) add explicit image-id parameters
+      ansible.builtin.set_fact:
+        _mirror_stack_params: "{{ _mirror_stack_params + _apsara_image_params }}"
+      vars:
+        _apsara_image_params:
+          - ParameterKey: MirrorImageId
+            ParameterValue: "{{ apsara_image_id }}"
+          - ParameterKey: JumpHostImageId
+            ParameterValue: "{{ apsara_image_id }}"
+      when: (cloud_platform | default('public')) == 'apsara'
+
     - name: Create / adopt mirror-stack
       ansible.builtin.include_tasks: ../tasks/create_stack.yml
       vars:
