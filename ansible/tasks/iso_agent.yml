@@ -356,7 +356,7 @@
     RR=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/)
     C=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/$RR)
     AK=$(echo "$C" | jq -r .AccessKeyId); SK=$(echo "$C" | jq -r .AccessKeySecret); TK=$(echo "$C" | jq -r .SecurityToken)
-    aliyun oss cp {{ _m_iso }} oss://{{ oss_bucket }}/{{ oss_object }} -f --access-key-id="$AK" --access-key-secret="$SK" --sts-token="$TK" --region={{ region }} --endpoint={{ _oss_internal_endpoint }}'
+    {{ oss_cli }} cp {{ _m_iso }} oss://{{ oss_bucket }}/{{ oss_object }} -f --access-key-id="$AK" --access-key-secret="$SK" --sts-token="$TK" --region={{ region }} --endpoint={{ _oss_internal_endpoint }}'
   changed_when: true
 
 # Air-gap: serve the minimal ISO's rootfs from an in-VPC HTTP server on the
@@ -437,7 +437,7 @@
     RR=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/)
     C=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/$RR)
     AK=$(echo "$C" | jq -r .AccessKeyId); SK=$(echo "$C" | jq -r .AccessKeySecret); TK=$(echo "$C" | jq -r .SecurityToken)
-    aliyun oss rm oss://{{ oss_bucket }}/{{ oss_object }} --access-key-id="$AK" --access-key-secret="$SK" --sts-token="$TK" --region={{ region }} --endpoint={{ _oss_internal_endpoint }} -f'
+    {{ oss_cli }} rm oss://{{ oss_bucket }}/{{ oss_object }} --access-key-id="$AK" --access-key-secret="$SK" --sts-token="$TK" --region={{ region }} --endpoint={{ _oss_internal_endpoint }} -f'
   changed_when: true
   ignore_errors: true
 

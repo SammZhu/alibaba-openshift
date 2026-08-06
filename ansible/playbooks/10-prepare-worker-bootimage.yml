@@ -227,14 +227,14 @@
             set -uo pipefail
             AKID="{{ _aksk.stdout.split(' ')[0] }}"; AKSEC="{{ _aksk.stdout.split(' ')[1] }}"
             B="{{ oss_bucket }}"; EP="{{ _oss_endpoint }}"; CUR="{{ _qcow_src_object }}"
-            aliyun oss ls "oss://$B/mirror-tarballs/" \
+            {{ oss_cli }} ls "oss://$B/mirror-tarballs/" \
               --access-key-id="$AKID" --access-key-secret="$AKSEC" --region="{{ region }}" --endpoint="$EP" \
               | grep -oE "oss://$B/mirror-tarballs/rhcos-[^[:space:]]*openstack[^[:space:]]*\.qcow2\.gz" \
               | sort -u \
               | while read -r OBJ; do
                   KEY="${OBJ#oss://$B/}"
                   if [ "$KEY" != "$CUR" ]; then
-                    aliyun oss rm "$OBJ" --access-key-id="$AKID" --access-key-secret="$AKSEC" \
+                    {{ oss_cli }} rm "$OBJ" --access-key-id="$AKID" --access-key-secret="$AKSEC" \
                       --region="{{ region }}" --endpoint="$EP" -f >/dev/null && echo "pruned stale qcow: $KEY"
                   fi
                 done

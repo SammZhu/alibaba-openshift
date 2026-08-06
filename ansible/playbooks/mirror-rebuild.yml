@@ -88,7 +88,7 @@
           - -lc
           - |
             set -euxo pipefail
-            aliyun oss cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}" \
+            {{ oss_cli }} cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}" \
               /var/lib/quay-storage/mirror-tarball.tar \
               --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
               --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \

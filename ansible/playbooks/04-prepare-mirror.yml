@@ -311,7 +311,7 @@
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
         cd /opt
-        aliyun oss cp \
+        {{ oss_cli }} cp \
           "oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-version.txt" \
           ./mr-version.txt \
           --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
@@ -320,7 +320,7 @@
         MR_VERSION=$(cat ./mr-version.txt | tr -d '[:space:]')
         rm -f ./mr-version.txt
         echo "    mirror-registry version: $MR_VERSION"
-        aliyun oss cp \
+        {{ oss_cli }} cp \
           "oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-$MR_VERSION.tar.gz" \
           ./mirror-registry.tar.gz \
           --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
@@ -352,7 +352,7 @@
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
         cd /tmp
-        aliyun oss cp \
+        {{ oss_cli }} cp \
           "oss://{{ oss_bucket }}/mirror-tarballs/openshift-patch-version.txt" \
           ./ocp-version.txt \
           --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
@@ -424,7 +424,7 @@
       ansible.builtin.shell: |
         AK=$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id' ~/.aliyun/config.json)
         SK=$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_secret' ~/.aliyun/config.json)
-        aliyun oss stat "oss://{{ oss_bucket }}/{{ mirror_oss_object }}" \
+        {{ oss_cli }} stat "oss://{{ oss_bucket }}/{{ mirror_oss_object }}" \
           --endpoint="oss-{{ region }}.aliyuncs.com" \
           --access-key-id="$AK" --access-key-secret="$SK" \
           | awk -F': *' '/Content-Length/ {print $2}'
@@ -448,11 +448,11 @@
           Common causes:
             - group_vars/all.yml's openshift_version was changed (e.g. 4.20 → 4.20.22)
               but the OSS tarball still has the old name.  Check what's there:
-                aliyun oss ls oss://{{ oss_bucket }}/mirror-tarballs/ \
+                {{ oss_cli }} ls oss://{{ oss_bucket }}/mirror-tarballs/ \
                   --endpoint=oss-{{ region }}.aliyuncs.com
             - or the OSS object was deleted / moved to a different bucket.
           Fix: either rename the tarball server-side (intra-bucket — seconds) or re-upload:
-            aliyun oss cp oss://{{ oss_bucket }}/mirror-tarballs/<old-name>.tar \
+            {{ oss_cli }} cp oss://{{ oss_bucket }}/mirror-tarballs/<old-name>.tar \
                           oss://{{ oss_bucket }}/{{ mirror_oss_object }} \
                 --endpoint=oss-{{ region }}.aliyuncs.com \
                 --part-size=104857600 --parallel=10
@@ -466,10 +466,10 @@
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
         echo "=== $(date -Iseconds) downloading 22 GB image tarball from OSS ==="
-        # aliyun oss cp multipart download uses a .temp file + checkpoint.
+        # {{ oss_cli }} cp multipart download uses a .temp file + checkpoint.
         # Re-invoking the same command after a 'connection reset' picks up
         # from where the .temp left off (~10x faster than restarting at 0).
-        aliyun oss cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}" \
+        {{ oss_cli }} cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}" \
           /var/lib/quay-storage/mirror-tarball.tar \
           --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
           --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
@@ -702,7 +702,7 @@
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
         echo "=== $(date -Iseconds) downloading imageset-config.yaml from OSS ==="
-        aliyun oss cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}.imageset-config.yaml" \
+        {{ oss_cli }} cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}.imageset-config.yaml" \
           /var/lib/quay-storage/extracted/imageset-config.yaml \
           --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
           --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
@@ -898,7 +898,7 @@
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -euxo pipefail
-        aliyun oss cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}.tag-mapping.tsv" \
+        {{ oss_cli }} cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}.tag-mapping.tsv" \
           /var/lib/quay-storage/tag-mapping.tsv \
           --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
           --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \

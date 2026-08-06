@@ -32,7 +32,7 @@
   hosts: local
   gather_facts: false
   # apsara: dispatch every {{ cloud_cli }} call to apsara-rpc (public: no-op).
-  # NOTE: the `aliyun oss rm` call remains OSS (ossutil) — handled separately.
+  # NOTE: the `{{ oss_cli }} rm` call remains OSS (ossutil) — handled separately.
   environment: "{{ cloud_env | default({}) }}"
   vars:
     teardown_target: cluster        # cluster | mirror | both
@@ -107,7 +107,7 @@
       ansible.builtin.shell: |
         set -uo pipefail
         read AK SK <<<"$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret' ~/.aliyun/config.json)"
-        aliyun oss rm "oss://{{ oss_bucket }}/transit/" --recursive -f \
+        {{ oss_cli }} rm "oss://{{ oss_bucket }}/transit/" --recursive -f \
           --access-key-id="$AK" --access-key-secret="$SK" \
           --region="{{ region }}" --endpoint="oss-{{ region }}.aliyuncs.com" || true
       register: _oss_transit_sweep

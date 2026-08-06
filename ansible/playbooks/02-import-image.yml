@@ -295,7 +295,7 @@
 
           Diagnostics:
             aliyun ecs DescribeTasks --TaskAction ImportImage --RegionId {{ region }}
-            aliyun oss ls oss://{{ oss_bucket }}/{{ oss_object }}
+            {{ oss_cli }} ls oss://{{ oss_bucket }}/{{ oss_object }}
             sed -i '/^ecs_image_id:/d' ansible/state.yml  # drop the stale entry, then re-run 02
 
     # ── Persist state ─────────────────────────────────────────────────────

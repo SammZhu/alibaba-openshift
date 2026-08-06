@@ -65,7 +65,7 @@
     rc_retries: 3
     rc_delay: 15
     rc_cmd: >-
-      {{ _ssh_root_mirror }} 'aliyun oss cp oss://{{ oss_bucket }}/{{ _ship_key }} {{ ship_remote }} -f
+      {{ _ssh_root_mirror }} '{{ oss_cli }} cp oss://{{ oss_bucket }}/{{ _ship_key }} {{ ship_remote }} -f
       --mode=EcsRamRole --ecs-role-name "{{ _ship_mirror_role }}"
       --region={{ region }} --endpoint={{ _ship_int_endpoint }}'
 

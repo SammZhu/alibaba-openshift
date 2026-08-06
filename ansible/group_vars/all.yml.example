@@ -35,6 +35,8 @@ aliyun_profile:      openshift-test              # aliyun-cli profile
 # See docs/apsara/QUICKSTART.md.
 cloud_platform:      public
 cloud_cli:           aliyun     # apsara -> <repo>/scripts/apsara/cloudcli
+# OSS is the data plane (not RPC) — dispatched separately from cloud_cli.
+oss_cli:             "aliyun oss"   # apsara -> <repo>/scripts/apsara/apsara-oss/apsara-oss
 cloud_env:           {}         # apsara -> { CLOUD_PLATFORM: apsara, AK: .., SK: ..,
                                 #   REGION: cn-wulan-ste3-d01, APSARA_PROXY: http://..:3128,
                                 #   ORG_ID: org-.., RG_ID: rs-.., ENDPOINT_ROS: ros.cloud.ste3.com,
