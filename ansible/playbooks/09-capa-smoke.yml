@@ -76,16 +76,8 @@
       register: _img_q
       changed_when: false
 
-    - name: Read AK/SK (for the out-of-band ECS delete in #27)
-      ansible.builtin.command:
-        argv:
-          - jq
-          - -r
-          - '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret'
-          - "{{ lookup('env', 'HOME') }}/.aliyun/config.json"
-      register: _aksk
-      changed_when: false
-      no_log: true
+    - name: Resolve AK/SK (cloud_env on apsara, aliyun config on public) — for the #27 out-of-band ECS delete
+      ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
 
     - name: Compute smoke inputs
       ansible.builtin.set_fact:
@@ -111,8 +103,8 @@
         smoke_ram_role: "{{ mirror_node_ram_role }}"
         smoke_image: "{{ _smoke_img }}"
         smoke_cp_host: "{{ api_lb_endpoint }}"
-        smoke_ak: "{{ _aksk.stdout.split(' ')[0] }}"
-        smoke_sk: "{{ _aksk.stdout.split(' ')[1] }}"
+        smoke_ak: "{{ _ak }}"
+        smoke_sk: "{{ _sk }}"
       no_log: true
 
 - name: CAPA behavioural smoke (executed on the jump host)

@@ -30,21 +30,8 @@
     # alibaba-creds` (see openshift-capi-alicloud config/manager/deployment.yaml). Read them
     # from the operator's aliyun profile here so play 2 can create that secret —
     # without it the controller pod is stuck in CreateContainerConfigError.
-    - name: Read Alibaba AK/SK from the operator's aliyun profile
-      ansible.builtin.command:
-        argv:
-          - jq
-          - -r
-          - '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret'
-          - "{{ lookup('env', 'HOME') }}/.aliyun/config.json"
-      register: _aksk
-      changed_when: false
-      no_log: true
-
-    - name: Assert AK/SK resolved for CAPA creds
-      ansible.builtin.assert:
-        that: (_aksk.stdout | trim | length) > 0 and (_aksk.stdout.split(' ') | length) == 2
-        fail_msg: "Could not read AK/SK for profile '{{ aliyun_profile }}' from ~/.aliyun/config.json"
+    - name: Resolve Alibaba AK/SK (cloud_env on apsara, aliyun config on public)
+      ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
 
     - name: Add the jump host to the inventory (carry creds as host vars)
       ansible.builtin.add_host:
@@ -54,8 +41,8 @@
         ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
         groups: deploy
-        capa_ak: "{{ _aksk.stdout.split(' ')[0] }}"
-        capa_sk: "{{ _aksk.stdout.split(' ')[1] }}"
+        capa_ak: "{{ _ak }}"
+        capa_sk: "{{ _sk }}"
         # Carry the mirror IP so play 2 can apply an ImageTagMirrorSet for the
         # tag-pinned CAPA/CSI images (the install-config only emits an
         # ImageDigestMirrorSet, which does NOT redirect tag pulls — see the ITMS

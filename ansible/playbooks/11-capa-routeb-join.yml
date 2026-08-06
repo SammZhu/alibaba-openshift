@@ -43,14 +43,8 @@
       register: _sg_q
       changed_when: false
 
-    - name: Read AK/SK for alibaba-creds + ECS sweep
-      ansible.builtin.command:
-        argv: [jq, -r,
-               '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret',
-               "{{ lookup('env', 'HOME') }}/.aliyun/config.json"]
-      register: _aksk
-      changed_when: false
-      no_log: true
+    - name: Resolve AK/SK (cloud_env on apsara, aliyun config on public) — for alibaba-creds + ECS sweep
+      ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
 
     - name: Add the jump host (carry Route B inputs)
       ansible.builtin.add_host:
@@ -70,8 +64,8 @@
         rb_ram_role: "{{ mirror_node_ram_role }}"
         rb_cp_host: "{{ api_lb_endpoint }}"
         rb_boot_image: "{{ worker_boot_image_id }}"
-        rb_ak: "{{ _aksk.stdout.split(' ')[0] }}"
-        rb_sk: "{{ _aksk.stdout.split(' ')[1] }}"
+        rb_ak: "{{ _ak }}"
+        rb_sk: "{{ _sk }}"
       no_log: true
 
 - name: Route B worker join (jump host)

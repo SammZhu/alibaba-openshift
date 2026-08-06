@@ -58,21 +58,35 @@ def main():
                  f"(add it to PRODUCTS in {sys.argv[0]})")
     name, version = PRODUCTS[key]
 
-    # Drop aliyun-only flags apsara-rpc does not take.
+    # Drop aliyun-only auth flags apsara-rpc does not take, translating explicit
+    # credentials into the AK/SK env apsara-rpc signs with:
+    #   --profile <name>              -> dropped (apsara-rpc auths via env)
+    #   --access-key-id[=]<v>         -> AK env      (jump-host calls pass creds
+    #   --access-key-secret[=]<v>     -> SK env       explicitly, not via profile)
+    env = dict(os.environ)
     filtered = []
     i = 0
     while i < len(rest):
         a = rest[i]
         if a == "--profile":
-            i += 2            # skip flag + its value
+            i += 2
             continue
         if a.startswith("--profile="):
             i += 1
             continue
-        filtered.append(a)
-        i += 1
+        for flag, var in (("--access-key-id", "AK"), ("--access-key-secret", "SK")):
+            if a == flag:
+                env[var] = rest[i + 1]
+                i += 2
+                break
+            if a.startswith(flag + "="):
+                env[var] = a.split("=", 1)[1]
+                i += 1
+                break
+        else:
+            filtered.append(a)
+            i += 1
 
-    env = dict(os.environ)
     if key in HTTPS_PRODUCTS:
         env["SCHEME"] = "https"
         env.setdefault("INSECURE", "1")
