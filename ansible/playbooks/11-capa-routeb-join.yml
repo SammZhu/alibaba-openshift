@@ -16,6 +16,8 @@
 - name: Resolve Route B inputs (operator)
   hosts: local
   gather_facts: false
+  # apsara: dispatch {{ cloud_cli }} calls to apsara-rpc (public: no-op).
+  environment: "{{ cloud_env | default({}) }}"
   vars_files:
     - "{{ playbook_dir }}/../vars/images.yml"
   vars:
@@ -36,7 +38,7 @@
 
     - name: Discover a security group in the cluster VPC
       ansible.builtin.command:
-        argv: [aliyun, ecs, DescribeSecurityGroups, --RegionId, "{{ region }}",
+        argv: ["{{ cloud_cli }}", ecs, DescribeSecurityGroups, --RegionId, "{{ region }}",
                --VpcId, "{{ mirror_vpc_id }}", --PageSize, "50", --profile, "{{ aliyun_profile }}"]
       register: _sg_q
       changed_when: false
@@ -75,6 +77,9 @@
 - name: Route B worker join (jump host)
   hosts: jumphost
   gather_facts: false
+  # apsara: ECS delete here runs ON the jump host — needs cloudcli + apsara-rpc +
+  # proxy reachable (deployment prereq).  Public: no-op.
+  environment: "{{ cloud_env | default({}) }}"
   vars:
     kc: "--kubeconfig /root/kubeconfig"
     ns: default
@@ -315,7 +320,7 @@
 
         - name: Cleanup — sweep the Route B ECS (operator)
           ansible.builtin.shell: |
-            aliyun ecs DeleteInstance --InstanceId '{{ rb_instance_id | default("") }}' --Force true \
+            {{ cloud_cli }} ecs DeleteInstance --InstanceId '{{ rb_instance_id | default("") }}' --Force true \
               --RegionId {{ rb_region }} --access-key-id '{{ rb_ak }}' --access-key-secret '{{ rb_sk }}' || true
           delegate_to: local
           when: rb_instance_id is defined and rb_instance_id | length > 0

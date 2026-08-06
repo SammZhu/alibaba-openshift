@@ -22,6 +22,8 @@
 - name: Resolve jump host + smoke inputs from operator
   hosts: local
   gather_facts: false
+  # apsara: dispatch {{ cloud_cli }} calls to apsara-rpc (public: no-op).
+  environment: "{{ cloud_env | default({}) }}"
   vars_files:
     - "{{ playbook_dir }}/../vars/images.yml"
   vars:
@@ -41,7 +43,7 @@
     - name: Discover a security group in the cluster VPC
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - DescribeSecurityGroups
           - --RegionId
@@ -58,7 +60,7 @@
     - name: Discover latest Rocky x64 public image
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - DescribeImages
           - --RegionId
@@ -116,6 +118,9 @@
 - name: CAPA behavioural smoke (executed on the jump host)
   hosts: jumphost
   gather_facts: false
+  # apsara: the out-of-band ECS deletes here run ON the jump host, so it needs
+  # cloudcli + apsara-rpc + proxy reachable (deployment prereq).  Public: no-op.
+  environment: "{{ cloud_env | default({}) }}"
   vars:
     kc: "--kubeconfig /root/kubeconfig"
     ns: default
@@ -301,12 +306,12 @@
         # #27 saw the object already mid-delete).  Wait for finalizers here.
         - name: (setup) sweep any leftover smoke ECS first (frees stuck finalizers fast)
           ansible.builtin.shell: |
-            IDS=$(aliyun ecs DescribeInstances --RegionId {{ smoke_region }} \
+            IDS=$({{ cloud_cli }} ecs DescribeInstances --RegionId {{ smoke_region }} \
               --InstanceName 'smoke-*' --PageSize 50 \
               --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' 2>/dev/null \
               | jq -r '.Instances.Instance[]?.InstanceId')
             for i in $IDS; do
-              aliyun ecs DeleteInstance --InstanceId "$i" --Force true --RegionId {{ smoke_region }} \
+              {{ cloud_cli }} ecs DeleteInstance --InstanceId "$i" --Force true --RegionId {{ smoke_region }} \
                 --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' || true
             done
           delegate_to: local
@@ -356,7 +361,7 @@
           # deletable (force-delete works once it reaches Running).
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DeleteInstance
               - --InstanceId
@@ -380,7 +385,7 @@
         - name: "#27 — wait until the ECS is fully gone (so describe → nil)"
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DescribeInstances
               - --RegionId
@@ -459,7 +464,7 @@
         - name: (reset) wait until the fresh ECS is Running
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DescribeInstances
               - --RegionId
@@ -514,12 +519,12 @@
       always:
         - name: cleanup — sweep any leftover smoke ECS first (frees finalizers)
           ansible.builtin.shell: |
-            IDS=$(aliyun ecs DescribeInstances --RegionId {{ smoke_region }} \
+            IDS=$({{ cloud_cli }} ecs DescribeInstances --RegionId {{ smoke_region }} \
               --InstanceName 'smoke-*' --PageSize 50 \
               --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' 2>/dev/null \
               | jq -r '.Instances.Instance[]?.InstanceId')
             for i in $IDS; do
-              aliyun ecs DeleteInstance --InstanceId "$i" --Force true --RegionId {{ smoke_region }} \
+              {{ cloud_cli }} ecs DeleteInstance --InstanceId "$i" --Force true --RegionId {{ smoke_region }} \
                 --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' || true
             done
           delegate_to: local
@@ -535,12 +540,12 @@
 
         - name: cleanup — sweep any leftover smoke ECS again (operator)
           ansible.builtin.shell: |
-            IDS=$(aliyun ecs DescribeInstances --RegionId {{ smoke_region }} \
+            IDS=$({{ cloud_cli }} ecs DescribeInstances --RegionId {{ smoke_region }} \
               --InstanceName 'smoke-*' --PageSize 50 \
               --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' 2>/dev/null \
               | jq -r '.Instances.Instance[]?.InstanceId')
             for i in $IDS; do
-              aliyun ecs DeleteInstance --InstanceId "$i" --Force true --RegionId {{ smoke_region }} \
+              {{ cloud_cli }} ecs DeleteInstance --InstanceId "$i" --Force true --RegionId {{ smoke_region }} \
                 --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' || true
             done
           delegate_to: local
