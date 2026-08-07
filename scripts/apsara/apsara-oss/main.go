@@ -20,20 +20,52 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 )
 
 func die(a ...interface{}) { fmt.Fprintln(os.Stderr, a...); os.Exit(1) }
 
-func env(k, d string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
 	}
-	return d
+	return ""
+}
+
+// ecsRamRoleCreds fetches temporary STS credentials for the instance's attached
+// RAM role from the ECS metadata service (--mode=EcsRamRole in aliyun oss).  The
+// metadata endpoint is the same on public Aliyun Cloud and Apsara ECS.
+func ecsRamRoleCreds(role string) (ak, sk, token string) {
+	url := "http://100.100.100.200/latest/meta-data/ram/security-credentials/" + role
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		die("ecs metadata (RAM role creds):", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		die("ecs metadata (RAM role '"+role+"') HTTP", resp.StatusCode, string(body))
+	}
+	var c struct {
+		AccessKeyId     string
+		AccessKeySecret string
+		SecurityToken   string
+	}
+	if err := json.Unmarshal(body, &c); err != nil {
+		die("ecs metadata parse:", err, string(body))
+	}
+	return c.AccessKeyId, c.AccessKeySecret, c.SecurityToken
 }
 
 // parseArgs splits argv into positionals and --flag[=value] / bare flags.
@@ -83,25 +115,27 @@ func splitOSS(uri string) (bucket, key string, ok bool) {
 }
 
 func newBucket(flags map[string]string, bucket string) *oss.Bucket {
-	endpoint := flags["endpoint"]
+	endpoint := firstNonEmpty(flags["endpoint"], os.Getenv("OSS_ENDPOINT"))
 	if endpoint == "" {
-		endpoint = os.Getenv("OSS_ENDPOINT")
+		die("apsara-oss: need --endpoint (or OSS_ENDPOINT)")
 	}
-	ak := env("AK", flags["access-key-id"])
-	if v := flags["access-key-id"]; v != "" {
-		ak = v
+
+	var ak, sk, token string
+	if strings.EqualFold(flags["mode"], "EcsRamRole") {
+		role := flags["ecs-role-name"]
+		if role == "" {
+			die("--mode=EcsRamRole needs --ecs-role-name")
+		}
+		ak, sk, token = ecsRamRoleCreds(role)
+	} else {
+		ak = firstNonEmpty(flags["access-key-id"], os.Getenv("AK"))
+		sk = firstNonEmpty(flags["access-key-secret"], os.Getenv("SK"))
+		token = firstNonEmpty(flags["sts-token"], os.Getenv("OSS_STS_TOKEN"))
 	}
-	sk := env("SK", flags["access-key-secret"])
-	if v := flags["access-key-secret"]; v != "" {
-		sk = v
+	if ak == "" || sk == "" {
+		die("apsara-oss: need AK/SK (--access-key-id/-secret, AK/SK env, or --mode=EcsRamRole --ecs-role-name)")
 	}
-	token := flags["sts-token"]
-	if token == "" {
-		token = os.Getenv("OSS_STS_TOKEN")
-	}
-	if endpoint == "" || ak == "" || sk == "" {
-		die("apsara-oss: need endpoint (--endpoint/OSS_ENDPOINT) + AK/SK (--access-key-id/-secret or AK/SK env)")
-	}
+
 	var opts []oss.ClientOption
 	if token != "" {
 		opts = append(opts, oss.SecurityToken(token))

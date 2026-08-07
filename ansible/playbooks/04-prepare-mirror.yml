@@ -18,6 +18,10 @@
 - name: Prepare mirror-registry on the bare ECS provisioned by Phase 03 (mirror-stack)
   hosts: local
   gather_facts: false
+  # apsara: cloud_env carries AK/SK/endpoints so {{ oss_cli }} (apsara-oss) and the
+  # operator-side OSS stat below authenticate; the mirror-ECS downloads use the
+  # instance RAM role (--mode=EcsRamRole).  Public: cloud_env={} — a no-op.
+  environment: "{{ cloud_env | default({}) }}"
   vars_files:
     - "{{ playbook_dir }}/../vars/images.yml"
   vars:
@@ -422,8 +426,9 @@
     # after this task so failure is actionable.
     - name: Get expected tarball size from OSS
       ansible.builtin.shell: |
-        AK=$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id' ~/.aliyun/config.json)
-        SK=$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_secret' ~/.aliyun/config.json)
+        # env-first: apsara sets AK/SK via cloud_env; public falls back to the aliyun CLI config.
+        AK="${AK:-$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id' ~/.aliyun/config.json)}"
+        SK="${SK:-$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_secret' ~/.aliyun/config.json)}"
         {{ oss_cli }} stat "oss://{{ oss_bucket }}/{{ mirror_oss_object }}" \
           --endpoint="{{ _oss_pub_endpoint }}" \
           --access-key-id="$AK" --access-key-secret="$SK" \
