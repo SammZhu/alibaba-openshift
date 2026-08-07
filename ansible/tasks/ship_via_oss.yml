@@ -19,8 +19,8 @@
 - name: "ship_via_oss [{{ ship_object }}] — set endpoints"
   ansible.builtin.set_fact:
     _ship_key: "transit/{{ ship_object }}"
-    _ship_pub_endpoint: "oss-{{ region }}.aliyuncs.com"
-    _ship_int_endpoint: "oss-{{ region }}-internal.aliyuncs.com"
+    _ship_pub_endpoint: "{{ _oss_pub_endpoint }}"
+    _ship_int_endpoint: "{{ _oss_int_endpoint }}"
     _ship_mirror_role: "{{ cluster_name }}-mirror-role"
 
 - name: "ship_via_oss [{{ ship_object }}] — read operator OSS AK/SK"

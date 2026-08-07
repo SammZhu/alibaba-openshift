@@ -130,7 +130,7 @@
       - cp
       - "{{ output_dir }}/tag-mapping.tsv"
       - "oss://{{ oss_bucket }}/{{ mirror_oss_object }}.tag-mapping.tsv"
-      - "--endpoint=oss-{{ region }}.aliyuncs.com"
+      - "--endpoint={{ _oss_pub_endpoint }}"
       - "--access-key-id={{ _rtm_oss_ak }}"
       - "--access-key-secret={{ _rtm_oss_sk }}"
       - -f

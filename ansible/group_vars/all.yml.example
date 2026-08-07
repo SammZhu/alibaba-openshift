@@ -53,6 +53,12 @@ apsara_image_id:     ""
 # it does NOT go through apsara-rpc/cloudcli; the operator host still needs the
 # aliyun CLI (or ossutil) able to reach this endpoint.
 apsara_oss_endpoint: ""
+# Computed OSS endpoints used across the OSS call sites.  Public cloud keeps the
+# deliberate internal(free)/public split; Apsara collapses both to its single
+# apsara_oss_endpoint.  (Lazy Jinja — evaluated per use, so region/cloud_platform
+# overrides apply.)
+_oss_pub_endpoint: "{{ apsara_oss_endpoint if (cloud_platform | default('public')) == 'apsara' else 'oss-' + region + '.aliyuncs.com' }}"
+_oss_int_endpoint: "{{ apsara_oss_endpoint if (cloud_platform | default('public')) == 'apsara' else 'oss-' + region + '-internal.aliyuncs.com' }}"
 
 # ── OADP / OSS backup (optional, day-2) ──────────────────────────────────────
 # Backs up cluster resources + PV data to Alibaba Cloud OSS (S3-compatible) via

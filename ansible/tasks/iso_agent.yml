@@ -34,7 +34,7 @@
     _m_install_dir: /var/lib/quay-storage/agent-build/install
     _m_tmp: /var/lib/quay-storage/agent-build/tmp
     _m_iso: /var/lib/quay-storage/agent-build/install/agent.x86_64.iso
-    _oss_internal_endpoint: "oss-{{ region }}-internal.aliyuncs.com"
+    _oss_internal_endpoint: "{{ _oss_int_endpoint }}"
     oss_object: "agent-{{ cluster_name }}.iso"
 
 - name: ABI — set _ssh_root_mirror

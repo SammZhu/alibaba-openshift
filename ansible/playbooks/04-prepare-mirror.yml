@@ -314,7 +314,7 @@
         {{ oss_cli }} cp \
           "oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-version.txt" \
           ./mr-version.txt \
-          --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
+          --endpoint="{{ _oss_int_endpoint }}" \
           --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
           --region "{{ region }}" --force
         MR_VERSION=$(cat ./mr-version.txt | tr -d '[:space:]')
@@ -323,7 +323,7 @@
         {{ oss_cli }} cp \
           "oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-$MR_VERSION.tar.gz" \
           ./mirror-registry.tar.gz \
-          --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
+          --endpoint="{{ _oss_int_endpoint }}" \
           --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
           --region "{{ region }}" --part-size=104857600 --parallel=10
         tar xzf mirror-registry.tar.gz
@@ -355,7 +355,7 @@
         {{ oss_cli }} cp \
           "oss://{{ oss_bucket }}/mirror-tarballs/openshift-patch-version.txt" \
           ./ocp-version.txt \
-          --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
+          --endpoint="{{ _oss_int_endpoint }}" \
           --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
           --region "{{ region }}" --force
         OCP_VERSION=$(cat ./ocp-version.txt | tr -d '[:space:]')
@@ -425,7 +425,7 @@
         AK=$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id' ~/.aliyun/config.json)
         SK=$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_secret' ~/.aliyun/config.json)
         {{ oss_cli }} stat "oss://{{ oss_bucket }}/{{ mirror_oss_object }}" \
-          --endpoint="oss-{{ region }}.aliyuncs.com" \
+          --endpoint="{{ _oss_pub_endpoint }}" \
           --access-key-id="$AK" --access-key-secret="$SK" \
           | awk -F': *' '/Content-Length/ {print $2}'
       register: oss_size
@@ -449,12 +449,12 @@
             - group_vars/all.yml's openshift_version was changed (e.g. 4.20 → 4.20.22)
               but the OSS tarball still has the old name.  Check what's there:
                 {{ oss_cli }} ls oss://{{ oss_bucket }}/mirror-tarballs/ \
-                  --endpoint=oss-{{ region }}.aliyuncs.com
+                  --endpoint={{ _oss_pub_endpoint }}
             - or the OSS object was deleted / moved to a different bucket.
           Fix: either rename the tarball server-side (intra-bucket — seconds) or re-upload:
             {{ oss_cli }} cp oss://{{ oss_bucket }}/mirror-tarballs/<old-name>.tar \
                           oss://{{ oss_bucket }}/{{ mirror_oss_object }} \
-                --endpoint=oss-{{ region }}.aliyuncs.com \
+                --endpoint={{ _oss_pub_endpoint }} \
                 --part-size=104857600 --parallel=10
           The isc + tag-mapping sibling objects must be renamed/copied alongside (same base name).
       when:
@@ -471,7 +471,7 @@
         # from where the .temp left off (~10x faster than restarting at 0).
         {{ oss_cli }} cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}" \
           /var/lib/quay-storage/mirror-tarball.tar \
-          --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
+          --endpoint="{{ _oss_int_endpoint }}" \
           --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
           --region "{{ region }}" --part-size=104857600 --parallel=10 --force
         REMOTE
@@ -704,7 +704,7 @@
         echo "=== $(date -Iseconds) downloading imageset-config.yaml from OSS ==="
         {{ oss_cli }} cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}.imageset-config.yaml" \
           /var/lib/quay-storage/extracted/imageset-config.yaml \
-          --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
+          --endpoint="{{ _oss_int_endpoint }}" \
           --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
           --region "{{ region }}" --force
         # Sanity: 80 bytes is the size of the old empty `mirror: {}` stub;
@@ -900,7 +900,7 @@
         set -euxo pipefail
         {{ oss_cli }} cp "oss://{{ oss_bucket }}/{{ mirror_oss_object }}.tag-mapping.tsv" \
           /var/lib/quay-storage/tag-mapping.tsv \
-          --endpoint="oss-{{ region }}-internal.aliyuncs.com" \
+          --endpoint="{{ _oss_int_endpoint }}" \
           --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
           --region "{{ region }}" --force
         wc -l /var/lib/quay-storage/tag-mapping.tsv

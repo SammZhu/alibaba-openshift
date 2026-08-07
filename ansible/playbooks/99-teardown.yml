@@ -109,7 +109,7 @@
         read AK SK <<<"$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret' ~/.aliyun/config.json)"
         {{ oss_cli }} rm "oss://{{ oss_bucket }}/transit/" --recursive -f \
           --access-key-id="$AK" --access-key-secret="$SK" \
-          --region="{{ region }}" --endpoint="oss-{{ region }}.aliyuncs.com" || true
+          --region="{{ region }}" --endpoint="{{ _oss_pub_endpoint }}" || true
       register: _oss_transit_sweep
       changed_when: "'Succeed' in (_oss_transit_sweep.stdout | default('')) or 'removed' in (_oss_transit_sweep.stdout | default('')|lower)"
       failed_when: false
