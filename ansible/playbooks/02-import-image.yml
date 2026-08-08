@@ -3,6 +3,8 @@
 - name: Import Discovery ISO as ECS custom image
   hosts: local
   gather_facts: false
+  # apsara: dispatch {{ cloud_cli }}/{{ oss_cli }} calls + supply AK/SK (public: no-op).
+  environment: "{{ cloud_env | default({}) }}"
   vars:
     oss_object: "discovery-{{ cluster_name }}.iso"
     # ossutil (used by `aliyun oss`) does NOT support --profile.
@@ -23,18 +25,13 @@
 
     # ── Read OSS credentials from aliyun profile ──────────────────────────
     # ossutil does not understand --profile; extract AK/SK from config.json.
-    - name: Read AK/SK from aliyun profile for OSS commands
-      ansible.builtin.shell: |
-        jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret' \
-          ~/.aliyun/config.json
-      register: _oss_creds_raw
-      changed_when: false
-      no_log: true
+    - name: Resolve AK/SK for OSS commands (cloud_env on apsara, aliyun config on public)
+      ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
 
     - name: Set OSS credential facts
       ansible.builtin.set_fact:
-        _oss_ak: "{{ _oss_creds_raw.stdout.split(' ')[0] }}"
-        _oss_sk: "{{ _oss_creds_raw.stdout.split(' ')[1] }}"
+        _oss_ak: "{{ _ak }}"
+        _oss_sk: "{{ _sk }}"
       no_log: true
 
     # ── Ensure OSS bucket exists in the right region ──────────────────────

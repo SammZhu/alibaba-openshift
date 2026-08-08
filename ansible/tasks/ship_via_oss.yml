@@ -23,18 +23,13 @@
     _ship_int_endpoint: "{{ _oss_int_endpoint }}"
     _ship_mirror_role: "{{ cluster_name }}-mirror-role"
 
-- name: "ship_via_oss [{{ ship_object }}] — read operator OSS AK/SK"
-  ansible.builtin.shell: >-
-    jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret'
-    ~/.aliyun/config.json
-  register: _ship_aksk
-  changed_when: false
-  no_log: true
+- name: "ship_via_oss [{{ ship_object }}] — resolve operator OSS AK/SK"
+  ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
 
 - name: "ship_via_oss [{{ ship_object }}] — set AK/SK facts"
   ansible.builtin.set_fact:
-    _ship_ak: "{{ _ship_aksk.stdout.split(' ')[0] }}"
-    _ship_sk: "{{ _ship_aksk.stdout.split(' ')[1] }}"
+    _ship_ak: "{{ _ak }}"
+    _ship_sk: "{{ _sk }}"
   no_log: true
 
 # run_cli: no_log (AK/SK in argv) + retries + surfaces the OSS error (stderr, no
