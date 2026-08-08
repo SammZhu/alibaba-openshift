@@ -1166,7 +1166,7 @@
               prior tasks marked OK but "changed=false".
 
               Quick manual cleanup commands:
-                aliyun ecs DescribeSnapshots --SnapshotName 'SnapshotForImage-openshift-{{ cluster_name }}-iso' --PageSize 100 --RegionId {{ region }} --profile {{ aliyun_profile }} | jq -r '.Snapshots.Snapshot[].SnapshotId' | xargs -n1 -I{} aliyun ecs DeleteSnapshot --SnapshotId {} --RegionId {{ region }} --profile {{ aliyun_profile }}
+                {{ cloud_cli }} ecs DescribeSnapshots --SnapshotName 'SnapshotForImage-openshift-{{ cluster_name }}-iso' --PageSize 100 --RegionId {{ region }} --profile {{ aliyun_profile }} | jq -r '.Snapshots.Snapshot[].SnapshotId' | xargs -n1 -I{} {{ cloud_cli }} ecs DeleteSnapshot --SnapshotId {} --RegionId {{ region }} --profile {{ aliyun_profile }}
             success_msg: |
               ✓ post-teardown sanity PASSED.
                 cluster-stack={{ _obs_cluster_stack }}/{{ _exp_cluster_stack }}
