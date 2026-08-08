@@ -53,7 +53,7 @@
       register: _sg_q
       changed_when: false
 
-    - name: Read AK/SK for alibaba-creds (env-first: cloud_env on apsara, aliyun config on public)
+    - name: Read AK/SK for alibaba-creds (env-first — cloud_env on apsara, aliyun config on public)
       ansible.builtin.shell: >-
         if [ -n "${AK:-}" ] && [ -n "${SK:-}" ]; then echo "$AK $SK";
         else jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret' ~/.aliyun/config.json; fi
