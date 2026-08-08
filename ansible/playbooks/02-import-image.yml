@@ -38,9 +38,9 @@
     # ossutil requires --flag=value form; space-separated (-i VALUE) is not supported.
     - name: Check OSS bucket
       ansible.builtin.command:
-        argv:
-          - aliyun
-          - oss
+        argv: "{{ oss_cli_argv + _a }}"
+      vars:
+        _a:
           - ls
           - "oss://{{ oss_bucket }}/"
           - "--endpoint={{ _oss_endpoint }}"
@@ -53,9 +53,9 @@
 
     - name: Create OSS bucket if missing
       ansible.builtin.command:
-        argv:
-          - aliyun
-          - oss
+        argv: "{{ oss_cli_argv + _a }}"
+      vars:
+        _a:
           - mb
           - "oss://{{ oss_bucket }}"
           - "--endpoint={{ _oss_endpoint }}"
@@ -67,9 +67,9 @@
     # ── Upload ISO (idempotent by size) ───────────────────────────────────
     - name: Check current object size in OSS
       ansible.builtin.command:
-        argv:
-          - aliyun
-          - oss
+        argv: "{{ oss_cli_argv + _a }}"
+      vars:
+        _a:
           - stat
           - "oss://{{ oss_bucket }}/{{ oss_object }}"
           - "--endpoint={{ _oss_endpoint }}"
@@ -98,9 +98,7 @@
         rc_label: "OSS upload discovery ISO"
         rc_retries: 3
         rc_delay: 15
-        rc_argv:
-          - aliyun
-          - oss
+        _oss_rest:
           - cp
           - "{{ iso_path }}"
           - "oss://{{ oss_bucket }}/{{ oss_object }}"
@@ -108,6 +106,7 @@
           - "--access-key-id={{ _oss_ak }}"
           - "--access-key-secret={{ _oss_sk }}"
           - -f
+        rc_argv: "{{ oss_cli_argv + _oss_rest }}"
       when: oss_stat.rc != 0 or (_remote_size | default(0) | int) != iso_stat.stat.size
 
     # ── Ensure RAM role for ECS→OSS import (first-time setup) ─────────────
@@ -306,9 +305,9 @@
     # Local copy at iso_path is retained; OSS object only existed to feed ImportImage.
     - name: Delete ISO from OSS (image imported; local copy retained)
       ansible.builtin.command:
-        argv:
-          - aliyun
-          - oss
+        argv: "{{ oss_cli_argv + _a }}"
+      vars:
+        _a:
           - rm
           - "oss://{{ oss_bucket }}/{{ oss_object }}"
           - "--endpoint={{ _oss_endpoint }}"

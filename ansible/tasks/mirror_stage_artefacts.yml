@@ -38,9 +38,9 @@
 
 - name: Mirror — check whether installer already in OSS (idempotency)
   ansible.builtin.command:
-    argv:
-      - aliyun
-      - oss
+    argv: "{{ oss_cli_argv + _a }}"
+  vars:
+    _a:
       - stat
       - "oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-{{ _mirror_registry_version }}.tar.gz"
       - "--endpoint={{ _oss_endpoint }}"
@@ -66,9 +66,7 @@
     rc_label: "OSS upload mirror-registry installer"
     rc_retries: 3
     rc_delay: 15
-    rc_argv:
-      - aliyun
-      - oss
+    _oss_rest:
       - cp
       - "/tmp/mirror-registry-{{ _mirror_registry_version }}.tar.gz"
       - "oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-{{ _mirror_registry_version }}.tar.gz"
@@ -78,6 +76,7 @@
       - "--part-size=104857600"
       - "--parallel=10"
       - "--force"
+    rc_argv: "{{ oss_cli_argv + _oss_rest }}"
   when: _mr_oss_stat.rc != 0
 
 - name: Mirror — write local version-marker file
@@ -90,9 +89,7 @@
   ansible.builtin.include_tasks: ../tasks/run_cli.yml
   vars:
     rc_label: "OSS upload mirror-registry-version marker"
-    rc_argv:
-      - aliyun
-      - oss
+    _oss_rest:
       - cp
       - "/tmp/mirror-registry-version.txt"
       - "oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-version.txt"
@@ -100,6 +97,7 @@
       - "--access-key-id={{ _oss_ak }}"
       - "--access-key-secret={{ _oss_sk }}"
       - "--force"
+    rc_argv: "{{ oss_cli_argv + _oss_rest }}"
 
 # ── Also stage the OpenShift patch version marker ─────────────────────────────
 # Cloud-init constructs the versioned URL for oc + oc-mirror download.  The
@@ -156,9 +154,7 @@
   ansible.builtin.include_tasks: ../tasks/run_cli.yml
   vars:
     rc_label: "OSS upload openshift-patch-version marker"
-    rc_argv:
-      - aliyun
-      - oss
+    _oss_rest:
       - cp
       - "/tmp/openshift-patch-version.txt"
       - "oss://{{ oss_bucket }}/mirror-tarballs/openshift-patch-version.txt"
@@ -166,6 +162,7 @@
       - "--access-key-id={{ _oss_ak }}"
       - "--access-key-secret={{ _oss_sk }}"
       - "--force"
+    rc_argv: "{{ oss_cli_argv + _oss_rest }}"
 
 - name: Mirror — report staged artefacts
   ansible.builtin.debug:

@@ -40,9 +40,7 @@
     rc_label: "OSS upload {{ ship_object }}"
     rc_retries: 3
     rc_delay: 15
-    rc_argv:
-      - aliyun
-      - oss
+    _oss_rest:
       - cp
       - "{{ ship_local }}"
       - "oss://{{ oss_bucket }}/{{ _ship_key }}"
@@ -51,6 +49,7 @@
       - "--access-key-secret={{ _ship_sk }}"
       - "--region={{ region }}"
       - "--endpoint={{ _ship_pub_endpoint }}"
+    rc_argv: "{{ oss_cli_argv + _oss_rest }}"
 
 - name: "ship_via_oss [{{ ship_object }}] — mirror pulls from OSS (internal endpoint, RAM role)"
   ansible.builtin.include_tasks: ../tasks/run_cli.yml
@@ -66,9 +65,9 @@
 
 - name: "ship_via_oss [{{ ship_object }}] — delete the OSS transit object"
   ansible.builtin.command:
-    argv:
-      - aliyun
-      - oss
+    argv: "{{ oss_cli_argv + _a }}"
+  vars:
+    _a:
       - rm
       - "oss://{{ oss_bucket }}/{{ _ship_key }}"
       - -f

@@ -147,10 +147,12 @@
 
         - name: Check whether the raw qcow is already staged in OSS
           ansible.builtin.command:
-            argv: [aliyun, oss, ls, "oss://{{ oss_bucket }}/{{ _qcow_src_object }}",
-                   "--endpoint={{ _oss_endpoint }}",
-                   "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
-                   "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}"]
+            argv: "{{ oss_cli_argv + _a }}"
+          vars:
+            _a: [ls, "oss://{{ oss_bucket }}/{{ _qcow_src_object }}",
+                 "--endpoint={{ _oss_endpoint }}",
+                 "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
+                 "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}"]
           register: _qcow_oss_ls
           changed_when: false
           failed_when: false
@@ -164,10 +166,12 @@
 
         - name: Pull the raw qcow from OSS (air-gap; resumable)
           ansible.builtin.command:
-            argv: [aliyun, oss, cp, "oss://{{ oss_bucket }}/{{ _qcow_src_object }}", "{{ qcow_gz }}",
-                   "--endpoint={{ _oss_endpoint }}",
-                   "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
-                   "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
+            argv: "{{ oss_cli_argv + _a }}"
+          vars:
+            _a: [cp, "oss://{{ oss_bucket }}/{{ _qcow_src_object }}", "{{ qcow_gz }}",
+                 "--endpoint={{ _oss_endpoint }}",
+                 "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
+                 "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
           register: _qcow_oss_dl
           retries: 3
           delay: 15
@@ -208,10 +212,12 @@
 
         - name: Seed the raw qcow into OSS for future air-gapped runs
           ansible.builtin.command:
-            argv: [aliyun, oss, cp, "{{ qcow_gz }}", "oss://{{ oss_bucket }}/{{ _qcow_src_object }}",
-                   "--endpoint={{ _oss_endpoint }}",
-                   "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
-                   "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
+            argv: "{{ oss_cli_argv + _a }}"
+          vars:
+            _a: [cp, "{{ qcow_gz }}", "oss://{{ oss_bucket }}/{{ _qcow_src_object }}",
+                 "--endpoint={{ _oss_endpoint }}",
+                 "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
+                 "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
           no_log: true
           changed_when: true
           when:
@@ -338,10 +344,12 @@
         # (_aksk was read above, before the raw-qcow OSS staging.)
         - name: Upload qcow2 to OSS
           ansible.builtin.command:
-            argv: [aliyun, oss, cp, "{{ qcow }}", "oss://{{ oss_bucket }}/{{ oss_object }}",
-                   "--endpoint={{ _oss_endpoint }}",
-                   "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
-                   "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
+            argv: "{{ oss_cli_argv + _a }}"
+          vars:
+            _a: [cp, "{{ qcow }}", "oss://{{ oss_bucket }}/{{ oss_object }}",
+                 "--endpoint={{ _oss_endpoint }}",
+                 "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
+                 "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
           no_log: true
           changed_when: true
           when: not (skip_upload_until_gate | bool)
@@ -401,10 +409,12 @@
         # (zero standing storage) rather than letting it linger until teardown.
         - name: Delete the OSS transit object (image materialized; zero standing storage)
           ansible.builtin.command:
-            argv: [aliyun, oss, rm, "oss://{{ oss_bucket }}/{{ oss_object }}",
-                   "--endpoint={{ _oss_endpoint }}",
-                   "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
-                   "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
+            argv: "{{ oss_cli_argv + _a }}"
+          vars:
+            _a: [rm, "oss://{{ oss_bucket }}/{{ oss_object }}",
+                 "--endpoint={{ _oss_endpoint }}",
+                 "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
+                 "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
           no_log: true
           changed_when: true
           when: not (skip_upload_until_gate | bool)
