@@ -37,6 +37,9 @@ cloud_platform:      public
 cloud_cli:           aliyun     # apsara -> <repo>/scripts/apsara/cloudcli
 # OSS is the data plane (not RPC) — dispatched separately from cloud_cli.
 oss_cli:             "aliyun oss"   # apsara -> <repo>/scripts/apsara/apsara-oss/apsara-oss
+# List form of oss_cli for `command: argv:` tasks (aliyun oss is two tokens; the
+# apsara-oss path is one).  Use as: argv: "{{ oss_cli_argv + ['cp', src, dst] }}"
+oss_cli_argv:        "{{ oss_cli.split() }}"
 cloud_env:           {}         # apsara -> { CLOUD_PLATFORM: apsara, AK: .., SK: ..,
                                 #   REGION: cn-wulan-ste3-d01, APSARA_PROXY: http://..:3128,
                                 #   ORG_ID: org-.., RG_ID: rs-.., ENDPOINT_ROS: ros.cloud.ste3.com,

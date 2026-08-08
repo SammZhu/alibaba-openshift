@@ -114,7 +114,7 @@ func splitOSS(uri string) (bucket, key string, ok bool) {
 	return bucket, key, true
 }
 
-func newBucket(flags map[string]string, bucket string) *oss.Bucket {
+func newClient(flags map[string]string) *oss.Client {
 	endpoint := firstNonEmpty(flags["endpoint"], os.Getenv("OSS_ENDPOINT"))
 	if endpoint == "" {
 		die("apsara-oss: need --endpoint (or OSS_ENDPOINT)")
@@ -144,7 +144,11 @@ func newBucket(flags map[string]string, bucket string) *oss.Bucket {
 	if err != nil {
 		die("oss client:", err)
 	}
-	b, err := client.Bucket(bucket)
+	return client
+}
+
+func newBucket(flags map[string]string, bucket string) *oss.Bucket {
+	b, err := newClient(flags).Bucket(bucket)
 	if err != nil {
 		die("oss bucket:", err)
 	}
@@ -252,7 +256,18 @@ func main() {
 			die("stat: object does not exist: " + pos[0])
 		}
 		fmt.Printf("oss://%s/%s exists\n", b, key)
+	case "mb":
+		if len(pos) < 1 {
+			die("mb: need <oss://bucket>")
+		}
+		b, _, ok := splitOSS(pos[0])
+		if !ok {
+			die("mb: target must be an oss:// URI")
+		}
+		if err := newClient(flags).CreateBucket(b); err != nil {
+			die("mb:", err)
+		}
 	default:
-		die("unknown command: " + cmd + " (want cp|rm|ls|stat)")
+		die("unknown command: " + cmd + " (want cp|rm|ls|stat|mb)")
 	}
 }
