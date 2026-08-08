@@ -24,7 +24,7 @@
 - name: "[{{ _tz }}] create vSwitch {{ _cidr_base }}.{{ _new_octet | default('?') }}.0/24"
   when: not _tz_has_vsw
   ansible.builtin.command:
-    argv: [aliyun, vpc, CreateVSwitch, --RegionId, "{{ region }}",
+    argv: ["{{ cloud_cli }}", vpc, CreateVSwitch, --RegionId, "{{ region }}",
            --VpcId, "{{ mirror_vpc_id }}", --ZoneId, "{{ _tz }}",
            --CidrBlock, "{{ _cidr_base }}.{{ _new_octet }}.0/24",
            --VSwitchName, "capa-worker-{{ _tz }}", --profile, "{{ aliyun_profile }}"]
@@ -39,7 +39,7 @@
 - name: "[{{ _tz }}] wait for the new vSwitch to be Available"
   when: not _tz_has_vsw
   ansible.builtin.command:
-    argv: [aliyun, vpc, DescribeVSwitchAttributes, --RegionId, "{{ region }}",
+    argv: ["{{ cloud_cli }}", vpc, DescribeVSwitchAttributes, --RegionId, "{{ region }}",
            --VSwitchId, "{{ (_vsw_create.stdout | from_json).VSwitchId }}", --profile, "{{ aliyun_profile }}"]
   register: _vsw_attr
   retries: 12
@@ -59,7 +59,7 @@
     - _nat_snat_table_id | default('') | length > 0
     - _nat_snat_ip | default('') | length > 0
   ansible.builtin.command:
-    argv: [aliyun, vpc, CreateSnatEntry, --RegionId, "{{ region }}",
+    argv: ["{{ cloud_cli }}", vpc, CreateSnatEntry, --RegionId, "{{ region }}",
            --SnatTableId, "{{ _nat_snat_table_id }}",
            --SourceVSwitchId, "{{ (_vsw_create.stdout | from_json).VSwitchId }}",
            --SnatIp, "{{ _nat_snat_ip }}"]

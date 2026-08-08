@@ -22,6 +22,7 @@
 # fail) without keeping cloud resources around.
 - name: Resolve multi-AZ inputs + ensure per-zone vSwitches (operator)
   hosts: local
+  environment: "{{ cloud_env | default({}) }}"
   gather_facts: false
   vars:
     worker_instance_type: "ecs.g7.xlarge"
@@ -47,16 +48,15 @@
 
     - name: Discover a security group in the cluster VPC
       ansible.builtin.command:
-        argv: [aliyun, ecs, DescribeSecurityGroups, --RegionId, "{{ region }}",
+        argv: ["{{ cloud_cli }}", ecs, DescribeSecurityGroups, --RegionId, "{{ region }}",
                --VpcId, "{{ mirror_vpc_id }}", --PageSize, "50", --profile, "{{ aliyun_profile }}"]
       register: _sg_q
       changed_when: false
 
-    - name: Read AK/SK for alibaba-creds
-      ansible.builtin.command:
-        argv: [jq, -r,
-               '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret',
-               "{{ lookup('env', 'HOME') }}/.aliyun/config.json"]
+    - name: Read AK/SK for alibaba-creds (env-first: cloud_env on apsara, aliyun config on public)
+      ansible.builtin.shell: >-
+        if [ -n "${AK:-}" ] && [ -n "${SK:-}" ]; then echo "$AK $SK";
+        else jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret' ~/.aliyun/config.json; fi
       register: _aksk
       changed_when: false
       no_log: true
@@ -64,7 +64,7 @@
     # ── Determine the target zones (mirror's zone first, then siblings) ─────────
     - name: Describe zones in the region
       ansible.builtin.command:
-        argv: [aliyun, ecs, DescribeZones, --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
+        argv: ["{{ cloud_cli }}", ecs, DescribeZones, --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
       register: _zones_q
       changed_when: false
 
@@ -79,7 +79,7 @@
     # actually have stock of the worker instance type and keep only those.
     - name: Query zones that offer the worker instance type
       ansible.builtin.command:
-        argv: [aliyun, ecs, DescribeAvailableResource, --RegionId, "{{ region }}",
+        argv: ["{{ cloud_cli }}", ecs, DescribeAvailableResource, --RegionId, "{{ region }}",
                --DestinationResource, Zone, --InstanceType, "{{ worker_instance_type }}",
                --profile, "{{ aliyun_profile }}"]
       register: _avail_q
@@ -114,7 +114,7 @@
     # ── Inventory existing vSwitches in the VPC (zone -> vsw, used /24s) ─────────
     - name: Describe existing vSwitches in the VPC
       ansible.builtin.command:
-        argv: [aliyun, vpc, DescribeVSwitches, --RegionId, "{{ region }}",
+        argv: ["{{ cloud_cli }}", vpc, DescribeVSwitches, --RegionId, "{{ region }}",
                --VpcId, "{{ mirror_vpc_id }}", --PageSize, "50", --profile, "{{ aliyun_profile }}"]
       register: _vsw_q
       changed_when: false
@@ -163,7 +163,7 @@
     # vSwitch it creates.
     - name: Resolve the NAT gateway SNAT table + EIP (egress for new vSwitches)
       ansible.builtin.command:
-        argv: [aliyun, vpc, DescribeNatGateways, --RegionId, "{{ region }}",
+        argv: ["{{ cloud_cli }}", vpc, DescribeNatGateways, --RegionId, "{{ region }}",
                --VpcId, "{{ mirror_vpc_id }}", --profile, "{{ aliyun_profile }}"]
       register: _nat_q
       changed_when: false
@@ -186,7 +186,7 @@
 
     - name: Re-describe vSwitches after ensuring
       ansible.builtin.command:
-        argv: [aliyun, vpc, DescribeVSwitches, --RegionId, "{{ region }}",
+        argv: ["{{ cloud_cli }}", vpc, DescribeVSwitches, --RegionId, "{{ region }}",
                --VpcId, "{{ mirror_vpc_id }}", --PageSize, "50", --profile, "{{ aliyun_profile }}"]
       register: _vsw_q2
       changed_when: false
@@ -229,6 +229,7 @@
 
 - name: Apply + validate multi-AZ worker pools (jump host)
   hosts: jumphost
+  environment: "{{ cloud_env | default({}) }}"
   gather_facts: false
   vars:
     ns: default
