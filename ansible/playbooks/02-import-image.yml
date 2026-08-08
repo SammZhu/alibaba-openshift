@@ -113,7 +113,7 @@
     - name: Check AliyunECSImageImportDefaultRole exists
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ram
           - GetRole
           - --RoleName
@@ -127,7 +127,7 @@
     - name: Create AliyunECSImageImportDefaultRole
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ram
           - CreateRole
           - --RoleName
@@ -141,7 +141,7 @@
     - name: Attach AliyunECSImageImportRolePolicy
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ram
           - AttachPolicyToRole
           - --PolicyType
@@ -169,7 +169,7 @@
     - name: Look up existing image by name
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - DescribeImages
           - --RegionId
@@ -207,7 +207,7 @@
     - name: Submit ImportImage when needed
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - ImportImage
           - --RegionId
@@ -242,7 +242,7 @@
     - name: Poll image status until Available (~15-30 min)
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - DescribeImages
           - --RegionId
@@ -290,7 +290,7 @@
               was swallowed by the fire-and-forget invocation.
 
           Diagnostics:
-            aliyun ecs DescribeTasks --TaskAction ImportImage --RegionId {{ region }}
+            {{ cloud_cli }} ecs DescribeTasks --TaskAction ImportImage --RegionId {{ region }}
             {{ oss_cli }} ls oss://{{ oss_bucket }}/{{ oss_object }}
             sed -i '/^ecs_image_id:/d' ansible/state.yml  # drop the stale entry, then re-run 02
 

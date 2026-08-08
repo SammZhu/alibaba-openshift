@@ -25,6 +25,8 @@
 - name: Build aliyun-platform RHCOS worker boot image
   hosts: local
   gather_facts: false
+  # apsara: supply AK/SK + endpoints to the OSS calls (public: no-op).
+  environment: "{{ cloud_env | default({}) }}"
   vars:
     work_dir: "{{ lookup('env', 'HOME') }}/work/rhcos-aliyun"
     qcow_gz: "{{ work_dir }}/rhcos.qcow2.gz"
@@ -60,7 +62,7 @@
     # ── Idempotency: skip everything if the image already exists ───────────────
     - name: Probe existing worker boot image
       ansible.builtin.command:
-        argv: [aliyun, ecs, DescribeImages, --RegionId, "{{ region }}", --ImageId,
+        argv: ["{{ cloud_cli }}", ecs, DescribeImages, --RegionId, "{{ region }}", --ImageId,
                "{{ worker_boot_image_id }}", --profile, "{{ aliyun_profile }}"]
       register: _img_probe
       changed_when: false
@@ -130,14 +132,8 @@
         # reruns reuse it.  Lives under mirror-tarballs/ (a PERSISTENT reuse
         # artifact like the mirror tarball — NOT a transit object), so teardown
         # keeps it; delete manually if you want to reclaim the ~1.4 GB.
-        - name: Read AK/SK from aliyun profile for OSS
-          ansible.builtin.command:
-            argv: [jq, -r,
-                   '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret',
-                   "{{ lookup('env', 'HOME') }}/.aliyun/config.json"]
-          register: _aksk
-          changed_when: false
-          no_log: true
+        - name: Resolve AK/SK for OSS (cloud_env on apsara, aliyun config on public)
+          ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
           when: not (skip_upload_until_gate | bool)
 
         - name: Resolve the raw-qcow OSS object key
@@ -151,8 +147,8 @@
           vars:
             _a: [ls, "oss://{{ oss_bucket }}/{{ _qcow_src_object }}",
                  "--endpoint={{ _oss_endpoint }}",
-                 "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
-                 "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}"]
+                 "--access-key-id={{ _ak }}",
+                 "--access-key-secret={{ _sk }}"]
           register: _qcow_oss_ls
           changed_when: false
           failed_when: false
@@ -170,8 +166,8 @@
           vars:
             _a: [cp, "oss://{{ oss_bucket }}/{{ _qcow_src_object }}", "{{ qcow_gz }}",
                  "--endpoint={{ _oss_endpoint }}",
-                 "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
-                 "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
+                 "--access-key-id={{ _ak }}",
+                 "--access-key-secret={{ _sk }}", --force]
           register: _qcow_oss_dl
           retries: 3
           delay: 15
@@ -216,8 +212,8 @@
           vars:
             _a: [cp, "{{ qcow_gz }}", "oss://{{ oss_bucket }}/{{ _qcow_src_object }}",
                  "--endpoint={{ _oss_endpoint }}",
-                 "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
-                 "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
+                 "--access-key-id={{ _ak }}",
+                 "--access-key-secret={{ _sk }}", --force]
           no_log: true
           changed_when: true
           when:
@@ -231,7 +227,7 @@
         - name: Prune stale RHCOS raw-qcow versions in OSS (keep only current)
           ansible.builtin.shell: |
             set -uo pipefail
-            AKID="{{ _aksk.stdout.split(' ')[0] }}"; AKSEC="{{ _aksk.stdout.split(' ')[1] }}"
+            AKID="{{ _ak }}"; AKSEC="{{ _sk }}"
             B="{{ oss_bucket }}"; EP="{{ _oss_endpoint }}"; CUR="{{ _qcow_src_object }}"
             {{ oss_cli }} ls "oss://$B/mirror-tarballs/" \
               --access-key-id="$AKID" --access-key-secret="$AKSEC" --region="{{ region }}" --endpoint="$EP" \
@@ -348,15 +344,15 @@
           vars:
             _a: [cp, "{{ qcow }}", "oss://{{ oss_bucket }}/{{ oss_object }}",
                  "--endpoint={{ _oss_endpoint }}",
-                 "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
-                 "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
+                 "--access-key-id={{ _ak }}",
+                 "--access-key-secret={{ _sk }}", --force]
           no_log: true
           changed_when: true
           when: not (skip_upload_until_gate | bool)
 
         - name: Ensure AliyunECSImageImportDefaultRole exists
           ansible.builtin.command:
-            argv: [aliyun, ram, GetRole, --RoleName, AliyunECSImageImportDefaultRole, --profile, "{{ aliyun_profile }}"]
+            argv: ["{{ cloud_cli }}", ram, GetRole, --RoleName, AliyunECSImageImportDefaultRole, --profile, "{{ aliyun_profile }}"]
           register: _import_role
           changed_when: false
           failed_when: false
@@ -364,7 +360,7 @@
 
         - name: Create AliyunECSImageImportDefaultRole when missing
           ansible.builtin.command:
-            argv: [aliyun, ram, CreateRole, --RoleName, AliyunECSImageImportDefaultRole,
+            argv: ["{{ cloud_cli }}", ram, CreateRole, --RoleName, AliyunECSImageImportDefaultRole,
                    --AssumeRolePolicyDocument,
                    '{"Statement":[{"Action":"sts:AssumeRole","Effect":"Allow","Principal":{"Service":["ecs.aliyuncs.com"]}}],"Version":"1"}',
                    --profile, "{{ aliyun_profile }}"]
@@ -375,7 +371,7 @@
 
         - name: Submit ImportImage
           ansible.builtin.command:
-            argv: [aliyun, ecs, ImportImage, --RegionId, "{{ region }}",
+            argv: ["{{ cloud_cli }}", ecs, ImportImage, --RegionId, "{{ region }}",
                    --ImageName, "{{ worker_image_name }}",
                    --OSType, Linux, --Platform, CoreOS, --Architecture, x86_64,
                    --DiskDeviceMapping.1.Format, QCOW2,
@@ -393,7 +389,7 @@
 
         - name: Wait until the image is Available
           ansible.builtin.command:
-            argv: [aliyun, ecs, DescribeImages, --RegionId, "{{ region }}",
+            argv: ["{{ cloud_cli }}", ecs, DescribeImages, --RegionId, "{{ region }}",
                    --ImageId, "{{ worker_boot_image_id }}", --profile, "{{ aliyun_profile }}"]
           register: _img_wait
           changed_when: false
@@ -413,8 +409,8 @@
           vars:
             _a: [rm, "oss://{{ oss_bucket }}/{{ oss_object }}",
                  "--endpoint={{ _oss_endpoint }}",
-                 "--access-key-id={{ _aksk.stdout.split(' ')[0] }}",
-                 "--access-key-secret={{ _aksk.stdout.split(' ')[1] }}", --force]
+                 "--access-key-id={{ _ak }}",
+                 "--access-key-secret={{ _sk }}", --force]
           no_log: true
           changed_when: true
           when: not (skip_upload_until_gate | bool)
