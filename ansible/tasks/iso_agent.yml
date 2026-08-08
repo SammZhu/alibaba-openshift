@@ -349,7 +349,7 @@
 # line — a `>-` folded scalar preserves newlines before more-indented lines,
 # which would split a single command across lines on the remote shell.
 # LIVE-VERIFY: `aliyun oss` (ossutil) STS-token flag (-t) + internal endpoint
-# reachability; and `aliyun ecs --mode EcsRamRole --ram-role-name` inline flags.
+# reachability; and `{{ cloud_cli }} ecs --mode EcsRamRole --ram-role-name` inline flags.
 - name: ABI — upload agent ISO to OSS via internal endpoint (mirror ECS RAM role)
   ansible.builtin.shell: |
     {{ _ssh_root_mirror }} 'set -e
@@ -395,7 +395,7 @@
 
 - name: ABI — adopt existing agent image by name (idempotent)
   ansible.builtin.shell: |
-    {{ _ssh_root_mirror }} 'aliyun ecs DescribeImages --region {{ region }} --RegionId {{ region }} --ImageName openshift-{{ cluster_name }}-agent --mode EcsRamRole --ram-role-name $(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/) | jq -r ".Images.Image[0].ImageId // empty"'
+    {{ _ssh_root_mirror }} '{{ cloud_cli }} ecs DescribeImages --region {{ region }} --RegionId {{ region }} --ImageName openshift-{{ cluster_name }}-agent --mode EcsRamRole --ram-role-name $(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/) | jq -r ".Images.Image[0].ImageId // empty"'
   register: _abi_img_lookup
   changed_when: false
 
@@ -407,7 +407,7 @@
 - name: ABI — ImportImage the agent ISO (from the mirror ECS) when needed
   ansible.builtin.shell: |
     {{ _ssh_root_mirror }} 'RR=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/)
-    aliyun ecs ImportImage --region {{ region }} --RegionId {{ region }} --mode EcsRamRole --ram-role-name "$RR" --ImageName openshift-{{ cluster_name }}-agent --OSType Linux --Platform CoreOS --Architecture x86_64 --BootMode UEFI --DiskDeviceMapping.1.Format RAW --DiskDeviceMapping.1.OSSBucket {{ oss_bucket }} --DiskDeviceMapping.1.OSSObject {{ oss_object }} | jq -r .ImageId'
+    {{ cloud_cli }} ecs ImportImage --region {{ region }} --RegionId {{ region }} --mode EcsRamRole --ram-role-name "$RR" --ImageName openshift-{{ cluster_name }}-agent --OSType Linux --Platform CoreOS --Architecture x86_64 --BootMode UEFI --DiskDeviceMapping.1.Format RAW --DiskDeviceMapping.1.OSSBucket {{ oss_bucket }} --DiskDeviceMapping.1.OSSObject {{ oss_object }} | jq -r .ImageId'
   register: _abi_import
   changed_when: true
   when: ecs_image_id is not defined or ecs_image_id | length == 0
@@ -419,7 +419,7 @@
 
 - name: ABI — poll agent image until Available (~15-30 min)
   ansible.builtin.shell: |
-    {{ _ssh_root_mirror }} 'aliyun ecs DescribeImages --region {{ region }} --RegionId {{ region }} --ImageId {{ ecs_image_id }} --mode EcsRamRole --ram-role-name $(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/) | jq -r ".Images.Image[0].Status // empty"'
+    {{ _ssh_root_mirror }} '{{ cloud_cli }} ecs DescribeImages --region {{ region }} --RegionId {{ region }} --ImageId {{ ecs_image_id }} --mode EcsRamRole --ram-role-name $(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/) | jq -r ".Images.Image[0].Status // empty"'
   register: _abi_img_status
   changed_when: false
   retries: 60
