@@ -162,6 +162,11 @@ OSS_OBJECT="${OSS_PREFIX}/${TARBALL_NAME}"
 
 # ── Sanity ────────────────────────────────────────────────────────────────────
 [[ -f "$PULL_SECRET" ]] || { echo "ERROR: pull secret not found at $PULL_SECRET"; exit 1; }
+# Fail fast on missing tools (skopeo/jq are used in [2/6] to resolve digests;
+# tar/curl throughout).  oc-mirror is installed below if absent.
+for _t in skopeo jq tar curl; do
+  command -v "$_t" >/dev/null || { echo "ERROR: '$_t' not found — install it (e.g. dnf install -y $_t)"; exit 1; }
+done
 # Only require the aliyun CLI when OSS actually goes through it (public cloud).
 case "$OSS_CLI" in
   aliyun*) command -v aliyun >/dev/null || { echo "ERROR: aliyun CLI missing"; exit 1; } ;;
