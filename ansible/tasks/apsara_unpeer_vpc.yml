@@ -68,3 +68,20 @@
         - "{{ mirror_peer_ri_init }}"
       changed_when: true
       failed_when: false
+
+    # DeleteRouterInterface is ASYNC — the RIs may linger a few seconds after the
+    # delete call returns.  Wait until they are actually gone, or the mirror
+    # DeleteStack that runs next races them and fails deleting the VPC with
+    # DependencyViolation.RouteInterface (observed 2026-08-09).
+    - name: "unpeer: wait until both RIs are actually gone (delete is async)"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", vpc, DescribeRouterInterfaces, --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
+      register: _unpeer_gone
+      changed_when: false
+      failed_when: false
+      retries: 18
+      delay: 10
+      until: >-
+        ((_unpeer_gone.stdout | default('{}') | from_json).RouterInterfaceSet.RouterInterfaceType | default([])
+         | selectattr('RouterInterfaceId', 'in', [mirror_peer_ri_init, mirror_peer_ri_accept])
+         | list | length) == 0
