@@ -162,6 +162,13 @@ OSS_OBJECT="${OSS_PREFIX}/${TARBALL_NAME}"
 
 # ── Sanity ────────────────────────────────────────────────────────────────────
 [[ -f "$PULL_SECRET" ]] || { echo "ERROR: pull secret not found at $PULL_SECRET"; exit 1; }
+# The pull-secret must carry BOTH quay.io (OpenShift release content) and
+# registry.redhat.io (AI images).  A partial secret pulls the release fine at
+# manifest time but fails "unauthorized" copying ocp-v4.0-art-dev.
+for _reg in quay.io registry.redhat.io; do
+  jq -e --arg r "$_reg" '.auths[$r].auth // .auths[$r].password' "$PULL_SECRET" >/dev/null 2>&1 \
+    || { echo "ERROR: pull secret $PULL_SECRET has no '$_reg' auth. Use the full pull secret from console.redhat.com/openshift/install/pull-secret"; exit 1; }
+done
 # Fail fast on missing tools (skopeo/jq are used in [2/6] to resolve digests;
 # tar/curl throughout).  oc-mirror is installed below if absent.
 for _t in skopeo jq tar curl; do
@@ -186,8 +193,15 @@ if ! command -v oc-mirror >/dev/null; then
   sudo mv oc oc-mirror /usr/local/bin/
 fi
 
-# Make pull-secret discoverable by oc-mirror
-export DOCKER_CONFIG="$(dirname "$PULL_SECRET")"
+# Make pull-secret discoverable by oc-mirror.  oc-mirror reads
+# $DOCKER_CONFIG/config.json, so stage the pull-secret under that exact name — the
+# source file may be named anything (e.g. pull-secret.json, not config.json, which
+# otherwise leaves oc-mirror with NO auth -> "unauthorized" on the quay release).
+_AUTH_DIR="$WORK_DIR/.docker"
+mkdir -p "$_AUTH_DIR"
+cp -f "$PULL_SECRET" "$_AUTH_DIR/config.json"
+chmod 600 "$_AUTH_DIR/config.json"
+export DOCKER_CONFIG="$_AUTH_DIR"
 
 # ── Generate ImageSetConfiguration (oc-mirror v2 schema) ─────────────────────
 # v2 is mandatory from oc-mirror 4.21 onwards; v1 generates state files
