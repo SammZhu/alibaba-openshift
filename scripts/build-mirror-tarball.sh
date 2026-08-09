@@ -481,9 +481,12 @@ oc-mirror \
   --retry-delay "${OC_MIRROR_RETRY_DELAY:-5s}" \
   file://./openshift-mirror --v2
 OCM_RC=$?
-# Mirror v2's internal log captures everything (with timestamps) for
-# the post-run grep checks below.
-cp -f openshift-mirror/working-dir/logs/oc-mirror.log "$OC_MIRROR_LOG" 2>/dev/null || true
+# Mirror v2's internal log captures everything (with timestamps) for the post-run
+# grep checks below.  The exact filename/path varies by oc-mirror version, so grab
+# oc-mirror.log if present, else the newest *.log under logs/.
+cp -f openshift-mirror/working-dir/logs/oc-mirror.log "$OC_MIRROR_LOG" 2>/dev/null \
+  || cp -f "$(ls -t openshift-mirror/working-dir/logs/*.log 2>/dev/null | head -1)" "$OC_MIRROR_LOG" 2>/dev/null \
+  || true
 
 echo "[3a/6] Validating oc-mirror output..."
 # Check 1: explicit exit code
@@ -491,9 +494,11 @@ if [[ "$OCM_RC" != 0 ]]; then
   echo "ERROR: oc-mirror exited with rc=$OCM_RC — aborting before upload."
   exit 1
 fi
-# Check 2: error / failure lines in the log (v2 prints
-# "image X failed", "error", "ERRO", etc. even when rc=0)
-if grep -nEi '^(ERRO|error|failed|FATAL)|image .* failed|unable to (pull|copy)' \
+# Check 2: error / failure lines in the log (v2 prints "image X failed", "error",
+# "ERRO", etc. even when rc=0).  Skipped when the log wasn't captured — Check 1
+# (rc) + Checks 3/4 (chunk count + size) still gate on the real output.
+if [[ -f "$OC_MIRROR_LOG" ]] \
+   && grep -nEi '^(ERRO|error|failed|FATAL)|image .* failed|unable to (pull|copy)' \
      "$OC_MIRROR_LOG" \
      | grep -vEi 'no error|0 errors|warning|deprecation' \
      | head -5 \
