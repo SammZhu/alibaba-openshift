@@ -63,6 +63,24 @@ apsara_oss_endpoint: ""
 _oss_pub_endpoint: "{{ apsara_oss_endpoint if (cloud_platform | default('public')) == 'apsara' else 'oss-' + region + '.aliyuncs.com' }}"
 _oss_int_endpoint: "{{ apsara_oss_endpoint if (cloud_platform | default('public')) == 'apsara' else 'oss-' + region + '-internal.aliyuncs.com' }}"
 
+# ── apsara operator reachability: how the operator (Helper) reaches the mirror ──
+# The operator must reach the mirror ECS at its PRIVATE IP (no public jump host in
+# a private cloud).  Two mutually-exclusive Apsara options; public cloud uses
+# neither.
+#
+#  (A) BYO-VPC — put the mirror IN the operator's existing VPC (no peering).  Set
+#      existing_vpc_id + existing_vswitch_id; leave apsara_peer_operator_vpc_id "".
+#  (B) New VPC + auto peering — mirror-stack builds its own VPC (identical to
+#      public cloud), and 03 auto-peers it to the operator VPC (Router Interface +
+#      routes + mirror SG ingress); 99-teardown unwinds it.  Leave existing_vpc_id
+#      "", set apsara_peer_operator_vpc_id to the operator's VPC.
+existing_vpc_id:     ""    # (A) operator's VPC — mirror lands here, no peering
+existing_vswitch_id: ""    # (A) a VSwitch in it (mirror ECS goes here)
+apsara_peer_operator_vpc_id: ""   # (B) operator VPC to peer the new mirror VPC to
+apsara_peer_operator_cidr:   ""   # (B) operator CIDR to route/allow; "" = derive from the VPC
+apsara_peer_ri_spec:         "Large.1"   # (B) Router Interface spec (valid on ste3)
+# apsara_peer_ports: [22, 8443, 8080]    # (B) mirror ports opened to the operator CIDR
+
 # ── OADP / OSS backup (optional, day-2) ──────────────────────────────────────
 # Backs up cluster resources + PV data to Alibaba Cloud OSS (S3-compatible) via
 # the OADP/Velero operator. Disabled by default. To enable: provision an OSS

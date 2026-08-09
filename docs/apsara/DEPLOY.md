@@ -123,18 +123,49 @@ this (see `scripts/apsara/apsara-oss`), but for the record:
   A real OSS reply (object list, or `AccessDenied`/`NoSuchBucket`) means the path
   works; `tls: unrecognized name` means it went direct / wrong endpoint.
 
-### Reaching the mirror ECS (phase 04+) — BYO-VPC (no peering)
+### Reaching the mirror ECS (phase 04+) — two Apsara options
 
 Phases from 04 on SSH into the mirror ECS at its **private** IP
 (`mirror_private_ip`). `_ssh_root_mirror` proxies through `jump_host_ip` — but in
 a private cloud we do **not** use a public jump-host EIP (unreliable / not the
-model). The operator host must reach the mirror ECS's private IP directly.
+model). The operator host must reach the mirror ECS's private IP directly. Pick
+one (public cloud uses neither; both default off):
 
-Rather than create a new VPC and peer it to the operator's VPC (peering needs a
-permission the sub-user may lack), **place the mirror stack in the operator's
-EXISTING VPC** — same VPC, direct private connectivity, no peering. mirror-stack
-supports this via two parameters (both default `""` → create a new VPC, so public
-cloud is unchanged):
+| | Option B — new VPC + auto peering | Option A — BYO-VPC |
+| --- | --- | --- |
+| mirror VPC | its own (identical to public cloud) | the operator's existing VPC |
+| operator↔mirror | Router Interface peering (auto) | same VPC, direct |
+| config | `apsara_peer_operator_vpc_id` | `existing_vpc_id` + `existing_vswitch_id` |
+| teardown | 99-teardown unwinds the peering | delete the stack |
+| isolation | mirror self-contained, doesn't touch operator VPC | mirror ECS/SG live in the operator VPC |
+
+#### Option B — new VPC + automatic peering (default intent)
+
+mirror-stack builds its own VPC (public-cloud-identical). Phase 03 then peers it
+to the operator VPC — creates the Router Interface pair, connects it, adds the
+routes both ways, and opens the mirror SG to the operator CIDR — via
+`tasks/apsara_peer_vpc.yml`. 99-teardown reverses it (`tasks/apsara_unpeer_vpc.yml`)
+before DeleteStack, so the RI never blocks VPC deletion.
+
+```yaml
+# leave existing_vpc_id / existing_vswitch_id EMPTY (that selects the new-VPC path)
+apsara_peer_operator_vpc_id: vpc-xxxxxxxx    # the operator (Helper) VPC
+# apsara_peer_operator_cidr: ""              # optional; derived from the VPC if empty
+# apsara_peer_ri_spec: "Large.1"            # RI spec (Large.1 verified on ste3)
+jump_host_ip: ""                             # no jump host; operator routes via the peering
+```
+
+Requires the AK/SK to have `vpc:CreateRouterInterface`/`ConnectRouterInterface`/
+`CreateRouteEntry`/`ecs:AuthorizeSecurityGroup` (verified present on ste3
+2026-08-09). **Apsara quirk:** the asapi gateway does **not** honour `--DryRun` —
+it really performs the operation, so never use DryRun as a safe probe.
+
+#### Option A — BYO-VPC (mirror in the operator's existing VPC)
+
+Skip a new VPC entirely and **place the mirror stack in the operator's EXISTING
+VPC** — same VPC, direct private connectivity, no peering. mirror-stack supports
+this via two parameters (both default `""` → create a new VPC, so public cloud is
+unchanged):
 
 | Parameter | Meaning |
 | --------- | ------- |

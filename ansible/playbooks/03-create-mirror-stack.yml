@@ -257,6 +257,7 @@
         mirror_registry_id:      "{{ (_cs_outputs | selectattr('OutputKey','equalto','MirrorRegistryInstanceId') | first).OutputValue }}"
         mirror_jump_host_ip:     "{{ (_cs_outputs | selectattr('OutputKey','equalto','JumpHostPublicIp')        | list | map(attribute='OutputValue') | first | default('')) }}"
         mirror_jump_host_sg_id:  "{{ (_cs_outputs | selectattr('OutputKey','equalto','JumpHostSecurityGroupId') | list | map(attribute='OutputValue') | first | default('')) }}"
+        mirror_sg_id:            "{{ (_cs_outputs | selectattr('OutputKey','equalto','MirrorSecurityGroupId') | list | map(attribute='OutputValue') | first | default('')) }}"
 
     - name: Save mirror-stack facts to state
       ansible.builtin.include_tasks: ../tasks/save_state.yml
@@ -279,9 +280,22 @@
           mirror_registry_id:     "{{ mirror_registry_id }}"
           jump_host_ip:           "{{ mirror_jump_host_ip }}"
           jump_host_sg_id:        "{{ mirror_jump_host_sg_id }}"
+          mirror_sg_id:           "{{ mirror_sg_id }}"
           mirror_init_password:   "{{ _mirror_init_password_resolved }}"
           mirror_init_user:       "{{ mirror_init_user | default('mirror-admin') }}"
       no_log: true
+
+    # apsara (new-VPC path): peer the mirror VPC to the operator (Helper) VPC so
+    # the operator reaches the mirror ECS at its private IP without a public jump
+    # host.  Gated: apsara + mirror built its OWN VPC (existing_vpc_id empty; the
+    # BYO path already shares the operator's VPC, so no peering) + an operator VPC
+    # to peer with is configured.  Public cloud never runs this.
+    - name: (apsara) peer mirror VPC to the operator VPC
+      ansible.builtin.include_tasks: ../tasks/apsara_peer_vpc.yml
+      when:
+        - (cloud_platform | default('public')) == 'apsara'
+        - (existing_vpc_id | default('')) | length == 0
+        - (apsara_peer_operator_vpc_id | default('')) | length > 0
 
     - name: Phase 03 done
       ansible.builtin.debug:

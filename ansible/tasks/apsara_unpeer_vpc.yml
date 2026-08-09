@@ -1,0 +1,70 @@
+# apsara_unpeer_vpc.yml — tear down the mirror<->operator VPC peering created by
+# apsara_peer_vpc.yml, BEFORE the mirror-stack DeleteStack (the Router Interface
+# blocks VPC deletion with DependencyViolation.RouteInterface, and a route entry
+# referencing an RI blocks RI deletion — so: routes -> deactivate -> delete).
+#
+# Best-effort: every step tolerates "already gone".  Driven by the state facts
+# saved at peer time (mirror_peer_ri_init/accept, mirror_peer_op_rt/cidr,
+# mirror_peer_mr_rt).  Skipped entirely when no peering was recorded.
+#
+# Required vars (from state): mirror_peer_ri_init, mirror_peer_ri_accept,
+#   mirror_peer_op_rt, mirror_peer_op_cidr, mirror_peer_mr_rt, mirror_vpc_cidr,
+#   region, cloud_cli, aliyun_profile.
+
+- name: "unpeer: remove peering routes + router interfaces"
+  when: mirror_peer_ri_init | default('') | length > 0
+  block:
+    - name: "unpeer: delete operator-side route (dst mirror CIDR)"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", vpc, DeleteRouteEntry, --RegionId, "{{ region }}",
+               --RouteTableId, "{{ mirror_peer_op_rt }}",
+               --DestinationCidrBlock, "{{ mirror_vpc_cidr }}",
+               --NextHopId, "{{ mirror_peer_ri_init }}",
+               --profile, "{{ aliyun_profile }}"]
+      changed_when: true
+      failed_when: false
+
+    - name: "unpeer: delete mirror-side route (dst operator CIDR)"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", vpc, DeleteRouteEntry, --RegionId, "{{ region }}",
+               --RouteTableId, "{{ mirror_peer_mr_rt }}",
+               --DestinationCidrBlock, "{{ mirror_peer_op_cidr }}",
+               --NextHopId, "{{ mirror_peer_ri_accept }}",
+               --profile, "{{ aliyun_profile }}"]
+      changed_when: true
+      failed_when: false
+
+    - name: "unpeer: deactivate both router interfaces"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", vpc, DeactivateRouterInterface, --RegionId, "{{ region }}",
+               --RouterInterfaceId, "{{ item }}", --profile, "{{ aliyun_profile }}"]
+      loop:
+        - "{{ mirror_peer_ri_init }}"
+        - "{{ mirror_peer_ri_accept }}"
+      changed_when: true
+      failed_when: false
+
+    # Deactivate is async — both RIs must reach Idle/Inactive before delete, or
+    # DeleteRouterInterface returns IncorrectStatus (observed 2026-08-09).
+    - name: "unpeer: wait until both RIs are Inactive/Idle"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", vpc, DescribeRouterInterfaces, --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
+      register: _unpeer_q
+      changed_when: false
+      failed_when: false
+      retries: 18
+      delay: 10
+      until: >-
+        ((_unpeer_q.stdout | default('{}') | from_json).RouterInterfaceSet.RouterInterfaceType | default([])
+         | selectattr('RouterInterfaceId','in', [mirror_peer_ri_init, mirror_peer_ri_accept])
+         | rejectattr('Status','in', ['Inactive','Idle']) | list | length) == 0
+
+    - name: "unpeer: delete both router interfaces (accepting first, then initiating)"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", vpc, DeleteRouterInterface, --RegionId, "{{ region }}",
+               --RouterInterfaceId, "{{ item }}", --profile, "{{ aliyun_profile }}"]
+      loop:
+        - "{{ mirror_peer_ri_accept }}"
+        - "{{ mirror_peer_ri_init }}"
+      changed_when: true
+      failed_when: false

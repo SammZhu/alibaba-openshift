@@ -1,0 +1,210 @@
+# apsara_peer_vpc.yml — establish a same-region VPC peering (Express Connect
+# Router Interface) between the freshly-created mirror-stack VPC and the operator
+# (Helper) VPC, so the operator can reach the mirror ECS at its PRIVATE IP with no
+# public jump host.  Apsara-only; the caller gates on cloud_platform == apsara +
+# a new-VPC mirror (existing_vpc_id empty) + apsara_peer_operator_vpc_id set.
+#
+# This is the automated form of the manual RI dance:
+#   create AcceptingSide (mirror) + InitiatingSide (operator) -> Connect ->
+#   wait Active -> route entries both sides -> mirror SG ingress for operator CIDR.
+# Teardown is the reverse, in tasks/apsara_unpeer_vpc.yml.
+#
+# Required vars: mirror_vpc_id, mirror_vpc_cidr, mirror_sg_id (from 03 outputs),
+#               apsara_peer_operator_vpc_id, region, cloud_cli, aliyun_profile.
+# Optional     : apsara_peer_operator_cidr (else derived from the operator VPC),
+#               apsara_peer_ri_spec (default Large.1 — verified valid on ste3),
+#               apsara_peer_ports (mirror ports to open to the operator CIDR).
+#
+# Idempotent: if an AcceptingSide RI already exists on the mirror vRouter pointing
+# at the operator vRouter, the peering is assumed present and creation is skipped.
+# Route/SG steps tolerate "already exists".
+
+- name: "peer: resolve operator VPC (vRouter + route table + CIDR)"
+  block:
+    - name: "peer: describe operator VPC"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", vpc, DescribeVpcs, --RegionId, "{{ region }}",
+               --VpcId, "{{ apsara_peer_operator_vpc_id }}", --profile, "{{ aliyun_profile }}"]
+      register: _peer_op_vpc_q
+      changed_when: false
+
+    - name: "peer: operator vRouter + CIDR facts"
+      ansible.builtin.set_fact:
+        _peer_op_vrouter: "{{ (_peer_op_vpc_q.stdout | from_json).Vpcs.Vpc[0].VRouterId }}"
+        _peer_op_cidr: "{{ apsara_peer_operator_cidr | default('') | ternary(apsara_peer_operator_cidr | default(''), (_peer_op_vpc_q.stdout | from_json).Vpcs.Vpc[0].CidrBlock) }}"
+
+    - name: "peer: operator route table"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", vpc, DescribeRouteTableList, --RegionId, "{{ region }}",
+               --VpcId, "{{ apsara_peer_operator_vpc_id }}", --profile, "{{ aliyun_profile }}"]
+      register: _peer_op_rt_q
+      changed_when: false
+
+    - name: "peer: operator route-table id (system)"
+      ansible.builtin.set_fact:
+        _peer_op_rt: "{{ ((_peer_op_rt_q.stdout | from_json).RouterTableList.RouterTableListType
+                          | selectattr('RouteTableType','equalto','System') | list | first).RouteTableId }}"
+
+- name: "peer: resolve mirror VPC (vRouter + route table)"
+  block:
+    - name: "peer: describe mirror VPC"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", vpc, DescribeVpcs, --RegionId, "{{ region }}",
+               --VpcId, "{{ mirror_vpc_id }}", --profile, "{{ aliyun_profile }}"]
+      register: _peer_mr_vpc_q
+      changed_when: false
+
+    - name: "peer: mirror vRouter fact"
+      ansible.builtin.set_fact:
+        _peer_mr_vrouter: "{{ (_peer_mr_vpc_q.stdout | from_json).Vpcs.Vpc[0].VRouterId }}"
+
+    - name: "peer: mirror route table"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", vpc, DescribeRouteTableList, --RegionId, "{{ region }}",
+               --VpcId, "{{ mirror_vpc_id }}", --profile, "{{ aliyun_profile }}"]
+      register: _peer_mr_rt_q
+      changed_when: false
+
+    - name: "peer: mirror route-table id (system)"
+      ansible.builtin.set_fact:
+        _peer_mr_rt: "{{ ((_peer_mr_rt_q.stdout | from_json).RouterTableList.RouterTableListType
+                          | selectattr('RouteTableType','equalto','System') | list | first).RouteTableId }}"
+
+# ── Idempotency: is the peering already there? ────────────────────────────────
+- name: "peer: look for an existing AcceptingSide RI on the mirror vRouter"
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", vpc, DescribeRouterInterfaces, --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
+  register: _peer_ri_q
+  changed_when: false
+
+- name: "peer: pick the existing accepting/initiating RI pair (if any)"
+  ansible.builtin.set_fact:
+    _peer_existing: "{{ (_peer_ri_q.stdout | from_json).RouterInterfaceSet.RouterInterfaceType | default([])
+                        | selectattr('Role','equalto','AcceptingSide')
+                        | selectattr('RouterId','equalto', _peer_mr_vrouter)
+                        | selectattr('OppositeRouterId','equalto', _peer_op_vrouter)
+                        | list }}"
+
+- name: "peer: create + connect the router interfaces (only if absent)"
+  when: _peer_existing | length == 0
+  block:
+    - name: "peer: create AcceptingSide RI (mirror vRouter)"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", vpc, CreateRouterInterface, --RegionId, "{{ region }}",
+               --Role, AcceptingSide, --Spec, Negative,
+               --RouterType, VRouter, --RouterId, "{{ _peer_mr_vrouter }}",
+               --OppositeRegionId, "{{ region }}",
+               --OppositeRouterType, VRouter, --OppositeRouterId, "{{ _peer_op_vrouter }}",
+               --profile, "{{ aliyun_profile }}"]
+      register: _peer_accept_c
+      changed_when: true
+
+    - name: "peer: create InitiatingSide RI (operator vRouter)"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", vpc, CreateRouterInterface, --RegionId, "{{ region }}",
+               --Role, InitiatingSide, --Spec, "{{ apsara_peer_ri_spec | default('Large.1') }}",
+               --RouterType, VRouter, --RouterId, "{{ _peer_op_vrouter }}",
+               --OppositeRegionId, "{{ region }}",
+               --OppositeRouterType, VRouter, --OppositeRouterId, "{{ _peer_mr_vrouter }}",
+               --OppositeInterfaceId, "{{ (_peer_accept_c.stdout | from_json).RouterInterfaceId }}",
+               --profile, "{{ aliyun_profile }}"]
+      register: _peer_init_c
+      changed_when: true
+
+    - name: "peer: RI id facts"
+      ansible.builtin.set_fact:
+        _peer_ri_accept: "{{ (_peer_accept_c.stdout | from_json).RouterInterfaceId }}"
+        _peer_ri_init: "{{ (_peer_init_c.stdout  | from_json).RouterInterfaceId }}"
+
+    - name: "peer: point the accepting side back at the initiating side"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", vpc, ModifyRouterInterfaceAttribute, --RegionId, "{{ region }}",
+               --RouterInterfaceId, "{{ _peer_ri_accept }}",
+               --OppositeRouterType, VRouter, --OppositeRouterId, "{{ _peer_op_vrouter }}",
+               --OppositeInterfaceId, "{{ _peer_ri_init }}",
+               --profile, "{{ aliyun_profile }}"]
+      changed_when: true
+
+    - name: "peer: connect (from the initiating side)"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", vpc, ConnectRouterInterface, --RegionId, "{{ region }}",
+               --RouterInterfaceId, "{{ _peer_ri_init }}", --profile, "{{ aliyun_profile }}"]
+      changed_when: true
+
+# Resolve the RI ids whether we just created them or found an existing pair.
+- name: "peer: settle on the RI ids (existing or new)"
+  ansible.builtin.set_fact:
+    _peer_ri_accept: "{{ _peer_ri_accept | default((_peer_existing[0]).RouterInterfaceId) }}"
+    _peer_ri_init: "{{ _peer_ri_init | default((_peer_existing[0]).OppositeInterfaceId) }}"
+
+- name: "peer: wait until the initiating RI is Active"
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", vpc, DescribeRouterInterfaces, --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
+  register: _peer_wait_q
+  changed_when: false
+  retries: 30
+  delay: 10
+  until: >-
+    ((_peer_wait_q.stdout | from_json).RouterInterfaceSet.RouterInterfaceType | default([])
+     | selectattr('RouterInterfaceId','equalto', _peer_ri_init) | list | first | default({})).Status | default('') == 'Active'
+
+# ── Routes: operator -> mirror CIDR, mirror -> operator CIDR ──────────────────
+- name: "peer: route on operator (dst = mirror VPC CIDR -> initiating RI)"
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", vpc, CreateRouteEntry, --RegionId, "{{ region }}",
+           --RouteTableId, "{{ _peer_op_rt }}",
+           --DestinationCidrBlock, "{{ mirror_vpc_cidr }}",
+           --NextHopType, RouterInterface, --NextHopId, "{{ _peer_ri_init }}",
+           --profile, "{{ aliyun_profile }}"]
+  register: _peer_op_route
+  changed_when: "'RouteEntryAlreadyExist' not in (_peer_op_route.stderr | default(''))"
+  failed_when:
+    - _peer_op_route.rc != 0
+    - "'RouteEntryAlreadyExist' not in (_peer_op_route.stderr | default(''))"
+
+- name: "peer: route on mirror (dst = operator CIDR -> accepting RI)"
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", vpc, CreateRouteEntry, --RegionId, "{{ region }}",
+           --RouteTableId, "{{ _peer_mr_rt }}",
+           --DestinationCidrBlock, "{{ _peer_op_cidr }}",
+           --NextHopType, RouterInterface, --NextHopId, "{{ _peer_ri_accept }}",
+           --profile, "{{ aliyun_profile }}"]
+  register: _peer_mr_route
+  changed_when: "'RouteEntryAlreadyExist' not in (_peer_mr_route.stderr | default(''))"
+  failed_when:
+    - _peer_mr_route.rc != 0
+    - "'RouteEntryAlreadyExist' not in (_peer_mr_route.stderr | default(''))"
+
+# ── Mirror SG: allow the operator CIDR (mirror binds SG rules to VpcCidr, which
+#    does NOT cover the operator's subnet across the peering). ──────────────────
+- name: "peer: allow operator CIDR into the mirror SG"
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", ecs, AuthorizeSecurityGroup, --RegionId, "{{ region }}",
+           --SecurityGroupId, "{{ mirror_sg_id }}",
+           --IpProtocol, tcp, --PortRange, "{{ item }}/{{ item }}",
+           --SourceCidrIp, "{{ _peer_op_cidr }}", --profile, "{{ aliyun_profile }}"]
+  loop: "{{ apsara_peer_ports | default([22, 8443, 8080]) }}"
+  register: _peer_sg
+  changed_when: true
+  failed_when:
+    - _peer_sg.rc != 0
+    - "'AlreadyExists' not in (_peer_sg.stderr | default(''))"
+
+- name: "peer: persist RI + peering facts to state (for teardown)"
+  ansible.builtin.include_tasks: save_state.yml
+  vars:
+    new_state:
+      mirror_peer_ri_init: "{{ _peer_ri_init }}"
+      mirror_peer_ri_accept: "{{ _peer_ri_accept }}"
+      mirror_peer_op_vpc_id: "{{ apsara_peer_operator_vpc_id }}"
+      mirror_peer_op_rt: "{{ _peer_op_rt }}"
+      mirror_peer_op_cidr: "{{ _peer_op_cidr }}"
+      mirror_peer_mr_rt: "{{ _peer_mr_rt }}"
+
+- name: "peer: summary"
+  ansible.builtin.debug:
+    msg: >-
+      VPC peering ready: operator {{ apsara_peer_operator_vpc_id }} ({{ _peer_op_cidr }})
+      <-> mirror {{ mirror_vpc_id }} ({{ mirror_vpc_cidr }}).
+      RIs init={{ _peer_ri_init }} accept={{ _peer_ri_accept }}.
+      Operator can now reach the mirror at {{ mirror_registry_ip | default('its private IP') }}.

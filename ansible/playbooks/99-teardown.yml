@@ -646,6 +646,14 @@
           failed_when: false
           when: _capa_vsw_q.stdout is defined
 
+        # apsara: tear down the mirror<->operator VPC peering BEFORE DeleteStack —
+        # the Router Interface blocks VPC deletion (DependencyViolation.RouteInterface),
+        # and route entries referencing an RI block RI deletion.  No-op on public
+        # cloud / when no peering was recorded (task self-gates on mirror_peer_ri_init).
+        - name: (apsara) unpeer mirror VPC from the operator VPC
+          ansible.builtin.include_tasks: ../tasks/apsara_unpeer_vpc.yml
+          when: (cloud_platform | default('public')) == 'apsara'
+
         - name: DeleteStack — mirror
           ansible.builtin.command:
             argv:
