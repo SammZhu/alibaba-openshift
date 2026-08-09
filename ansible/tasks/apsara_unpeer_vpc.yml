@@ -10,63 +10,60 @@
 # DeleteRouterInterface is async, so finally wait until both RIs are gone or the
 # DeleteStack that runs next races them.
 #
-# Best-effort throughout (failed_when: false); skipped when no peering was recorded.
-# Driven by state facts: mirror_peer_ri_init/accept, mirror_vpc_id,
-# mirror_peer_op_vpc_id.
+# The script body uses ONLY shell vars (no Jinja): the state values come in via
+# `environment` (merged onto the play's cloud_env so cloudcli keeps AK/SK/proxy).
+# Inlining {{ }} into the script tripped ansible's arg splitter on the jq quotes.
+#
+# Best-effort throughout; skipped when no peering was recorded.
 
 - name: "unpeer: deactivate -> clear routes -> delete RIs (robust, scan-based)"
   when: mirror_peer_ri_init | default('') | length > 0
+  environment: "{{ (cloud_env | default({})) | combine({
+      'CC': cloud_cli,
+      'R': region,
+      'P': aliyun_profile,
+      'INIT': mirror_peer_ri_init,
+      'ACC': mirror_peer_ri_accept | default(''),
+      'MRVPC': mirror_vpc_id | default(''),
+      'OPVPC': mirror_peer_op_vpc_id | default('') }) }}"
   ansible.builtin.shell: |
     set -uo pipefail
-    CC="{{ cloud_cli }}"; R="{{ region }}"; P="{{ aliyun_profile }}"
-    INIT="{{ mirror_peer_ri_init }}"; ACC="{{ mirror_peer_ri_accept | default('') }}"
-    MRVPC="{{ mirror_vpc_id | default('') }}"; OPVPC="{{ mirror_peer_op_vpc_id | default('') }}"
-
     ris="$INIT"; [ -n "$ACC" ] && ris="$ris $ACC"
 
-    # 1) Deactivate both, then wait until neither is Active (delete + route-delete
-    #    only behave once the RIs are Inactive).
+    # 1) Deactivate both, then wait until neither is Active (route/RI deletes only
+    #    behave once the RIs are Inactive).
     for ri in $ris; do
       "$CC" vpc DeactivateRouterInterface --RegionId "$R" --RouterInterfaceId "$ri" --profile "$P" >/dev/null 2>&1 || true
     done
     for _ in $(seq 1 18); do
       act=$("$CC" vpc DescribeRouterInterfaces --RegionId "$R" --profile "$P" \
-            | jq -r --arg a "$ACC" --arg i "$INIT" '.RouterInterfaceSet.RouterInterfaceType[]?
-                | select(.RouterInterfaceId==$a or .RouterInterfaceId==$i)
-                | select(.Status=="Active") | .RouterInterfaceId' | wc -l)
+            | jq -r --arg a "$ACC" --arg i "$INIT" '.RouterInterfaceSet.RouterInterfaceType[]? | select(.RouterInterfaceId==$a or .RouterInterfaceId==$i) | select(.Status=="Active") | .RouterInterfaceId' | wc -l)
       [ "$act" -eq 0 ] && break; sleep 10
     done
 
-    # 2) Delete EVERY route entry (in either VPC's route tables) whose next hop is
-    #    one of our RIs — do not rely on a single saved table/CIDR.
+    # 2) Delete EVERY route entry (in either VPC) whose next hop is one of our RIs.
     for v in "$MRVPC" "$OPVPC"; do
       [ -n "$v" ] || continue
-      for rt in $("$CC" vpc DescribeRouteTableList --RegionId "$R" --VpcId "$v" --profile "$P" \
-                  | jq -r '.RouterTableList.RouterTableListType[]?.RouteTableId'); do
+      for rt in $("$CC" vpc DescribeRouteTableList --RegionId "$R" --VpcId "$v" --profile "$P" | jq -r '.RouterTableList.RouterTableListType[]?.RouteTableId'); do
         "$CC" vpc DescribeRouteEntryList --RegionId "$R" --RouteTableId "$rt" --profile "$P" \
-          | jq -r --arg a "$ACC" --arg i "$INIT" '.RouteEntrys.RouteEntry[]?
-              | select(.NextHops.NextHop[0].NextHopId==$a or .NextHops.NextHop[0].NextHopId==$i)
-              | .DestinationCidrBlock + " " + .NextHops.NextHop[0].NextHopId' \
+          | jq -r --arg a "$ACC" --arg i "$INIT" '.RouteEntrys.RouteEntry[]? | select(.NextHops.NextHop[0].NextHopId==$a or .NextHops.NextHop[0].NextHopId==$i) | .DestinationCidrBlock + " " + .NextHops.NextHop[0].NextHopId' \
           | while read -r cidr nh; do
               echo "unpeer: deleting route $cidr -> $nh (rt $rt)"
-              "$CC" vpc DeleteRouteEntry --RegionId "$R" --RouteTableId "$rt" \
-                --DestinationCidrBlock "$cidr" --NextHopId "$nh" --profile "$P" || true
+              "$CC" vpc DeleteRouteEntry --RegionId "$R" --RouteTableId "$rt" --DestinationCidrBlock "$cidr" --NextHopId "$nh" --profile "$P" || true
             done
       done
     done
 
-    # 3) Delete the RIs (now Inactive + unreferenced), then wait until gone
-    #    (DeleteRouterInterface is async — else DeleteStack races the RI).
+    # 3) Delete the RIs (now Inactive + unreferenced), then wait until gone.
     for ri in $ACC $INIT; do
       "$CC" vpc DeleteRouterInterface --RegionId "$R" --RouterInterfaceId "$ri" --profile "$P" || true
     done
     for _ in $(seq 1 18); do
       left=$("$CC" vpc DescribeRouterInterfaces --RegionId "$R" --profile "$P" \
-             | jq -r --arg a "$ACC" --arg i "$INIT" '.RouterInterfaceSet.RouterInterfaceType[]?
-                 | select(.RouterInterfaceId==$a or .RouterInterfaceId==$i) | .RouterInterfaceId' | wc -l)
+             | jq -r --arg a "$ACC" --arg i "$INIT" '.RouterInterfaceSet.RouterInterfaceType[]? | select(.RouterInterfaceId==$a or .RouterInterfaceId==$i) | .RouterInterfaceId' | wc -l)
       [ "$left" -eq 0 ] && break; sleep 10
     done
-    echo "unpeer: done (remaining of our RIs: ${left:-?})"
+    echo "unpeer: done"
   args:
     executable: /bin/bash
   changed_when: true
