@@ -114,8 +114,16 @@
       register: _oss_transit_sweep
       changed_when: "'Succeed' in (_oss_transit_sweep.stdout | default('')) or 'removed' in (_oss_transit_sweep.stdout | default('')|lower)"
       failed_when: false
-      no_log: true
-      when: oss_bucket | default('') | length > 0
+      # Best-effort backstop — must never abort the teardown.  Skip unless OSS is
+      # fully configured: _oss_pub_endpoint is a computed group_var (see
+      # all.yml.example); when it is missing the {{ }} used to raise an
+      # undefined-variable error that failed_when: false does NOT rescue (template
+      # errors on args are fatal), which killed the whole teardown.  No no_log here:
+      # AK/SK are interpolated from env/shell vars ($AK/$SK), never printed, so the
+      # real OSS error is worth surfacing over a blanket censor.
+      when:
+        - oss_bucket | default('') | length > 0
+        - _oss_pub_endpoint is defined
 
     # ── 0a. PVC-delete-first reclaim (PRIMARY NAS/disk cleanup) ──────────
     # The clean way to reclaim CSI-provisioned NAS filesystems + cloud disks is to

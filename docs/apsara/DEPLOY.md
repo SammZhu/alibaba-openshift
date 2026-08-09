@@ -79,6 +79,13 @@ cloud_env:
 apsara_image_id:     "aliyun_4_x86_64_20G_alibase_20260407.vhd"   # DescribeImages (ImageId == vhd name)
 apsara_oss_endpoint: "https://oss-cn-wulan-ste3-d01-a.cloud.ste3.com"
 
+# Computed OSS endpoints — copy from group_vars/all.yml.example.  These are NOT
+# optional: several playbooks (04/06/99-teardown) reference _oss_pub_endpoint /
+# _oss_int_endpoint, and a missing one raises a fatal undefined-var error.  On
+# apsara both resolve to apsara_oss_endpoint.
+_oss_pub_endpoint: "{{ apsara_oss_endpoint if (cloud_platform | default('public')) == 'apsara' else 'oss-' + region + '.aliyuncs.com' }}"
+_oss_int_endpoint: "{{ apsara_oss_endpoint if (cloud_platform | default('public')) == 'apsara' else 'oss-' + region + '-internal.aliyuncs.com' }}"
+
 # ── base config (Apsara values) ──
 region: cn-wulan-ste3-d01
 zone:   cn-wulan-ste3-amtest11001-a
