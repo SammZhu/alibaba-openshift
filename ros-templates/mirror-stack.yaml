@@ -108,6 +108,23 @@ Parameters:
     Type: String
     Default: ""
 
+  # Package-repo mirror override for the mirror ECS bootstrap.  On Apsara the
+  # image's default dnf repo host (mirrors.cloud.aliyuncs.com) is unreachable from
+  # a private-cloud VPC; point these at a reachable mirror so `dnf install podman`
+  # works.  All empty (public cloud) -> repos untouched.
+  PkgRepoMirrorHost:
+    Type: String
+    Default: ""
+    Description: e.g. mirrors.aliyun.com — when set, repos are repointed to it.
+  PkgRepoMirrorIp:
+    Type: String
+    Default: ""
+    Description: IP for PkgRepoMirrorHost, added to /etc/hosts (the VPC DNS may not resolve it).
+  PkgRepoMirrorFrom:
+    Type: String
+    Default: mirrors.cloud.aliyuncs.com
+    Description: The repo host to replace with PkgRepoMirrorHost.
+
   RamRoleName:
     Type: String
     Default: openshift-node-role
@@ -721,11 +738,30 @@ Resources:
               echo "/var/lib/quay-storage/swapfile none swap sw 0 0" >> /etc/fstab
             fi
 
+            # Apsara: the image's default package repo (mirrors.cloud.aliyuncs.com)
+            # is unreachable from a private-cloud VPC.  When a reachable mirror is
+            # provided, add its DNS (the VPC resolver may not know the name) and
+            # repoint the repos.  Empty (public cloud) -> repos untouched.
+            if [ -n "${PkgRepoMirrorHost}" ]; then
+              if [ -n "${PkgRepoMirrorIp}" ] && ! grep -q "${PkgRepoMirrorHost}" /etc/hosts; then
+                echo "${PkgRepoMirrorIp} ${PkgRepoMirrorHost}" >> /etc/hosts
+              fi
+              sed -i "s#https\?://${PkgRepoMirrorFrom}#https://${PkgRepoMirrorHost}#g" /etc/yum.repos.d/*.repo
+              dnf clean all
+            fi
+
             dnf install -y podman tar curl jq policycoreutils-python-utils
-            curl -fLO https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz
-            tar xzf aliyun-cli-linux-latest-amd64.tgz
-            install -m 0755 aliyun /usr/local/bin/
-            rm -f aliyun-cli-linux-latest-amd64.tgz aliyun
+
+            # The aliyun CLI on the mirror ECS is only used by the public-cloud OSS
+            # path; Apsara uses apsara-oss (pushed by 04), and alicdn may be
+            # unreachable from the private VPC — so install it only on public cloud
+            # (signalled by no repo-mirror override).
+            if [ -z "${PkgRepoMirrorHost}" ]; then
+              curl -fLO https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz
+              tar xzf aliyun-cli-linux-latest-amd64.tgz
+              install -m 0755 aliyun /usr/local/bin/
+              rm -f aliyun-cli-linux-latest-amd64.tgz aliyun
+            fi
 
             # ── P3-FIX.9: converge podman graphroot onto the vdb data disk ──
             # Quay's container images AND named volumes (incl. the pg-storage

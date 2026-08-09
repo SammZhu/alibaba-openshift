@@ -62,6 +62,14 @@ apsara_oss_endpoint: ""
 # (verify with skopeo first), e.g. registry.aliyuncs.com/google_containers, so
 # csi-provisioner/attacher/resizer/snapshotter are mirrored in for CSI storage.
 apsara_sig_storage_registry: ""
+# apsara only: mirror ECS package-repo mirror.  The image's default dnf host
+# (mirrors.cloud.aliyuncs.com) is unreachable from a private-cloud VPC, so the
+# mirror ECS cloud-init can't install podman.  Point at a reachable mirror; the IP
+# is added to /etc/hosts because the VPC DNS may not resolve the name.  Use an
+# Alibaba Cloud Linux 3 image (aliyun_3_x86_64_20G_alibase_*) whose repo carries
+# podman.  (Confirm the CDN IP with: curl -o/dev/null -w'%{remote_ip}' https://<host>/ )
+apsara_pkg_repo_mirror_host: ""     # e.g. mirrors.aliyun.com
+apsara_pkg_repo_mirror_ip:   ""     # e.g. 117.161.66.75  (public CDN IP for the host)
 # Computed OSS endpoints used across the OSS call sites.  Public cloud keeps the
 # deliberate internal(free)/public split; Apsara collapses both to its single
 # apsara_oss_endpoint.  (Lazy Jinja — evaluated per use, so region/cloud_platform

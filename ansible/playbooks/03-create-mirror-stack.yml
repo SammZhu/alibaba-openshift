@@ -189,6 +189,13 @@
             ParameterValue: "{{ existing_vpc_id | default('') }}"
           - ParameterKey: ExistingVSwitchId
             ParameterValue: "{{ existing_vswitch_id | default('') }}"
+          # Apsara: repoint the mirror ECS's dnf repo to a reachable mirror so its
+          # cloud-init can install podman (the default host is unreachable in-VPC).
+          # Empty on public cloud -> repos untouched.
+          - ParameterKey: PkgRepoMirrorHost
+            ParameterValue: "{{ apsara_pkg_repo_mirror_host | default('') }}"
+          - ParameterKey: PkgRepoMirrorIp
+            ParameterValue: "{{ apsara_pkg_repo_mirror_ip | default('') }}"
           - ParameterKey: RamRoleName
             ParameterValue: "{{ cluster_name }}-node-role"
           - ParameterKey: EnableJumpHost
