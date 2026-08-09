@@ -225,28 +225,29 @@ installer from OSS. Those must be built + uploaded first — the bucket starts e
 
 On the **operator/Helper** the Squid proxy is heavily throttled (~17 KB/s), but a
 **direct** connection reaches quay.io at ~7 MB/s — usable. So build on the Helper
-with registry pulls going **direct** and the OSS upload going through `apsara-oss`
-(internal endpoint via `APSARA_PROXY`). `build-mirror-tarball.sh` is env-driven:
+with registry pulls going **direct** and the OSS upload going through `apsara-oss`.
+
+Run it via ansible (assembles the env from `group_vars`, dispatches OSS per
+platform) — no hand-crafted env line:
 
 ```sh
-cd /root/alibaba-openshift
-# registry pulls DIRECT: keep http_proxy/https_proxy unset for this command.
-env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
-  OSS_CLI=/root/alibaba-openshift/scripts/apsara/apsara-oss/apsara-oss \
-  OSS_ENDPOINT="$apsara_oss_endpoint"  `# e.g. https://oss-cn-wulan-ste3-d01-a.cloud.ste3.com` \
-  APSARA_PROXY=http://<squid>:3128    `# apsara-oss uses this for the OSS leg only` \
-  AK=<bucket-owner AK> SK=<bucket-owner SK> \
-  OSS_BUCKET=<your bucket> REGION=cn-wulan-ste3-d01 \
-  CLUSTER_NAME=<cluster> OPENSHIFT_VERSION=4.20 \
-  OFFLINE_TOKEN_FILE=/path/to/offline-token \
-  PULL_SECRET=/path/to/pull-secret.json \
-    ./scripts/build-mirror-tarball.sh
+cd /root/alibaba-openshift/ansible
+ansible-playbook playbooks/mirror-build.yml
+# ~1-2 h; follow progress with the log path it prints:  tail -f ../mirror-build-*.log
 ```
 
-Needs on the Helper: Red Hat pull-secret + offline token, `oc-mirror`/`skopeo`
-(the script installs oc-mirror from mirror.openshift.com — slow via the CDN but
-~180 MB one-time), and ~60 GB free disk. oc-mirror v2 keeps `~/.oc-mirror` as a
-blob cache, so a dropped run resumes cheaply on re-run.
+It reads `oss_bucket` / `openshift_version` / `cluster_name` / `region` /
+`pull_secret_file` / `offline_token_file` from `all.yml`, points `OSS_CLI` at
+`apsara-oss` and `OSS_ENDPOINT` at `apsara_oss_endpoint`, and passes the AK/SK from
+`cloud_env`. `cloud_env` carries `APSARA_PROXY` for the OSS upload but not
+`http_proxy`, so oc-mirror/skopeo pull direct. (Equivalent manual form:
+`OSS_CLI=… OSS_ENDPOINT=… APSARA_PROXY=… AK=… SK=… OSS_BUCKET=… REGION=… CLUSTER_NAME=… OPENSHIFT_VERSION=… OFFLINE_TOKEN_FILE=… PULL_SECRET=… ./scripts/build-mirror-tarball.sh`,
+with `http_proxy`/`https_proxy` unset.)
+
+Needs on the Helper: Red Hat pull-secret + offline token (paths in `all.yml`),
+`skopeo` (the script installs oc-mirror from mirror.openshift.com — slow via the
+CDN but ~180 MB one-time), and ~60 GB free disk. oc-mirror v2 keeps `~/.oc-mirror`
+as a blob cache, so a dropped run resumes cheaply on re-run.
 
 The mirror-registry installer + oc-mirror binary are staged into OSS by
 `02-import-image` (task `mirror_stage_artefacts`); run 02 before 04.

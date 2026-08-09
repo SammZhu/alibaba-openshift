@@ -1,0 +1,91 @@
+---
+# Build + ship the mirror content tarball to OSS — the one-time prerequisite for
+# Phase 04 (which downloads it onto the mirror ECS).  This is the ansible wrapper
+# around scripts/build-mirror-tarball.sh: it assembles the script's environment
+# from group_vars and dispatches OSS to the right client per platform, so the long
+# env line is never hand-crafted.
+#
+# Public cloud: OSS via the aliyun CLI + auto-detected endpoint (script defaults).
+# Apsara Stack: OSS via apsara-oss to the internal endpoint.  Registry pulls stay
+#   DIRECT — cloud_env carries APSARA_PROXY (apsara-oss uses it for the OSS leg
+#   only) but NOT http_proxy/https_proxy, so oc-mirror/skopeo pull straight from
+#   quay.io (~7 MB/s vs ~17 KB/s through the Squid proxy).
+#
+# Prereqs (group_vars): pull_secret_file, offline_token_file, oss_bucket,
+#   openshift_version (X.Y.Z), cluster_name, region; ~60 GB free disk.
+#
+# Usage:
+#   ansible-playbook ansible/playbooks/mirror-build.yml
+# The build runs ~1-2 h; follow it with `tail -f` on the log printed at start.
+- name: Build + ship the mirror tarball to OSS
+  hosts: local
+  gather_facts: false
+  # apsara: cloud_env carries CLOUD_PLATFORM/AK/SK/endpoints/APSARA_PROXY so
+  # apsara-oss can upload.  It deliberately does NOT set http_proxy — registry
+  # pulls go direct.  Public cloud: cloud_env is {} (no-op).
+  environment: "{{ cloud_env | default({}) }}"
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
+    - ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
+
+    - name: Sanity — build inputs present
+      ansible.builtin.assert:
+        that:
+          - oss_bucket | default('') | length > 0
+          - openshift_version | default('') | length > 0
+          - cluster_name | default('') | length > 0
+        fail_msg: "Set oss_bucket / openshift_version / cluster_name in group_vars."
+
+    - name: Sanity — pull secret + offline token readable
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ pull_secret_file }}"
+        - "{{ offline_token_file }}"
+      register: _mb_files
+      failed_when: not _mb_files.stat.exists
+
+    - name: Assemble build-mirror-tarball.sh environment (per platform)
+      ansible.builtin.set_fact:
+        _mb_env: >-
+          {{ {
+               'OSS_CLI': oss_cli | default('aliyun oss'),
+               'OSS_BUCKET': oss_bucket,
+               'REGION': region,
+               'CLUSTER_NAME': cluster_name,
+               'OPENSHIFT_VERSION': (openshift_version.split('.')[0:2] | join('.')),
+               'OPENSHIFT_PATCH_VERSION': openshift_version,
+               'PULL_SECRET': pull_secret_file,
+               'OFFLINE_TOKEN_FILE': offline_token_file
+             } | combine(
+               {
+                 'OSS_ENDPOINT': apsara_oss_endpoint | default(''),
+                 'AK': _ak,
+                 'SK': _sk
+               } if (cloud_platform | default('public')) == 'apsara' else {}
+             ) }}
+
+    - name: Build log path
+      ansible.builtin.set_fact:
+        _mb_log: "{{ repo_root }}/mirror-build-{{ cluster_name }}-{{ openshift_version }}.log"
+
+    - name: Announce (the build takes ~1-2 h)
+      ansible.builtin.debug:
+        msg: "Building the mirror tarball — follow progress with:  tail -f {{ _mb_log }}"
+
+    - name: Run build-mirror-tarball.sh (build + upload to OSS)
+      ansible.builtin.shell: |
+        set -o pipefail
+        {{ repo_root }}/scripts/build-mirror-tarball.sh 2>&1 | tee {{ _mb_log }}
+      args:
+        executable: /bin/bash
+      environment: "{{ (cloud_env | default({})) | combine(_mb_env) }}"
+      register: _mb_run
+      changed_when: true
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: >-
+          ✓ Mirror content shipped to oss://{{ oss_bucket }}/mirror-tarballs/.
+          Next: 02-import-image (stages the mirror-registry installer), then
+          04-prepare-mirror.
