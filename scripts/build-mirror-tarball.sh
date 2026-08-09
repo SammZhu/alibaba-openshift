@@ -564,12 +564,28 @@ fi
 [[ -n "$AK" && -n "$SK" ]] || { echo "ERROR: could not read AK/SK for profile '$PROFILE'"; exit 1; }
 
 # ── Upload to OSS ─────────────────────────────────────────────────────────────
+# Ensure the bucket exists.  Apsara: apsara-oss CANNOT create buckets (the gateway
+# serves a per-bucket TLS vhost, so a not-yet-existing bucket's SNI is rejected) —
+# it must be pre-created in the console under the SAME account as this AK/SK.  So:
+# if `ls` works we're done; otherwise try `mb` (public cloud) but treat
+# BucketAlreadyExists as success (the bucket exists) rather than aborting.
 echo "[5/6] Ensuring OSS bucket exists..."
-$OSS_CLI ls "oss://${OSS_BUCKET}/" \
-    --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
-    >/dev/null 2>&1 || \
-  $OSS_CLI mb "oss://${OSS_BUCKET}" \
-    --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK"
+if $OSS_CLI ls "oss://${OSS_BUCKET}/" \
+     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" >/dev/null 2>&1; then
+  echo "    ✓ bucket ${OSS_BUCKET} is accessible."
+else
+  _mb_out="$($OSS_CLI mb "oss://${OSS_BUCKET}" \
+      --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" 2>&1 || true)"
+  if echo "$_mb_out" | grep -qi 'BucketAlreadyExist'; then
+    echo "    ✓ bucket ${OSS_BUCKET} already exists — continuing (upload confirms access)."
+  elif echo "$_mb_out" | grep -qiE 'error|denied|exception|StatusCode'; then
+    echo "ERROR: cannot access or create OSS bucket '${OSS_BUCKET}':"
+    echo "  ${_mb_out}"
+    echo "  On Apsara, pre-create the bucket in the console under the SAME account as your AK/SK,"
+    echo "  then set oss_bucket to it (apsara-oss cannot create buckets)."
+    exit 1
+  fi
+fi
 
 echo "[6/6] Uploading tarball + checksum to OSS (this will take a while)..."
 $OSS_CLI cp "$TARBALL_PATH" "oss://${OSS_BUCKET}/${OSS_OBJECT}" \
