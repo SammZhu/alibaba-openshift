@@ -140,6 +140,15 @@ func newClient(flags map[string]string) *oss.Client {
 	if token != "" {
 		opts = append(opts, oss.SecurityToken(token))
 	}
+	// Apsara OSS: the endpoint is reachable only through the in-network proxy, and
+	// it presents an internal CA cert.  Route via APSARA_PROXY and skip cert
+	// verification (same as apsara-rpc).  Virtual-host addressing (the SDK default)
+	// is what the gateway serves — a direct connection hits a default vhost and
+	// fails the TLS handshake with "unrecognized name".
+	opts = append(opts, oss.InsecureSkipVerify(true))
+	if p := os.Getenv("APSARA_PROXY"); p != "" {
+		opts = append(opts, oss.Proxy(p))
+	}
 	client, err := oss.New(endpoint, ak, sk, opts...)
 	if err != nil {
 		die("oss client:", err)
