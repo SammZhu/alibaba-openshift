@@ -116,12 +116,34 @@ this (see `scripts/apsara/apsara-oss`), but for the record:
   A real OSS reply (object list, or `AccessDenied`/`NoSuchBucket`) means the path
   works; `tls: unrecognized name` means it went direct / wrong endpoint.
 
-### mirror-ECS side (phase 04)
+### Reaching the mirror ECS (phase 04+) — network prerequisite
+
+Phases from 04 on SSH into the mirror ECS at its **private** IP
+(`mirror_private_ip`, e.g. 10.0.16.4). `_ssh_root_mirror` proxies through
+`jump_host_ip` — but in a private cloud we do **not** use a public jump-host EIP
+(unreliable / not the model). Instead the operator host must reach the stack
+VPC's private range directly:
+
+- **VPC peering** between the operator's VPC and the mirror-stack VPC
+  (`10.0.0.0/16`), with routes on both sides — the standard private-cloud path; or
+- put the operator host **in the stack VPC** (same VPC / attached ENI).
+
+This is Apsara network configuration (console/API), environment-specific. Verify
+with `ssh -i <key> root@<mirror_private_ip>` from the operator before running 04.
+With a direct route, `jump_host_ip` can stay empty and `_ssh_proxy_args` should be
+blanked (no ProxyCommand needed).
+
+### mirror-ECS side OSS (phase 04)
 
 Phase 04 runs the large OSS downloads **on the mirror ECS** over SSH with
-`--mode=EcsRamRole` (the instance RAM role). That requires `apsara-oss` present on
-the mirror ECS and OSS reachable from inside the VPC — still to be wired into the
-mirror-stack cloud-init bootstrap (public cloud installs the `aliyun` CLI there).
+`--mode=EcsRamRole` (the instance RAM role). That requires:
+
+1. `apsara-oss` present **on the mirror ECS** (public cloud installs the `aliyun`
+   CLI via cloud-init; for Apsara, scp the built binary to the mirror ECS or add
+   it to the mirror-stack cloud-init bootstrap), and
+2. OSS reachable **from the mirror ECS** — it has NAT egress; confirm whether it
+   reaches OSS via the Squid proxy or a VPC-internal OSS endpoint, and set
+   `APSARA_PROXY` / the endpoint accordingly in the remote environment.
 
 ## 5. Run
 
