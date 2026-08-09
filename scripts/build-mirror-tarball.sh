@@ -352,12 +352,17 @@ _pin_quay_public_image ALIBABA_CSI_CATALOG_IMAGE \
 # snapshotter). Those exist at registry.k8s.io/sig-storage, so pull from there;
 # registrar+livenessprobe exist at acs/ with bare tags. The MIRROR namespace stays
 # acs/* either way so the operator refs + the 08 ITMS resolve unchanged.
+# sig-storage sidecars live at registry.k8s.io/sig-storage by default, which is
+# unreachable from mainland China (GFW).  Override SIG_STORAGE_REGISTRY to a China
+# mirror there (e.g. registry.aliyuncs.com/google_containers — same trailing image
+# name, so csi-provisioner:v3.5.0 etc. resolve); public cloud keeps k8s.io.
+SIG_STORAGE_REGISTRY="${SIG_STORAGE_REGISTRY:-registry.k8s.io/sig-storage}"
 for _entry in \
   "registry.cn-hangzhou.aliyuncs.com/acs/csi-plugin:v1.35.3|acs/csi-plugin:v1.35.3" \
-  "registry.k8s.io/sig-storage/csi-provisioner:v3.5.0|acs/csi-provisioner:v3.5.0" \
-  "registry.k8s.io/sig-storage/csi-attacher:v4.3.0|acs/csi-attacher:v4.3.0" \
-  "registry.k8s.io/sig-storage/csi-resizer:v1.8.0|acs/csi-resizer:v1.8.0" \
-  "registry.k8s.io/sig-storage/csi-snapshotter:v6.3.0|acs/csi-snapshotter:v6.3.0" \
+  "${SIG_STORAGE_REGISTRY}/csi-provisioner:v3.5.0|acs/csi-provisioner:v3.5.0" \
+  "${SIG_STORAGE_REGISTRY}/csi-attacher:v4.3.0|acs/csi-attacher:v4.3.0" \
+  "${SIG_STORAGE_REGISTRY}/csi-resizer:v1.8.0|acs/csi-resizer:v1.8.0" \
+  "${SIG_STORAGE_REGISTRY}/csi-snapshotter:v6.3.0|acs/csi-snapshotter:v6.3.0" \
   "registry.cn-hangzhou.aliyuncs.com/acs/csi-node-driver-registrar:v2.8.0|acs/csi-node-driver-registrar:v2.8.0" \
   "registry.cn-hangzhou.aliyuncs.com/acs/livenessprobe:v2.10.0|acs/livenessprobe:v2.10.0" ; do
   _cd_ref="${_entry%%|*}"     # source ref to inspect/pull (full registry path)
@@ -365,7 +370,9 @@ for _entry in \
   _cd_repo="${_cd_mir%:*}"    # acs/csi-plugin
   _cd_tag="${_cd_mir##*:}"    # v1.35.3
   echo "[2g/8] Pinning CSI driver image: $_cd_ref"
-  _cd_digest=$(skopeo inspect --no-tags "docker://$_cd_ref" 2>/dev/null | jq -r .Digest)
+  # `|| true`: a failed inspect (unreachable registry) must fall through to the
+  # WARN+skip below, not abort the whole build under `set -e`/pipefail.
+  _cd_digest=$(skopeo inspect --no-tags "docker://$_cd_ref" 2>/dev/null | jq -r .Digest) || true
   if [[ -z "$_cd_digest" || "$_cd_digest" == "null" ]]; then
     echo "    WARN: skopeo inspect failed for $_cd_ref — skipping (04 pulls it on the mirror ECS)." >&2
     continue
