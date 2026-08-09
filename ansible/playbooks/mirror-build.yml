@@ -45,6 +45,47 @@
       register: _mb_files
       failed_when: not _mb_files.stat.exists
 
+    # ── Preflight: fail fast in ansible (not mid-script) on a missing tool or ───
+    #    too little disk, with a clear message. ──────────────────────────────────
+    - name: Preflight — probe required build tools
+      ansible.builtin.shell: "command -v {{ item }} >/dev/null 2>&1 && echo ok || echo MISSING"
+      args:
+        executable: /bin/bash
+      loop: [skopeo, jq, tar, curl]
+      register: _mb_tools
+      changed_when: false
+
+    - name: Preflight — all build tools present
+      ansible.builtin.assert:
+        that: "_mb_tools.results | selectattr('stdout', 'equalto', 'MISSING') | list | length == 0"
+        fail_msg: >-
+          Missing build tool(s):
+          {{ _mb_tools.results | selectattr('stdout', 'equalto', 'MISSING') | map(attribute='item') | list }}.
+          Install them (e.g. sudo dnf install -y skopeo jq).  oc-mirror is fetched
+          by the script itself, so it need not be pre-installed.
+
+    - name: Preflight — apsara OSS client binary is present + executable
+      ansible.builtin.stat:
+        path: "{{ oss_cli }}"
+      register: _mb_ossbin
+      failed_when: not (_mb_ossbin.stat.exists and _mb_ossbin.stat.executable)
+      when: (cloud_platform | default('public')) == 'apsara'
+
+    - name: Preflight — free disk at the build dir (needs ~60 GB)
+      ansible.builtin.shell: "df -BG --output=avail {{ repo_root }} | tail -1 | tr -dc '0-9'"
+      args:
+        executable: /bin/bash
+      register: _mb_disk
+      changed_when: false
+
+    - name: Preflight — enough disk for the build
+      ansible.builtin.assert:
+        that: (_mb_disk.stdout | default('0') | int) >= 60
+        fail_msg: >-
+          Only {{ _mb_disk.stdout | default('?') }} GB free at {{ repo_root }};
+          the build needs ~60 GB (30 GB tarball + oc-mirror working set/cache).
+          Free space or set WORK_DIR to a larger volume.
+
     - name: Assemble build-mirror-tarball.sh environment (per platform)
       ansible.builtin.set_fact:
         _mb_env: >-
@@ -56,7 +97,8 @@
                'OPENSHIFT_VERSION': (openshift_version.split('.')[0:2] | join('.')),
                'OPENSHIFT_PATCH_VERSION': openshift_version,
                'PULL_SECRET': pull_secret_file,
-               'OFFLINE_TOKEN_FILE': offline_token_file
+               'OFFLINE_TOKEN_FILE': offline_token_file,
+               'WORK_DIR': repo_root ~ '/mirror-build'
              } | combine(
                {
                  'OSS_ENDPOINT': apsara_oss_endpoint | default(''),
