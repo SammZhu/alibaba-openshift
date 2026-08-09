@@ -1,87 +1,73 @@
 # apsara_unpeer_vpc.yml — tear down the mirror<->operator VPC peering created by
 # apsara_peer_vpc.yml, BEFORE the mirror-stack DeleteStack (the Router Interface
-# blocks VPC deletion with DependencyViolation.RouteInterface, and a route entry
-# referencing an RI blocks RI deletion — so: routes -> deactivate -> delete).
+# blocks VPC deletion with DependencyViolation.RouteInterface).
 #
-# Best-effort: every step tolerates "already gone".  Driven by the state facts
-# saved at peer time (mirror_peer_ri_init/accept, mirror_peer_op_rt/cidr,
-# mirror_peer_mr_rt).  Skipped entirely when no peering was recorded.
+# Robust order (learned 2026-08-09): DEACTIVATE first, then clear routes, then
+# delete the RIs.  On Apsara a route entry whose next hop is an ACTIVE RI does not
+# reliably delete, which left the accepting RI pinned by its route and stalled the
+# teardown.  Also: don't trust a single saved route-table/CIDR — scan BOTH VPCs'
+# route tables and delete EVERY entry whose next hop is one of our two RIs.
+# DeleteRouterInterface is async, so finally wait until both RIs are gone or the
+# DeleteStack that runs next races them.
 #
-# Required vars (from state): mirror_peer_ri_init, mirror_peer_ri_accept,
-#   mirror_peer_op_rt, mirror_peer_op_cidr, mirror_peer_mr_rt, mirror_vpc_cidr,
-#   region, cloud_cli, aliyun_profile.
+# Best-effort throughout (failed_when: false); skipped when no peering was recorded.
+# Driven by state facts: mirror_peer_ri_init/accept, mirror_vpc_id,
+# mirror_peer_op_vpc_id.
 
-- name: "unpeer: remove peering routes + router interfaces"
+- name: "unpeer: deactivate -> clear routes -> delete RIs (robust, scan-based)"
   when: mirror_peer_ri_init | default('') | length > 0
-  block:
-    - name: "unpeer: delete operator-side route (dst mirror CIDR)"
-      ansible.builtin.command:
-        argv: ["{{ cloud_cli }}", vpc, DeleteRouteEntry, --RegionId, "{{ region }}",
-               --RouteTableId, "{{ mirror_peer_op_rt }}",
-               --DestinationCidrBlock, "{{ mirror_vpc_cidr }}",
-               --NextHopId, "{{ mirror_peer_ri_init }}",
-               --profile, "{{ aliyun_profile }}"]
-      changed_when: true
-      failed_when: false
+  ansible.builtin.shell: |
+    set -uo pipefail
+    CC="{{ cloud_cli }}"; R="{{ region }}"; P="{{ aliyun_profile }}"
+    INIT="{{ mirror_peer_ri_init }}"; ACC="{{ mirror_peer_ri_accept | default('') }}"
+    MRVPC="{{ mirror_vpc_id | default('') }}"; OPVPC="{{ mirror_peer_op_vpc_id | default('') }}"
 
-    - name: "unpeer: delete mirror-side route (dst operator CIDR)"
-      ansible.builtin.command:
-        argv: ["{{ cloud_cli }}", vpc, DeleteRouteEntry, --RegionId, "{{ region }}",
-               --RouteTableId, "{{ mirror_peer_mr_rt }}",
-               --DestinationCidrBlock, "{{ mirror_peer_op_cidr }}",
-               --NextHopId, "{{ mirror_peer_ri_accept }}",
-               --profile, "{{ aliyun_profile }}"]
-      changed_when: true
-      failed_when: false
+    ris="$INIT"; [ -n "$ACC" ] && ris="$ris $ACC"
 
-    - name: "unpeer: deactivate both router interfaces"
-      ansible.builtin.command:
-        argv: ["{{ cloud_cli }}", vpc, DeactivateRouterInterface, --RegionId, "{{ region }}",
-               --RouterInterfaceId, "{{ item }}", --profile, "{{ aliyun_profile }}"]
-      loop:
-        - "{{ mirror_peer_ri_init }}"
-        - "{{ mirror_peer_ri_accept }}"
-      changed_when: true
-      failed_when: false
+    # 1) Deactivate both, then wait until neither is Active (delete + route-delete
+    #    only behave once the RIs are Inactive).
+    for ri in $ris; do
+      "$CC" vpc DeactivateRouterInterface --RegionId "$R" --RouterInterfaceId "$ri" --profile "$P" >/dev/null 2>&1 || true
+    done
+    for _ in $(seq 1 18); do
+      act=$("$CC" vpc DescribeRouterInterfaces --RegionId "$R" --profile "$P" \
+            | jq -r --arg a "$ACC" --arg i "$INIT" '.RouterInterfaceSet.RouterInterfaceType[]?
+                | select(.RouterInterfaceId==$a or .RouterInterfaceId==$i)
+                | select(.Status=="Active") | .RouterInterfaceId' | wc -l)
+      [ "$act" -eq 0 ] && break; sleep 10
+    done
 
-    # Deactivate is async — both RIs must reach Idle/Inactive before delete, or
-    # DeleteRouterInterface returns IncorrectStatus (observed 2026-08-09).
-    - name: "unpeer: wait until both RIs are Inactive/Idle"
-      ansible.builtin.command:
-        argv: ["{{ cloud_cli }}", vpc, DescribeRouterInterfaces, --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
-      register: _unpeer_q
-      changed_when: false
-      failed_when: false
-      retries: 18
-      delay: 10
-      until: >-
-        ((_unpeer_q.stdout | default('{}') | from_json).RouterInterfaceSet.RouterInterfaceType | default([])
-         | selectattr('RouterInterfaceId','in', [mirror_peer_ri_init, mirror_peer_ri_accept])
-         | rejectattr('Status','in', ['Inactive','Idle']) | list | length) == 0
+    # 2) Delete EVERY route entry (in either VPC's route tables) whose next hop is
+    #    one of our RIs — do not rely on a single saved table/CIDR.
+    for v in "$MRVPC" "$OPVPC"; do
+      [ -n "$v" ] || continue
+      for rt in $("$CC" vpc DescribeRouteTableList --RegionId "$R" --VpcId "$v" --profile "$P" \
+                  | jq -r '.RouterTableList.RouterTableListType[]?.RouteTableId'); do
+        "$CC" vpc DescribeRouteEntryList --RegionId "$R" --RouteTableId "$rt" --profile "$P" \
+          | jq -r --arg a "$ACC" --arg i "$INIT" '.RouteEntrys.RouteEntry[]?
+              | select(.NextHops.NextHop[0].NextHopId==$a or .NextHops.NextHop[0].NextHopId==$i)
+              | .DestinationCidrBlock + " " + .NextHops.NextHop[0].NextHopId' \
+          | while read -r cidr nh; do
+              echo "unpeer: deleting route $cidr -> $nh (rt $rt)"
+              "$CC" vpc DeleteRouteEntry --RegionId "$R" --RouteTableId "$rt" \
+                --DestinationCidrBlock "$cidr" --NextHopId "$nh" --profile "$P" || true
+            done
+      done
+    done
 
-    - name: "unpeer: delete both router interfaces (accepting first, then initiating)"
-      ansible.builtin.command:
-        argv: ["{{ cloud_cli }}", vpc, DeleteRouterInterface, --RegionId, "{{ region }}",
-               --RouterInterfaceId, "{{ item }}", --profile, "{{ aliyun_profile }}"]
-      loop:
-        - "{{ mirror_peer_ri_accept }}"
-        - "{{ mirror_peer_ri_init }}"
-      changed_when: true
-      failed_when: false
-
-    # DeleteRouterInterface is ASYNC — the RIs may linger a few seconds after the
-    # delete call returns.  Wait until they are actually gone, or the mirror
-    # DeleteStack that runs next races them and fails deleting the VPC with
-    # DependencyViolation.RouteInterface (observed 2026-08-09).
-    - name: "unpeer: wait until both RIs are actually gone (delete is async)"
-      ansible.builtin.command:
-        argv: ["{{ cloud_cli }}", vpc, DescribeRouterInterfaces, --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
-      register: _unpeer_gone
-      changed_when: false
-      failed_when: false
-      retries: 18
-      delay: 10
-      until: >-
-        ((_unpeer_gone.stdout | default('{}') | from_json).RouterInterfaceSet.RouterInterfaceType | default([])
-         | selectattr('RouterInterfaceId', 'in', [mirror_peer_ri_init, mirror_peer_ri_accept])
-         | list | length) == 0
+    # 3) Delete the RIs (now Inactive + unreferenced), then wait until gone
+    #    (DeleteRouterInterface is async — else DeleteStack races the RI).
+    for ri in $ACC $INIT; do
+      "$CC" vpc DeleteRouterInterface --RegionId "$R" --RouterInterfaceId "$ri" --profile "$P" || true
+    done
+    for _ in $(seq 1 18); do
+      left=$("$CC" vpc DescribeRouterInterfaces --RegionId "$R" --profile "$P" \
+             | jq -r --arg a "$ACC" --arg i "$INIT" '.RouterInterfaceSet.RouterInterfaceType[]?
+                 | select(.RouterInterfaceId==$a or .RouterInterfaceId==$i) | .RouterInterfaceId' | wc -l)
+      [ "$left" -eq 0 ] && break; sleep 10
+    done
+    echo "unpeer: done (remaining of our RIs: ${left:-?})"
+  args:
+    executable: /bin/bash
+  changed_when: true
+  failed_when: false
