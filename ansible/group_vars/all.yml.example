@@ -56,6 +56,12 @@ apsara_image_id:     ""
 # it does NOT go through apsara-rpc/cloudcli; the operator host still needs the
 # aliyun CLI (or ossutil) able to reach this endpoint.
 apsara_oss_endpoint: ""
+# apsara only: mirror for the CSI sig-storage sidecars (registry.k8s.io is
+# GFW-unreachable from a China build host).  Empty -> keep registry.k8s.io (they
+# get skipped if unreachable).  Set to a China mirror that carries the exact tags
+# (verify with skopeo first), e.g. registry.aliyuncs.com/google_containers, so
+# csi-provisioner/attacher/resizer/snapshotter are mirrored in for CSI storage.
+apsara_sig_storage_registry: ""
 # Computed OSS endpoints used across the OSS call sites.  Public cloud keeps the
 # deliberate internal(free)/public split; Apsara collapses both to its single
 # apsara_oss_endpoint.  (Lazy Jinja — evaluated per use, so region/cloud_platform

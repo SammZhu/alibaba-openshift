@@ -103,7 +103,8 @@
                {
                  'OSS_ENDPOINT': apsara_oss_endpoint | default(''),
                  'AK': _ak,
-                 'SK': _sk
+                 'SK': _sk,
+                 'SIG_STORAGE_REGISTRY': apsara_sig_storage_registry | default('')
                } if (cloud_platform | default('public')) == 'apsara' else {}
              ) }}
 
