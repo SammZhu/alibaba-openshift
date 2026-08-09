@@ -33,7 +33,11 @@ import sys, yaml
 
 # Intrinsic functions to expand from short tag to long form.
 FN = ["Ref", "GetAtt", "Sub", "If", "Equals", "Not", "And", "Or", "Join",
-      "Select", "FindInMap", "Base64", "GetAZs", "Split", "ImportValue", "Cidr"]
+      "Select", "FindInMap", "Base64", "GetAZs", "Split", "ImportValue", "Cidr",
+      "Condition"]
+
+# Intrinsics whose long form is a bare top-level key, not under "Fn::".
+BARE_KEY = {"Ref", "Condition"}
 
 # Resource types Apsara lacks — dropped, replaced by an explicit-id parameter.
 REMOVE_TYPES = {"DATASOURCE::ECS::Images"}
@@ -63,7 +67,7 @@ class L(yaml.SafeLoader):
 
 
 def _mk(t):
-    key = "Ref" if t == "Ref" else "Fn::" + t
+    key = t if t in BARE_KEY else "Fn::" + t
 
     def construct(loader, node):
         if isinstance(node, yaml.ScalarNode):

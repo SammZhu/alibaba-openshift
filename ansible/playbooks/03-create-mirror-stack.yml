@@ -181,6 +181,14 @@
             ParameterValue: "{{ private_subnet_cidr3 | default('10.0.48.0/20') }}"
           - ParameterKey: PublicSubnetCidr
             ParameterValue: "{{ public_subnet_cidr }}"
+          # BYO-VPC (private cloud / operator-in-VPC): when set, mirror-stack skips
+          # creating the VPC/subnets/NAT and places the mirror ECS in this existing
+          # VPC + VSwitch (no peering).  Empty (the default) creates the network as
+          # usual — public cloud is unchanged.
+          - ParameterKey: ExistingVpcId
+            ParameterValue: "{{ existing_vpc_id | default('') }}"
+          - ParameterKey: ExistingVSwitchId
+            ParameterValue: "{{ existing_vswitch_id | default('') }}"
           - ParameterKey: RamRoleName
             ParameterValue: "{{ cluster_name }}-node-role"
           - ParameterKey: EnableJumpHost

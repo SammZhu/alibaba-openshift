@@ -97,6 +97,17 @@ Parameters:
     Type: String
     Default: 10.0.0.0/20
 
+  # BYO-VPC (Apsara / operator-in-VPC): when ExistingVpcId is set, skip creating
+  # the VPC/subnets/NAT/EIP/SNAT and place the mirror ECS in the given existing
+  # VPC + VSwitch (reuses that VPC's egress; no peering).  Empty (the default)
+  # creates the network as before — public cloud is unchanged.
+  ExistingVpcId:
+    Type: String
+    Default: ""
+  ExistingVSwitchId:
+    Type: String
+    Default: ""
+
   RamRoleName:
     Type: String
     Default: openshift-node-role
@@ -195,11 +206,15 @@ Conditions:
   HasOverrideImage: !Equals [!Ref EnableOverrideImage, "true"]
   # Third private VSwitch for the Agent-based multi-AZ control plane.
   HasZone3: !Equals [!Ref EnableZone3, "true"]
+  # BYO-VPC: create the network only when no existing VPC was supplied.
+  CreateNetwork: !Equals [!Ref ExistingVpcId, ""]
+  CreateNetworkZone3: !And [!Condition CreateNetwork, !Condition HasZone3]
 
 Resources:
   # ── Networking ───────────────────────────────────────────────────────────────
   Vpc:
     Type: ALIYUN::ECS::VPC
+    Condition: CreateNetwork
     Properties:
       CidrBlock: !Ref VpcCidr
       VpcName: !Sub '${ClusterName}-vpc'
@@ -209,6 +224,7 @@ Resources:
 
   PrivateVSwitch:
     Type: ALIYUN::ECS::VSwitch
+    Condition: CreateNetwork
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: !Ref PrivateSubnetCidr
@@ -217,6 +233,7 @@ Resources:
 
   PrivateVSwitch2:
     Type: ALIYUN::ECS::VSwitch
+    Condition: CreateNetwork
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: !Ref PrivateSubnetCidr2
@@ -226,7 +243,7 @@ Resources:
   # Third private VSwitch (Agent-based multi-AZ control plane: master-3 in ZoneId3)
   PrivateVSwitch3:
     Type: ALIYUN::ECS::VSwitch
-    Condition: HasZone3
+    Condition: CreateNetworkZone3
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: !Ref PrivateSubnetCidr3
@@ -235,6 +252,7 @@ Resources:
 
   PublicVSwitch:
     Type: ALIYUN::ECS::VSwitch
+    Condition: CreateNetwork
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: !Ref PublicSubnetCidr
@@ -243,6 +261,7 @@ Resources:
 
   NatGateway:
     Type: ALIYUN::VPC::NatGateway
+    Condition: CreateNetwork
     Properties:
       VpcId: !Ref Vpc
       VSwitchId: !Ref PublicVSwitch
@@ -251,18 +270,21 @@ Resources:
 
   EIP:
     Type: ALIYUN::VPC::EIP
+    Condition: CreateNetwork
     Properties:
       Bandwidth: 100
       InternetChargeType: PayByTraffic
 
   EIPAssociation:
     Type: ALIYUN::VPC::EIPAssociation
+    Condition: CreateNetwork
     Properties:
       AllocationId: !Ref EIP
       InstanceId: !Ref NatGateway
 
   NatSNATEntry:
     Type: ALIYUN::VPC::SnatEntry
+    Condition: CreateNetwork
     # DependsOn the VSwitch too: the SNAT entry registers a snat routeEntry
     # bound to the private subnet's VSwitch, so on teardown the SNAT entry
     # must be deleted BEFORE the VSwitch — otherwise VSwitch delete fails with
@@ -276,6 +298,7 @@ Resources:
 
   NatSNATEntry2:
     Type: ALIYUN::VPC::SnatEntry
+    Condition: CreateNetwork
     DependsOn: [EIPAssociation, PrivateVSwitch2]
     Properties:
       SnatTableId: !GetAtt NatGateway.SNatTableId
@@ -288,7 +311,7 @@ Resources:
   # is the same NAT-egress root cause that bit the phase-12 zone-c worker.
   NatSNATEntry3:
     Type: ALIYUN::VPC::SnatEntry
-    Condition: HasZone3
+    Condition: CreateNetworkZone3
     DependsOn: [EIPAssociation, PrivateVSwitch3]
     Properties:
       SnatTableId: !GetAtt NatGateway.SNatTableId
@@ -603,7 +626,7 @@ Resources:
   MirrorSecurityGroup:
     Type: ALIYUN::ECS::SecurityGroup
     Properties:
-      VpcId: !Ref Vpc
+      VpcId: !If [CreateNetwork, !Ref Vpc, !Ref ExistingVpcId]
       SecurityGroupName: !Sub '${ClusterName}-mirror-sg'
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -637,7 +660,7 @@ Resources:
       # was passed correctly but ECS still booted from the discovery image.)
       ImageId: !If [HasOverrideImage, !Ref MirrorOverrideImageId, !Select [0, !GetAtt MirrorImageLookup.ImageIds]]
       SecurityGroupId: !Ref MirrorSecurityGroup
-      VSwitchId: !Ref PrivateVSwitch
+      VSwitchId: !If [CreateNetwork, !Ref PrivateVSwitch, !Ref ExistingVSwitchId]
       PrivateIpAddress: !Ref MirrorPrivateIp
       SystemDiskCategory: cloud_essd
       SystemDiskSize: 40
@@ -758,23 +781,23 @@ Resources:
 Outputs:
   # ── Wire-up outputs (consumed by cluster-stack as Parameters) ──────────────
   VpcId:
-    Value: !Ref Vpc
+    Value: !If [CreateNetwork, !Ref Vpc, !Ref ExistingVpcId]
     Description: VPC ID — pass to cluster-stack.VpcId
   VpcCidr:
     Value: !Ref VpcCidr
     Description: VPC CIDR — pass to cluster-stack.VpcCidr
   PrivateVSwitchId:
-    Value: !Ref PrivateVSwitch
+    Value: !If [CreateNetwork, !Ref PrivateVSwitch, !Ref ExistingVSwitchId]
     Description: Primary private VSwitch (ZoneId) — pass to cluster-stack.PrivateVSwitchId
   PrivateVSwitch2Id:
-    Value: !Ref PrivateVSwitch2
+    Value: !If [CreateNetwork, !Ref PrivateVSwitch2, !Ref ExistingVSwitchId]
     Description: Secondary private VSwitch (ZoneId2) — pass to cluster-stack.PrivateVSwitch2Id
   PrivateVSwitch3Id:
-    Condition: HasZone3
+    Condition: CreateNetworkZone3
     Value: !Ref PrivateVSwitch3
     Description: Third private VSwitch (ZoneId3) — pass to cluster-stack.PrivateVSwitch3Id (multi-AZ)
   PublicVSwitchId:
-    Value: !Ref PublicVSwitch
+    Value: !If [CreateNetwork, !Ref PublicVSwitch, !Ref ExistingVSwitchId]
     Description: Public VSwitch — referenced by future workloads, not by cluster-stack
   ZoneId:
     Value: !Ref ZoneId

@@ -116,22 +116,47 @@ this (see `scripts/apsara/apsara-oss`), but for the record:
   A real OSS reply (object list, or `AccessDenied`/`NoSuchBucket`) means the path
   works; `tls: unrecognized name` means it went direct / wrong endpoint.
 
-### Reaching the mirror ECS (phase 04+) — network prerequisite
+### Reaching the mirror ECS (phase 04+) — BYO-VPC (no peering)
 
 Phases from 04 on SSH into the mirror ECS at its **private** IP
-(`mirror_private_ip`, e.g. 10.0.16.4). `_ssh_root_mirror` proxies through
-`jump_host_ip` — but in a private cloud we do **not** use a public jump-host EIP
-(unreliable / not the model). Instead the operator host must reach the stack
-VPC's private range directly:
+(`mirror_private_ip`). `_ssh_root_mirror` proxies through `jump_host_ip` — but in
+a private cloud we do **not** use a public jump-host EIP (unreliable / not the
+model). The operator host must reach the mirror ECS's private IP directly.
 
-- **VPC peering** between the operator's VPC and the mirror-stack VPC
-  (`10.0.0.0/16`), with routes on both sides — the standard private-cloud path; or
-- put the operator host **in the stack VPC** (same VPC / attached ENI).
+Rather than create a new VPC and peer it to the operator's VPC (peering needs a
+permission the sub-user may lack), **place the mirror stack in the operator's
+EXISTING VPC** — same VPC, direct private connectivity, no peering. mirror-stack
+supports this via two parameters (both default `""` → create a new VPC, so public
+cloud is unchanged):
 
-This is Apsara network configuration (console/API), environment-specific. Verify
-with `ssh -i <key> root@<mirror_private_ip>` from the operator before running 04.
-With a direct route, `jump_host_ip` can stay empty and `_ssh_proxy_args` should be
-blanked (no ProxyCommand needed).
+| Parameter | Meaning |
+| --------- | ------- |
+| `ExistingVpcId`     | when set, skip creating the VPC/subnets/NAT/EIP/SNAT |
+| `ExistingVSwitchId` | the existing VSwitch (in that VPC) to place the mirror ECS in |
+
+When `ExistingVpcId` is set the `CreateNetwork` condition turns off every network
+resource; the mirror ECS's SG binds to `ExistingVpcId` and the ECS launches in
+`ExistingVSwitchId`, reusing that VPC's existing NAT egress. The stack outputs
+(`VpcId` / `PrivateVSwitchId` / ...) resolve to the existing ids so cluster-stack
+still wires up correctly.
+
+Config on the operator (`group_vars/all.yml`) — the operator is IN this VPC/subnet:
+
+```yaml
+existing_vpc_id:      vpc-xxxxxxxx           # the operator/Helper's VPC
+existing_vswitch_id:  vsw-xxxxxxxx           # a VSwitch in it (mirror ECS lands here)
+mirror_private_ip:    192.168.34.4           # a free IP in that VSwitch's CIDR
+vpc_cidr:             192.168.0.0/16         # the existing VPC's CIDR — the mirror SG
+                                             # allows 8443/8080/22 from VpcCidr, so this
+                                             # must cover the operator's subnet for SSH
+jump_host_ip:         ""                     # no jump host; operator has a direct route
+```
+
+Verify `ssh -i <key> root@<mirror_private_ip>` from the operator before running 04.
+With a direct route, `_ssh_proxy_args` should be blank (no ProxyCommand needed).
+
+> Public cloud: leave `existing_vpc_id`/`existing_vswitch_id` unset — mirror-stack
+> creates its own VPC exactly as before.
 
 ### mirror-ECS side OSS (phase 04)
 
