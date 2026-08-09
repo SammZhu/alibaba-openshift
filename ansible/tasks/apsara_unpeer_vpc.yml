@@ -68,7 +68,8 @@
 
     - name: "unpeer: surface any RI-delete errors (e.g. RouterInterfaceReferedByRouteEntry)"
       ansible.builtin.debug:
-        msg: "{{ _unpeer_del.results | selectattr('stderr', 'defined') | map(attribute='stderr') | select('length') | list }}"
+        msg: "{{ _unpeer_del.results | default([]) | selectattr('stderr', 'defined') | map(attribute='stderr') | select() | list }}"
+      failed_when: false
 
     - name: "unpeer: wait until both RIs are actually gone (delete is async)"
       environment: "{{ _unpeer_env }}"
