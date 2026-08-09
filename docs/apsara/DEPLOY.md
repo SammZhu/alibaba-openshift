@@ -48,7 +48,9 @@ build them where they live (cloudcli resolves apsara-rpc relative to itself, and
 
 ```sh
 cd /root/alibaba-openshift/scripts/apsara/apsara-rpc && go build -o apsara-rpc .
-cd /root/alibaba-openshift/scripts/apsara/apsara-oss && go build -o apsara-oss .
+# Build apsara-oss STATIC (CGO_ENABLED=0): phase 04 pushes this same binary to the
+# mirror ECS, which runs a different OS — a static build runs on both.
+cd /root/alibaba-openshift/scripts/apsara/apsara-oss && CGO_ENABLED=0 go build -o apsara-oss .
 # go.sum is committed; if module download is needed it goes via the proxy:
 #   go env -w GOPROXY=... ; or export the proxy for `go`
 ```
@@ -201,12 +203,20 @@ With a direct route, `_ssh_proxy_args` should be blank (no ProxyCommand needed).
 Phase 04 runs the large OSS downloads **on the mirror ECS** over SSH with
 `--mode=EcsRamRole` (the instance RAM role). That requires:
 
-1. `apsara-oss` present **on the mirror ECS** (public cloud installs the `aliyun`
-   CLI via cloud-init; for Apsara, scp the built binary to the mirror ECS or add
-   it to the mirror-stack cloud-init bootstrap), and
-2. OSS reachable **from the mirror ECS** — it has NAT egress; confirm whether it
-   reaches OSS via the Squid proxy or a VPC-internal OSS endpoint, and set
-   `APSARA_PROXY` / the endpoint accordingly in the remote environment.
+1. `apsara-oss` present **on the mirror ECS**. Public cloud installs the `aliyun`
+   CLI via cloud-init; for Apsara, **04 pushes the operator's `apsara-oss` to the
+   mirror automatically** (task "(apsara) ensure apsara-oss is present on the
+   mirror ECS", scp to the `oss_cli` path). Build it `CGO_ENABLED=0` (above) so the
+   one binary runs on the mirror's OS too.
+2. The mirror-ECS RAM role (`<cluster_name>-mirror-role`) attached with OSS read
+   perms + the ECS metadata service reachable (STS). Verify:
+   `curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/<cluster>-mirror-role`.
+3. OSS reachable **from the mirror ECS**. The remote calls pass
+   `--endpoint={{ _oss_int_endpoint }}` but do NOT inherit the operator's
+   `APSARA_PROXY` (the operator's `cloud_env` isn't exported into the SSH session).
+   If the mirror reaches OSS VPC-internally, nothing more is needed; if it needs
+   the proxy (same `tls: unrecognized name` symptom as the operator did), the
+   remote heredocs must export `APSARA_PROXY` — surfaces on 04's first OSS call.
 
 ## 5. Run
 

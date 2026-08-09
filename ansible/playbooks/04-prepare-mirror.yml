@@ -33,7 +33,12 @@
     # forever.  TCPKeepAlive is the OS-level fallback.
     _ssh_keepalive: "-o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes"
     _ssh_common_args: "-i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {{ _ssh_keepalive }}"
-    _ssh_proxy_args: "-o ProxyCommand='ssh {{ _ssh_common_args }} -W %h:%p root@{{ jump_host_ip }}'"
+    # Jump host (public cloud) -> ProxyCommand.  Direct reachability (apsara
+    # peering / BYO, jump_host_ip empty) -> no ProxyCommand, connect straight to
+    # the mirror's private IP.
+    _ssh_proxy_args: >-
+      {{ ("-o ProxyCommand='ssh " ~ _ssh_common_args ~ " -W %h:%p root@" ~ jump_host_ip ~ "'")
+         if (jump_host_ip | default('')) | length > 0 else "" }}
     _ssh_root_mirror: "ssh {{ _ssh_common_args }} {{ _ssh_proxy_args }} root@{{ mirror_private_ip }}"
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
@@ -53,7 +58,9 @@
           - mirror_private_ip is defined and mirror_private_ip | length > 0
           - mirror_init_user is defined and mirror_init_user | length > 0
           - mirror_init_password is defined and mirror_init_password | length > 0
-          - jump_host_ip is defined and jump_host_ip | length > 0
+          # Operator reaches the mirror via a jump host (public cloud) OR directly
+          # (apsara peering / BYO — jump_host_ip stays empty, direct route).
+          - (jump_host_ip | default('') | length > 0) or (cloud_platform | default('public')) == 'apsara'
           - oss_bucket is defined and oss_bucket | length > 0
           - mirror_oss_object is defined and mirror_oss_object | length > 0
         fail_msg: |
@@ -97,6 +104,22 @@
             ssh -J root@{{ jump_host_ip }} root@{{ mirror_private_ip }} \
               cat /var/log/mirror-bootstrap.log
       when: bootstrap_check.rc | default(0) != 0
+
+    # ── Step 1b (apsara): put the OSS client on the mirror ECS ───────────────
+    # The remote heredocs below run `{{ oss_cli }}` ON the mirror ECS.  Public
+    # cloud's mirror cloud-init installs the aliyun CLI; Apsara's OSS client is our
+    # own Go binary (too big for UserData), so push it from the operator to the
+    # same path {{ oss_cli }} resolves to.  Build it CGO_ENABLED=0 so one binary
+    # runs on both the operator and the (different-OS) mirror ECS.  Idempotent.
+    - name: (apsara) ensure apsara-oss is present on the mirror ECS
+      ansible.builtin.shell: |
+        set -euo pipefail
+        {{ _ssh_root_mirror }} "mkdir -p {{ oss_cli | dirname }}"
+        scp {{ _ssh_common_args }} {{ _ssh_proxy_args }} {{ oss_cli }} root@{{ mirror_private_ip }}:{{ oss_cli }}
+        {{ _ssh_root_mirror }} "chmod +x {{ oss_cli }}"
+      register: _apsara_oss_push
+      changed_when: true
+      when: (cloud_platform | default('public')) == 'apsara'
 
     # ── Step 2: idempotent check — is mirror already ready? ─────────────────
     # Readiness requires BOTH: (a) the /var/lib/quay-storage/mirror-ready marker,
