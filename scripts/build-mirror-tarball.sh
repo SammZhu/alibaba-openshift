@@ -130,12 +130,21 @@ fi
 # 2>/dev/null) → tar xf crashed with "Cannot open: No such file".
 TARBALL_NAME="${CLUSTER_NAME}-${OPENSHIFT_PATCH_VERSION}.tar"
 
-# OSS endpoint — internal when running inside aliyun ECS, public otherwise.
-# Internal endpoint traffic is free + bypasses the NAT gateway entirely;
-# public endpoint costs ¥0.50/GB OSS egress AND consumes NAT CU Fee on
-# every transfer.  Auto-detect via the aliyun metadata service (only
-# reachable from inside an aliyun ECS, ~1s timeout otherwise).
-# Saves ~¥150-200/month at current usage (see docs/COST.md).
+# OSS client + endpoint.
+#
+# Public cloud (default): `aliyun oss` + an auto-detected endpoint (internal when
+# on an aliyun ECS — free + bypasses NAT — public otherwise; saves ~¥150-200/mo,
+# see docs/COST.md).
+#
+# Apsara Stack: the aliyun CLI can't talk to Apsara OSS and the metadata
+# auto-detect returns a wrong endpoint, so set these explicitly:
+#   OSS_CLI=/root/alibaba-openshift/scripts/apsara/apsara-oss/apsara-oss \
+#   OSS_ENDPOINT=https://oss-<region>-<zone>.cloud.ste3.com \
+#   APSARA_PROXY=http://<squid>:3128 \      # apsara-oss reads it for the OSS transfer
+#   AK=... SK=...                            # apsara-oss can't read ~/.aliyun/config.json
+# Keep http_proxy/https_proxy UNSET so oc-mirror/skopeo pull DIRECT (much faster
+# than via the Squid proxy); apsara-oss uses its own APSARA_PROXY for OSS only.
+OSS_CLI="${OSS_CLI:-aliyun oss}"
 _detect_oss_endpoint() {
   local region="$1"
   if curl -sfo /dev/null --max-time 1 \
@@ -145,14 +154,19 @@ _detect_oss_endpoint() {
     echo "oss-${region}.aliyuncs.com"
   fi
 }
-OSS_ENDPOINT="$(_detect_oss_endpoint "$REGION")"
-echo "OSS endpoint: $OSS_ENDPOINT"
+# Honor a pre-set OSS_ENDPOINT (required on Apsara); else auto-detect (public).
+OSS_ENDPOINT="${OSS_ENDPOINT:-$(_detect_oss_endpoint "$REGION")}"
+echo "OSS client: $OSS_CLI    OSS endpoint: $OSS_ENDPOINT"
 OSS_PREFIX="mirror-tarballs"
 OSS_OBJECT="${OSS_PREFIX}/${TARBALL_NAME}"
 
 # ── Sanity ────────────────────────────────────────────────────────────────────
 [[ -f "$PULL_SECRET" ]] || { echo "ERROR: pull secret not found at $PULL_SECRET"; exit 1; }
-command -v aliyun >/dev/null || { echo "ERROR: aliyun CLI missing"; exit 1; }
+# Only require the aliyun CLI when OSS actually goes through it (public cloud).
+case "$OSS_CLI" in
+  aliyun*) command -v aliyun >/dev/null || { echo "ERROR: aliyun CLI missing"; exit 1; } ;;
+  *)       command -v "${OSS_CLI%% *}" >/dev/null || { echo "ERROR: OSS client '${OSS_CLI%% *}' not found"; exit 1; } ;;
+esac
 
 mkdir -p "$WORK_DIR"
 cd "$WORK_DIR"
@@ -510,25 +524,28 @@ sha256sum "$TARBALL_PATH" | awk '{print $1}' > "${TARBALL_PATH}.sha256"
 TARBALL_SIZE=$(du -h "$TARBALL_PATH" | cut -f1)
 echo "Tarball: $TARBALL_PATH ($TARBALL_SIZE)"
 
-# ── Read AK/SK from aliyun config for ossutil ────────────────────────────────
-PROFILE="${ALIYUN_PROFILE:-openshift-test}"
-read -r AK SK < <(jq -r ".profiles[] | select(.name==\"$PROFILE\") | .access_key_id + \" \" + .access_key_secret" ~/.aliyun/config.json)
+# ── AK/SK: prefer env (Apsara — apsara-oss can't read ~/.aliyun/config.json),
+#    else the aliyun CLI config profile (public cloud). ─────────────────────────
+if [[ -z "${AK:-}" || -z "${SK:-}" ]]; then
+  PROFILE="${ALIYUN_PROFILE:-openshift-test}"
+  read -r AK SK < <(jq -r ".profiles[] | select(.name==\"$PROFILE\") | .access_key_id + \" \" + .access_key_secret" ~/.aliyun/config.json)
+fi
 [[ -n "$AK" && -n "$SK" ]] || { echo "ERROR: could not read AK/SK for profile '$PROFILE'"; exit 1; }
 
 # ── Upload to OSS ─────────────────────────────────────────────────────────────
 echo "[5/6] Ensuring OSS bucket exists..."
-aliyun oss ls "oss://${OSS_BUCKET}/" \
+$OSS_CLI ls "oss://${OSS_BUCKET}/" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
     >/dev/null 2>&1 || \
-  aliyun oss mb "oss://${OSS_BUCKET}" \
+  $OSS_CLI mb "oss://${OSS_BUCKET}" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK"
 
 echo "[6/6] Uploading tarball + checksum to OSS (this will take a while)..."
-aliyun oss cp "$TARBALL_PATH" "oss://${OSS_BUCKET}/${OSS_OBJECT}" \
+$OSS_CLI cp "$TARBALL_PATH" "oss://${OSS_BUCKET}/${OSS_OBJECT}" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
     --part-size=104857600 --parallel=10 --force
 
-aliyun oss cp "${TARBALL_PATH}.sha256" "oss://${OSS_BUCKET}/${OSS_OBJECT}.sha256" \
+$OSS_CLI cp "${TARBALL_PATH}.sha256" "oss://${OSS_BUCKET}/${OSS_OBJECT}.sha256" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
     --force
 
@@ -538,12 +555,12 @@ aliyun oss cp "${TARBALL_PATH}.sha256" "oss://${OSS_BUCKET}/${OSS_OBJECT}.sha256
 # the isc can be re-uploaded standalone (after editing operator catalogs
 # etc.) without re-shipping the 22 GB tarball.
 echo "[6b/8] Uploading imageset-config.yaml as OSS sibling..."
-aliyun oss cp "imageset-config.yaml" "oss://${OSS_BUCKET}/${OSS_OBJECT}.imageset-config.yaml" \
+$OSS_CLI cp "imageset-config.yaml" "oss://${OSS_BUCKET}/${OSS_OBJECT}.imageset-config.yaml" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
     --force
 
 echo "[6c/8] Uploading tag-mapping.tsv (commit-tag → digest aliases) as OSS sibling..."
-aliyun oss cp "$TAG_MAPPING" "oss://${OSS_BUCKET}/${OSS_OBJECT}.tag-mapping.tsv" \
+$OSS_CLI cp "$TAG_MAPPING" "oss://${OSS_BUCKET}/${OSS_OBJECT}.tag-mapping.tsv" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
     --force
 
@@ -564,7 +581,7 @@ EXPECTED_LIST="$WORK_DIR/expected-images.txt"
   echo "$AI_CONTROLLER_IMAGE"
 } | sort -u > "$EXPECTED_LIST"
 echo "    → $(wc -l < "$EXPECTED_LIST") images expected in mirror"
-aliyun oss cp "$EXPECTED_LIST" "oss://${OSS_BUCKET}/${OSS_PREFIX}/${CLUSTER_NAME}-${OPENSHIFT_VERSION}-expected-images.txt" \
+$OSS_CLI cp "$EXPECTED_LIST" "oss://${OSS_BUCKET}/${OSS_PREFIX}/${CLUSTER_NAME}-${OPENSHIFT_VERSION}-expected-images.txt" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
     --force
 
@@ -592,13 +609,13 @@ fi
 ls -lh "$MR_TARBALL"
 
 echo "[8/8] Uploading mirror-registry installer to OSS..."
-aliyun oss cp "$MR_TARBALL" "oss://${OSS_BUCKET}/${OSS_PREFIX}/mirror-registry-${MR_VERSION}.tar.gz" \
+$OSS_CLI cp "$MR_TARBALL" "oss://${OSS_BUCKET}/${OSS_PREFIX}/mirror-registry-${MR_VERSION}.tar.gz" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
     --part-size=104857600 --parallel=10 --force
 
 # Mark the "current" version so cloud-init can find it without knowing the version
 echo -n "$MR_VERSION" > "$WORK_DIR/mirror-registry-version.txt"
-aliyun oss cp "$WORK_DIR/mirror-registry-version.txt" \
+$OSS_CLI cp "$WORK_DIR/mirror-registry-version.txt" \
     "oss://${OSS_BUCKET}/${OSS_PREFIX}/mirror-registry-version.txt" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" --force
 

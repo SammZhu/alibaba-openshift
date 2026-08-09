@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +33,28 @@ import (
 )
 
 func die(a ...interface{}) { fmt.Fprintln(os.Stderr, a...); os.Exit(1) }
+
+// parseBytes / parseIntDefault read the `aliyun oss`-style --part-size / --parallel
+// flags, falling back to a default when unset or invalid.
+func parseBytes(s string, def int64) int64 {
+	if s == "" {
+		return def
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil && n > 0 {
+		return n
+	}
+	return def
+}
+
+func parseIntDefault(s string, def int) int {
+	if s == "" {
+		return def
+	}
+	if n, err := strconv.Atoi(s); err == nil && n > 0 {
+		return n
+	}
+	return def
+}
 
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
@@ -179,13 +202,22 @@ func main() {
 		src, dst := pos[0], pos[1]
 		sb, sk, srcIsOSS := splitOSS(src)
 		db, dk, dstIsOSS := splitOSS(dst)
+		// Multipart + resumable so multi-GB objects work: a simple
+		// PutObjectFromFile is capped at 5 GB (the mirror tarball is ~25 GB), and a
+		// single-stream GetObjectToFile can't resume over a flaky link.  part-size /
+		// parallel mirror `aliyun oss cp`; Checkpoint(true, "") writes a checkpoint
+		// next to the file so an interrupted transfer resumes on re-run.
+		partSize := parseBytes(flags["part-size"], 100*1024*1024)
+		routines := parseIntDefault(flags["parallel"], 5)
 		switch {
 		case !srcIsOSS && dstIsOSS: // upload
-			if err := newBucket(flags, db).PutObjectFromFile(dk, src); err != nil {
+			if err := newBucket(flags, db).UploadFile(dk, src, partSize,
+				oss.Routines(routines), oss.Checkpoint(true, "")); err != nil {
 				die("upload:", err)
 			}
 		case srcIsOSS && !dstIsOSS: // download
-			if err := newBucket(flags, sb).GetObjectToFile(sk, dst); err != nil {
+			if err := newBucket(flags, sb).DownloadFile(sk, dst, partSize,
+				oss.Routines(routines), oss.Checkpoint(true, "")); err != nil {
 				die("download:", err)
 			}
 		default:
