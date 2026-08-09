@@ -218,13 +218,46 @@ Phase 04 runs the large OSS downloads **on the mirror ECS** over SSH with
    the proxy (same `tls: unrecognized name` symptom as the operator did), the
    remote heredocs must export `APSARA_PROXY` — surfaces on 04's first OSS call.
 
+## 4b. Build + ship the mirror content to OSS (prerequisite for 04)
+
+04 downloads the OpenShift release + AI images (~25-30 GB) and the mirror-registry
+installer from OSS. Those must be built + uploaded first — the bucket starts empty.
+
+On the **operator/Helper** the Squid proxy is heavily throttled (~17 KB/s), but a
+**direct** connection reaches quay.io at ~7 MB/s — usable. So build on the Helper
+with registry pulls going **direct** and the OSS upload going through `apsara-oss`
+(internal endpoint via `APSARA_PROXY`). `build-mirror-tarball.sh` is env-driven:
+
+```sh
+cd /root/alibaba-openshift
+# registry pulls DIRECT: keep http_proxy/https_proxy unset for this command.
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+  OSS_CLI=/root/alibaba-openshift/scripts/apsara/apsara-oss/apsara-oss \
+  OSS_ENDPOINT="$apsara_oss_endpoint"  `# e.g. https://oss-cn-wulan-ste3-d01-a.cloud.ste3.com` \
+  APSARA_PROXY=http://<squid>:3128    `# apsara-oss uses this for the OSS leg only` \
+  AK=<bucket-owner AK> SK=<bucket-owner SK> \
+  OSS_BUCKET=<your bucket> REGION=cn-wulan-ste3-d01 \
+  CLUSTER_NAME=<cluster> OPENSHIFT_VERSION=4.20 \
+  OFFLINE_TOKEN_FILE=/path/to/offline-token \
+  PULL_SECRET=/path/to/pull-secret.json \
+    ./scripts/build-mirror-tarball.sh
+```
+
+Needs on the Helper: Red Hat pull-secret + offline token, `oc-mirror`/`skopeo`
+(the script installs oc-mirror from mirror.openshift.com — slow via the CDN but
+~180 MB one-time), and ~60 GB free disk. oc-mirror v2 keeps `~/.oc-mirror` as a
+blob cache, so a dropped run resumes cheaply on re-run.
+
+The mirror-registry installer + oc-mirror binary are staged into OSS by
+`02-import-image` (task `mirror_stage_artefacts`); run 02 before 04.
+
 ## 5. Run
 
 ```sh
 cd /root/alibaba-openshift/ansible
 ansible-playbook playbooks/00-preflight.yml
-ansible-playbook playbooks/03-create-mirror-stack.yml     # validated: builds the mirror-stack
-# ansible-playbook playbooks/04-prepare-mirror.yml        # needs the mirror-ECS OSS deploy above
+ansible-playbook playbooks/03-create-mirror-stack.yml     # validated: builds mirror-stack + auto-peers to the operator VPC
+# ansible-playbook playbooks/04-prepare-mirror.yml        # after 4b (OSS content) + 02 (mirror-registry staged)
 # ... 06 / 07 ...
 ```
 
