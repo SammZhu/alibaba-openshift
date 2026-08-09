@@ -29,12 +29,16 @@
       changed_when: true
       failed_when: false
 
-    - name: "unpeer: wait until neither RI is Active (deactivate is async)"
+    # Wait until BOTH RIs are fully Inactive/Idle — not merely "not Active".
+    # Deactivate is async (Active -> Deactivating -> Inactive); deleting the RI's
+    # route (or the RI) while it is still Deactivating silently fails on Apsara,
+    # which left the accepting RI pinned by its route (observed 2026-08-09).
+    - name: "unpeer: wait until both RIs are fully Inactive (deactivate is async)"
       environment: "{{ _unpeer_env }}"
       ansible.builtin.shell: >
         "$CC" vpc DescribeRouterInterfaces --RegionId "$R" --profile "$P"
         | jq -r --arg a "$ACC" --arg i "$INIT"
-        '[.RouterInterfaceSet.RouterInterfaceType[]? | select(.RouterInterfaceId==$a or .RouterInterfaceId==$i) | select(.Status=="Active")] | length'
+        '[.RouterInterfaceSet.RouterInterfaceType[]? | select(.RouterInterfaceId==$a or .RouterInterfaceId==$i) | select(.Status!="Inactive" and .Status!="Idle")] | length'
       register: _unpeer_active
       until: (_unpeer_active.stdout | trim) == '0'
       retries: 18
