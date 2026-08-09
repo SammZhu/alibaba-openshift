@@ -3,6 +3,8 @@
 - name: Preflight checks
   hosts: local
   gather_facts: true
+  # apsara: dispatch {{ cloud_cli }}/{{ oss_cli }} + supply AK/SK (public: no-op).
+  environment: "{{ cloud_env | default({}) }}"
   tasks:
     - name: Verify required CLI tools are installed
       ansible.builtin.command: "{{ item }} --version"
@@ -10,10 +12,9 @@
       check_mode: false
       register: tool_check
       failed_when: tool_check.rc != 0
-      loop:
-        - aliyun
-        - curl
-        - jq
+      # apsara uses cloudcli/apsara-rpc/apsara-oss (built from scripts/apsara),
+      # not the aliyun CLI — only require aliyun on public cloud.
+      loop: "{{ (['aliyun'] if (cloud_platform | default('public')) != 'apsara' else []) + ['curl', 'jq'] }}"
 
     - name: Verify required input files exist
       ansible.builtin.stat:
@@ -44,7 +45,7 @@
     - name: Verify aliyun-cli profile + ECS read access
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - DescribeRegions
           - --RegionId
@@ -63,12 +64,17 @@
     # to be created once per account.  We check for it below; the
     # alternative is a confusing CREATE_FAILED in Phase 03 with
     # "OperationDenied.ServiceLinkedRoleNotExist".
-    - name: Verify aliyun-cli has VPC, SLB, NLB, RAM, ROS, PVTZ access
+    # Public cloud: verify the RAM user's read access across services.  Apsara's
+    # RAM model differs (the sub-user intentionally lacks ram:ListRoles; NLB/SLB
+    # access + service-linked roles are provisioned by ASCM) — skip here and rely
+    # on the ROS/ECS/VPC calls the actual phases make.
+    - name: Verify aliyun-cli has VPC, SLB, NLB, RAM, ROS, PVTZ access (public cloud)
       ansible.builtin.command:
         argv: "{{ item }}"
       register: svc_check
       changed_when: false
       failed_when: svc_check.rc != 0
+      when: (cloud_platform | default('public')) != 'apsara'
       loop:
         - [aliyun, vpc, DescribeVpcs,           --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
         - [aliyun, slb, DescribeLoadBalancers,  --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
@@ -79,12 +85,16 @@
       loop_control:
         label: "{{ item[1] }} {{ item[2] }}"
 
+    # Public cloud only: NLB needs the AliyunServiceRoleForNlb SLR.  On Apsara
+    # service-linked roles are ASCM-managed (a sub-user can't create them), so
+    # this check does not apply — skip it.
     - name: Verify NLB service-linked role exists (account-level, one-time)
       ansible.builtin.command:
         argv: [aliyun, ram, GetRole, --RoleName, AliyunServiceRoleForNlb, --profile, "{{ aliyun_profile }}"]
       register: nlb_slr
       changed_when: false
       failed_when: false
+      when: (cloud_platform | default('public')) != 'apsara'
 
     - name: Fail with actionable message if NLB SLR is missing
       ansible.builtin.fail:
@@ -96,7 +106,9 @@
               --ServiceName nlb.aliyuncs.com \
               --endpoint resourcemanager.aliyuncs.com \
               --profile {{ aliyun_profile }}
-      when: nlb_slr.rc != 0
+      when:
+        - (cloud_platform | default('public')) != 'apsara'
+        - (nlb_slr.rc | default(0)) != 0
 
     # ── ECS instance-type stock check (avoid wasting Phase 03 time on stockouts) ──
     # ROS CreateStack returns ResourceNoStock at the end of its provisioning
@@ -138,7 +150,7 @@
     - name: Probe each (zone, instance_type) for stock
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - DescribeAvailableResource
           - --RegionId
@@ -207,33 +219,23 @@
 
     # OSS uses ossutil under the hood, which does NOT support --profile.
     # Read AK/SK directly from ~/.aliyun/config.json for the named profile.
-    - name: Read AK/SK from aliyun config for OSS check
-      ansible.builtin.shell: |
-        jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret' \
-          ~/.aliyun/config.json
-      register: _oss_creds
-      changed_when: false
-      check_mode: false
-
-    - name: Assert aliyun profile credentials found
-      ansible.builtin.assert:
-        that: _oss_creds.stdout | length > 0
-        fail_msg: "Could not read AK/SK for profile '{{ aliyun_profile }}' from ~/.aliyun/config.json"
+    - name: Resolve AK/SK for the OSS check (cloud_env on apsara, aliyun config on public)
+      ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
 
     # Resolve OSS endpoint (internal when on aliyun ECS, public otherwise).
     # See tasks/oss_endpoint.yml for cost rationale (~¥150-200/mo savings).
     - ansible.builtin.include_tasks: ../tasks/oss_endpoint.yml
 
     # ossutil requires --flag=value form; space-separated (-i VALUE) is not supported.
-    - name: Verify OSS access (ossutil does not support --profile; use --access-key-id= form)
+    - name: Verify OSS access
       ansible.builtin.command:
-        argv:
-          - aliyun
-          - oss
+        argv: "{{ oss_cli_argv + _a }}"
+      vars:
+        _a:
           - ls
           - "--endpoint={{ _oss_endpoint }}"
-          - "--access-key-id={{ _oss_creds.stdout.split(' ')[0] }}"
-          - "--access-key-secret={{ _oss_creds.stdout.split(' ')[1] }}"
+          - "--access-key-id={{ _ak }}"
+          - "--access-key-secret={{ _sk }}"
       register: oss_check
       changed_when: false
       failed_when: oss_check.rc != 0

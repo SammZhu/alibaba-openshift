@@ -17,6 +17,10 @@
 - name: Create mirror-stack
   hosts: local
   gather_facts: false
+  # apsara: cloud_env carries CLOUD_PLATFORM + AK/SK/endpoints/proxy/org-rg so
+  # every {{ cloud_cli }} call in this play dispatches to apsara-rpc.  Public
+  # cloud: cloud_env is {} — a no-op.
+  environment: "{{ cloud_env | default({}) }}"
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
     - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
@@ -63,7 +67,7 @@
     - name: (fast-path) verify data snapshot still exists in cloud
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - DescribeSnapshots
           - --RegionId
@@ -203,6 +207,21 @@
             ParameterValue: "false"
           - ParameterKey: MirrorDataDiskSnapshotId
             ParameterValue: "{{ mirror_snapshot_data_id if _mirror_restore_from_snapshot else '' }}"
+
+    # apsara_ize.py converts the DataSource image lookups (auto-discovering the
+    # RHEL/Aliyun-Linux image on public cloud) into explicit MirrorImageId /
+    # JumpHostImageId parameters — Apsara has no DataSource::ECS::Images.  Supply
+    # them here (apsara only); public cloud's template has no such parameters.
+    - name: (apsara) add explicit image-id parameters
+      ansible.builtin.set_fact:
+        _mirror_stack_params: "{{ _mirror_stack_params + _apsara_image_params }}"
+      vars:
+        _apsara_image_params:
+          - ParameterKey: MirrorImageId
+            ParameterValue: "{{ apsara_image_id }}"
+          - ParameterKey: JumpHostImageId
+            ParameterValue: "{{ apsara_image_id }}"
+      when: (cloud_platform | default('public')) == 'apsara'
 
     - name: Create / adopt mirror-stack
       ansible.builtin.include_tasks: ../tasks/create_stack.yml

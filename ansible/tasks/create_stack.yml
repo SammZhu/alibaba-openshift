@@ -29,7 +29,7 @@
 - name: "create_stack [{{ _cs_stack_name }}] — look up existing"
   ansible.builtin.command:
     argv:
-      - aliyun
+      - "{{ cloud_cli }}"
       - ros
       - ListStacks
       - --RegionId
@@ -38,6 +38,7 @@
       - "[\"{{ _cs_stack_name }}\"]"
       - --profile
       - "{{ aliyun_profile }}"
+  environment: "{{ cloud_env }}"
   register: _cs_existing
   changed_when: false
 
@@ -64,6 +65,29 @@
     - _cs_existing_stack.Status is defined
     - _cs_existing_stack.Status in ['CREATE_FAILED', 'DELETE_FAILED', 'ROLLBACK_FAILED', 'ROLLBACK_COMPLETE']
 
+# Apsara ROS won't accept the public-cloud template verbatim (short intrinsic
+# tags, DataSource image lookups, unsupported props, NatType/disk values).
+# Transform it once here so BOTH stack entrypoints (03 mirror, 06 cluster) get
+# it for free; public cloud skips this and uses the template unchanged.
+- name: "create_stack [{{ _cs_stack_name }}] — (apsara) transform template for Apsara"
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ repo_root }}/scripts/apsara/apsara_ize.py"
+      - "{{ _cs_template_path }}"
+      - "/tmp/{{ _cs_stack_name }}.apsara.yaml"
+  changed_when: true
+  when:
+    - _cs_existing_stack.Status is not defined
+    - (cloud_platform | default('public')) == 'apsara'
+
+- name: "create_stack [{{ _cs_stack_name }}] — resolve effective template path"
+  ansible.builtin.set_fact:
+    _cs_effective_template: >-
+      {{ ('/tmp/' + _cs_stack_name + '.apsara.yaml')
+         if ((cloud_platform | default('public')) == 'apsara')
+         else _cs_template_path }}
+
 - name: "create_stack [{{ _cs_stack_name }}] — write Parameters JSON to temp file"
   ansible.builtin.copy:
     dest: "/tmp/{{ _cs_stack_name }}-params.json"
@@ -83,10 +107,10 @@
             f"--Parameters.{i+1}.ParameterKey", p["ParameterKey"],
             f"--Parameters.{i+1}.ParameterValue", p["ParameterValue"],
         ])
-    cmd = ["aliyun", "ros", "CreateStack",
+    cmd = ["{{ cloud_cli }}", "ros", "CreateStack",
            "--RegionId", "{{ region }}",
            "--StackName", "{{ _cs_stack_name }}",
-           "--TemplateBody", open("{{ _cs_template_path }}").read(),
+           "--TemplateBody", open("{{ _cs_effective_template }}").read(),
            "--TimeoutInMinutes", "{{ _cs_timeout_minutes | default(60) }}",
            "--profile", "{{ aliyun_profile }}",
            *cli_params]
@@ -96,6 +120,7 @@
     print(json.loads(r.stdout)["StackId"])
     PYEOF
   register: _cs_create_result
+  environment: "{{ cloud_env }}"
   when: _cs_existing_stack.Status is not defined
   # no_log protects the params/template (may carry SshPrivateKey etc.).  We do NOT
   # abort here: instead capture the result and surface the ROS error (stderr only,
@@ -136,7 +161,7 @@
     - name: "create_stack [{{ _cs_stack_name }}] — poll until CREATE_COMPLETE"
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ros
           - GetStack
           - --RegionId
@@ -145,6 +170,7 @@
           - "{{ _cs_stack_id }}"
           - --profile
           - "{{ aliyun_profile }}"
+      environment: "{{ cloud_env }}"
       register: _cs_poll
       retries: 60
       delay: 30
@@ -158,8 +184,9 @@
     # the stack events, not the GetStack status — fetch + surface it.
     - name: "create_stack [{{ _cs_stack_name }}] — fetch stack events for the failure reason"
       ansible.builtin.command:
-        argv: [aliyun, ros, ListStackEvents, --RegionId, "{{ region }}",
+        argv: ["{{ cloud_cli }}", ros, ListStackEvents, --RegionId, "{{ region }}",
                --StackId, "{{ _cs_stack_id }}", --profile, "{{ aliyun_profile }}"]
+      environment: "{{ cloud_env }}"
       register: _cs_evs
       changed_when: false
       failed_when: false

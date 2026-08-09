@@ -3,6 +3,8 @@
 - name: Import Discovery ISO as ECS custom image
   hosts: local
   gather_facts: false
+  # apsara: dispatch {{ cloud_cli }}/{{ oss_cli }} calls + supply AK/SK (public: no-op).
+  environment: "{{ cloud_env | default({}) }}"
   vars:
     oss_object: "discovery-{{ cluster_name }}.iso"
     # ossutil (used by `aliyun oss`) does NOT support --profile.
@@ -23,27 +25,22 @@
 
     # ── Read OSS credentials from aliyun profile ──────────────────────────
     # ossutil does not understand --profile; extract AK/SK from config.json.
-    - name: Read AK/SK from aliyun profile for OSS commands
-      ansible.builtin.shell: |
-        jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret' \
-          ~/.aliyun/config.json
-      register: _oss_creds_raw
-      changed_when: false
-      no_log: true
+    - name: Resolve AK/SK for OSS commands (cloud_env on apsara, aliyun config on public)
+      ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
 
     - name: Set OSS credential facts
       ansible.builtin.set_fact:
-        _oss_ak: "{{ _oss_creds_raw.stdout.split(' ')[0] }}"
-        _oss_sk: "{{ _oss_creds_raw.stdout.split(' ')[1] }}"
+        _oss_ak: "{{ _ak }}"
+        _oss_sk: "{{ _sk }}"
       no_log: true
 
     # ── Ensure OSS bucket exists in the right region ──────────────────────
     # ossutil requires --flag=value form; space-separated (-i VALUE) is not supported.
     - name: Check OSS bucket
       ansible.builtin.command:
-        argv:
-          - aliyun
-          - oss
+        argv: "{{ oss_cli_argv + _a }}"
+      vars:
+        _a:
           - ls
           - "oss://{{ oss_bucket }}/"
           - "--endpoint={{ _oss_endpoint }}"
@@ -56,9 +53,9 @@
 
     - name: Create OSS bucket if missing
       ansible.builtin.command:
-        argv:
-          - aliyun
-          - oss
+        argv: "{{ oss_cli_argv + _a }}"
+      vars:
+        _a:
           - mb
           - "oss://{{ oss_bucket }}"
           - "--endpoint={{ _oss_endpoint }}"
@@ -70,9 +67,9 @@
     # ── Upload ISO (idempotent by size) ───────────────────────────────────
     - name: Check current object size in OSS
       ansible.builtin.command:
-        argv:
-          - aliyun
-          - oss
+        argv: "{{ oss_cli_argv + _a }}"
+      vars:
+        _a:
           - stat
           - "oss://{{ oss_bucket }}/{{ oss_object }}"
           - "--endpoint={{ _oss_endpoint }}"
@@ -101,9 +98,7 @@
         rc_label: "OSS upload discovery ISO"
         rc_retries: 3
         rc_delay: 15
-        rc_argv:
-          - aliyun
-          - oss
+        _oss_rest:
           - cp
           - "{{ iso_path }}"
           - "oss://{{ oss_bucket }}/{{ oss_object }}"
@@ -111,13 +106,14 @@
           - "--access-key-id={{ _oss_ak }}"
           - "--access-key-secret={{ _oss_sk }}"
           - -f
+        rc_argv: "{{ oss_cli_argv + _oss_rest }}"
       when: oss_stat.rc != 0 or (_remote_size | default(0) | int) != iso_stat.stat.size
 
     # ── Ensure RAM role for ECS→OSS import (first-time setup) ─────────────
     - name: Check AliyunECSImageImportDefaultRole exists
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ram
           - GetRole
           - --RoleName
@@ -131,7 +127,7 @@
     - name: Create AliyunECSImageImportDefaultRole
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ram
           - CreateRole
           - --RoleName
@@ -145,7 +141,7 @@
     - name: Attach AliyunECSImageImportRolePolicy
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ram
           - AttachPolicyToRole
           - --PolicyType
@@ -173,7 +169,7 @@
     - name: Look up existing image by name
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - DescribeImages
           - --RegionId
@@ -211,7 +207,7 @@
     - name: Submit ImportImage when needed
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - ImportImage
           - --RegionId
@@ -246,7 +242,7 @@
     - name: Poll image status until Available (~15-30 min)
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - DescribeImages
           - --RegionId
@@ -294,8 +290,8 @@
               was swallowed by the fire-and-forget invocation.
 
           Diagnostics:
-            aliyun ecs DescribeTasks --TaskAction ImportImage --RegionId {{ region }}
-            aliyun oss ls oss://{{ oss_bucket }}/{{ oss_object }}
+            {{ cloud_cli }} ecs DescribeTasks --TaskAction ImportImage --RegionId {{ region }}
+            {{ oss_cli }} ls oss://{{ oss_bucket }}/{{ oss_object }}
             sed -i '/^ecs_image_id:/d' ansible/state.yml  # drop the stale entry, then re-run 02
 
     # ── Persist state ─────────────────────────────────────────────────────
@@ -309,9 +305,9 @@
     # Local copy at iso_path is retained; OSS object only existed to feed ImportImage.
     - name: Delete ISO from OSS (image imported; local copy retained)
       ansible.builtin.command:
-        argv:
-          - aliyun
-          - oss
+        argv: "{{ oss_cli_argv + _a }}"
+      vars:
+        _a:
           - rm
           - "oss://{{ oss_bucket }}/{{ oss_object }}"
           - "--endpoint={{ _oss_endpoint }}"

@@ -31,6 +31,9 @@
 - name: Teardown (split architecture)
   hosts: local
   gather_facts: false
+  # apsara: dispatch every {{ cloud_cli }} call to apsara-rpc (public: no-op).
+  # NOTE: the `{{ oss_cli }} rm` call remains OSS (ossutil) — handled separately.
+  environment: "{{ cloud_env | default({}) }}"
   vars:
     teardown_target: cluster        # cluster | mirror | both
     teardown_confirmed: false
@@ -103,10 +106,11 @@
     - name: Sweep leftover OSS transit objects
       ansible.builtin.shell: |
         set -uo pipefail
-        read AK SK <<<"$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret' ~/.aliyun/config.json)"
-        aliyun oss rm "oss://{{ oss_bucket }}/transit/" --recursive -f \
+        # env-first: apsara provides AK/SK via cloud_env; public falls back to the aliyun CLI config.
+        [ -n "${AK:-}" ] && [ -n "${SK:-}" ] || read AK SK <<<"$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret' ~/.aliyun/config.json)"
+        {{ oss_cli }} rm "oss://{{ oss_bucket }}/transit/" --recursive -f \
           --access-key-id="$AK" --access-key-secret="$SK" \
-          --region="{{ region }}" --endpoint="oss-{{ region }}.aliyuncs.com" || true
+          --region="{{ region }}" --endpoint="{{ _oss_pub_endpoint }}" || true
       register: _oss_transit_sweep
       changed_when: "'Succeed' in (_oss_transit_sweep.stdout | default('')) or 'removed' in (_oss_transit_sweep.stdout | default('')|lower)"
       failed_when: false
@@ -211,7 +215,7 @@
       block:
         - name: CAPA workers — list ECS tagged openshift-worker-pool=capa-multiaz
           ansible.builtin.command:
-            argv: [aliyun, ecs, DescribeInstances, --RegionId, "{{ region }}",
+            argv: ["{{ cloud_cli }}", ecs, DescribeInstances, --RegionId, "{{ region }}",
                    "--Tag.1.Key", openshift-worker-pool, "--Tag.1.Value", capa-multiaz,
                    --PageSize, "100", --profile, "{{ aliyun_profile }}"]
           register: _capa_ecs_q
@@ -226,7 +230,7 @@
 
         - name: CAPA workers — delete each (force stops + deletes; disks/ENIs cascade by tag)
           ansible.builtin.command:
-            argv: [aliyun, ecs, DeleteInstance, --RegionId, "{{ region }}",
+            argv: ["{{ cloud_cli }}", ecs, DeleteInstance, --RegionId, "{{ region }}",
                    --InstanceId, "{{ item }}", --Force, "true", --profile, "{{ aliyun_profile }}"]
           loop: "{{ _capa_ecs_ids | default([]) }}"
           loop_control:
@@ -237,7 +241,7 @@
 
         - name: CAPA workers — wait until all tagged ECS are gone (ENIs released)
           ansible.builtin.command:
-            argv: [aliyun, ecs, DescribeInstances, --RegionId, "{{ region }}",
+            argv: ["{{ cloud_cli }}", ecs, DescribeInstances, --RegionId, "{{ region }}",
                    "--Tag.1.Key", openshift-worker-pool, "--Tag.1.Value", capa-multiaz,
                    --PageSize, "100", --profile, "{{ aliyun_profile }}"]
           register: _capa_ecs_gone
@@ -257,7 +261,7 @@
         - name: DeleteStack — cluster
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ros
               - DeleteStack
               - --RegionId
@@ -275,7 +279,7 @@
         - name: Poll cluster-stack until gone
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ros
               - GetStack
               - --RegionId
@@ -301,7 +305,7 @@
         #    object is already gone (deleted right after ImportImage in phase 10).
         - name: Worker image — look up backing snapshots
           ansible.builtin.command:
-            argv: [aliyun, ecs, DescribeImages, --RegionId, "{{ region }}",
+            argv: ["{{ cloud_cli }}", ecs, DescribeImages, --RegionId, "{{ region }}",
                    --ImageId, "{{ worker_boot_image_id }}", --profile, "{{ aliyun_profile }}"]
           register: _worker_img_desc
           changed_when: false
@@ -321,7 +325,7 @@
 
         - name: Worker image — delete custom image
           ansible.builtin.command:
-            argv: [aliyun, ecs, DeleteImage, --RegionId, "{{ region }}",
+            argv: ["{{ cloud_cli }}", ecs, DeleteImage, --RegionId, "{{ region }}",
                    --ImageId, "{{ worker_boot_image_id }}", --Force, "true",
                    --profile, "{{ aliyun_profile }}"]
           when: worker_boot_image_id is defined and worker_boot_image_id | length > 0
@@ -330,7 +334,7 @@
 
         - name: Worker image — cascade-delete backing snapshots (aliyun has no auto cascade)
           ansible.builtin.command:
-            argv: [aliyun, ecs, DeleteSnapshot, --RegionId, "{{ region }}",
+            argv: ["{{ cloud_cli }}", ecs, DeleteSnapshot, --RegionId, "{{ region }}",
                    --SnapshotId, "{{ item }}", --profile, "{{ aliyun_profile }}"]
           loop: "{{ _worker_img_snaps | default([]) }}"
           loop_control:
@@ -438,7 +442,7 @@
         - name: ECS — look up backing snapshots of the custom image (for cascade delete)
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DescribeImages
               - --RegionId
@@ -466,7 +470,7 @@
         - name: ECS — delete custom image
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DeleteImage
               - --RegionId
@@ -484,7 +488,7 @@
         - name: ECS — cascade-delete backing snapshots (aliyun has no auto cascade)
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DeleteSnapshot
               - --RegionId
@@ -523,7 +527,7 @@
             python3 - <<'PY'
             import os, json, subprocess, time
             vpc = os.environ["VPC"]; R = os.environ["R"]; P = os.environ["P"]
-            q = subprocess.run(["aliyun", "nas", "DescribeFileSystems", "--RegionId", R,
+            q = subprocess.run(["{{ cloud_cli }}", "nas", "DescribeFileSystems", "--RegionId", R,
                                 "--PageSize", "100", "--profile", P],
                                capture_output=True, text=True)
             data = json.loads(q.stdout or "{}")
@@ -539,7 +543,7 @@
                 # mirror DeleteStack with DependencyViolation.Nas).
                 for m in mirror_mts:
                     print("deleting NAS mount target", m["MountTargetDomain"], "of", fsid, flush=True)
-                    subprocess.run(["aliyun", "nas", "DeleteMountTarget", "--RegionId", R,
+                    subprocess.run(["{{ cloud_cli }}", "nas", "DeleteMountTarget", "--RegionId", R,
                                     "--FileSystemId", fsid, "--MountTargetDomain",
                                     m["MountTargetDomain"], "--profile", P])
                 # Delete the filesystem. Two leak shapes land here: (a) FS whose mount
@@ -551,7 +555,7 @@
                 # dedicated test account; an orphaned FS has no mount target so it is
                 # attached to nothing -- safe to delete.)
                 for _ in range(6):
-                    d = subprocess.run(["aliyun", "nas", "DeleteFileSystem", "--RegionId", R,
+                    d = subprocess.run(["{{ cloud_cli }}", "nas", "DeleteFileSystem", "--RegionId", R,
                                         "--FileSystemId", fsid, "--profile", P],
                                        capture_output=True, text=True)
                     if d.returncode == 0:
@@ -577,7 +581,7 @@
         # i.e. testing site-post made teardown impossible. Sweep them first.
         - name: List leftover capa-worker vSwitches in the mirror VPC
           ansible.builtin.command:
-            argv: [aliyun, vpc, DescribeVSwitches, --RegionId, "{{ region }}",
+            argv: ["{{ cloud_cli }}", vpc, DescribeVSwitches, --RegionId, "{{ region }}",
                    --VpcId, "{{ mirror_vpc_id }}", --PageSize, "50",
                    --profile, "{{ aliyun_profile }}"]
           register: _capa_vsw_q
@@ -599,17 +603,17 @@
             python3 - <<'PY'
             import os, json, subprocess
             vpc = os.environ["VPC"]; R = os.environ["R"]; P = os.environ["P"]
-            ng = subprocess.run(["aliyun", "vpc", "DescribeNatGateways", "--RegionId", R,
+            ng = subprocess.run(["{{ cloud_cli }}", "vpc", "DescribeNatGateways", "--RegionId", R,
                                  "--VpcId", vpc, "--profile", P], capture_output=True, text=True)
             tables = []
             for g in json.loads(ng.stdout or "{}").get("NatGateways", {}).get("NatGateway", []):
                 tables += g.get("SnatTableIds", {}).get("SnatTableId", [])
             for tid in tables:
-                q = subprocess.run(["aliyun", "vpc", "DescribeSnatTableEntries", "--RegionId", R,
+                q = subprocess.run(["{{ cloud_cli }}", "vpc", "DescribeSnatTableEntries", "--RegionId", R,
                                     "--SnatTableId", tid, "--profile", P], capture_output=True, text=True)
                 for e in json.loads(q.stdout or "{}").get("SnatTableEntries", {}).get("SnatTableEntry", []):
                     print("deleting SNAT entry", e.get("SnatEntryId"), e.get("SourceCIDR"), flush=True)
-                    subprocess.run(["aliyun", "vpc", "DeleteSnatEntry", "--RegionId", R,
+                    subprocess.run(["{{ cloud_cli }}", "vpc", "DeleteSnatEntry", "--RegionId", R,
                                     "--SnatTableId", tid, "--SnatEntryId", e["SnatEntryId"],
                                     "--profile", P])
             PY
@@ -623,7 +627,7 @@
 
         - name: Delete each leftover capa-worker vSwitch (Phase 12, not stack-managed)
           ansible.builtin.command:
-            argv: [aliyun, vpc, DeleteVSwitch, --RegionId, "{{ region }}",
+            argv: ["{{ cloud_cli }}", vpc, DeleteVSwitch, --RegionId, "{{ region }}",
                    --VSwitchId, "{{ item.VSwitchId }}", --profile, "{{ aliyun_profile }}"]
           loop: "{{ (_capa_vsw_q.stdout | default('{}') | from_json).VSwitches.VSwitch
                     | default([]) | selectattr('VSwitchName', 'defined')
@@ -637,7 +641,7 @@
         - name: DeleteStack — mirror
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ros
               - DeleteStack
               - --RegionId
@@ -654,7 +658,7 @@
         - name: Poll mirror-stack until gone
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ros
               - GetStack
               - --RegionId
@@ -688,7 +692,7 @@
         - name: Look up the snapshot-derived custom image by name (+ backing snapshots)
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DescribeImages
               - --RegionId
@@ -716,7 +720,7 @@
         - name: Delete the snapshot-derived custom image (default behaviour — always)
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DeleteImage
               - --RegionId
@@ -736,7 +740,7 @@
         - name: Cascade-delete SnapshotForImage entries from the snapshot-derived image
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DeleteSnapshot
               - --RegionId
@@ -767,7 +771,7 @@
             - item | length > 0
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DeleteSnapshot
               - --RegionId
@@ -797,7 +801,7 @@
         - name: Stale-sweep — list all same-named mirror snapshots
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DescribeSnapshots
               - --RegionId
@@ -833,7 +837,7 @@
         - name: Stale-sweep — delete leftover source-locked snapshots
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DeleteSnapshot
               - --RegionId
@@ -865,7 +869,7 @@
             R = os.environ["R"]; P = os.environ["P"]
             keep = set(x for x in os.environ.get("KEEP", "").split(",") if x)
             pat = re.compile(r"^snapshot-[0-9a-f]{8}-[0-9a-f-]{20,}$")
-            q = subprocess.run(["aliyun", "ecs", "DescribeSnapshots", "--RegionId", R,
+            q = subprocess.run(["{{ cloud_cli }}", "ecs", "DescribeSnapshots", "--RegionId", R,
                                 "--PageSize", "100", "--profile", P],
                                capture_output=True, text=True)
             for s in json.loads(q.stdout or "{}").get("Snapshots", {}).get("Snapshot", []):
@@ -873,7 +877,7 @@
                 sid = s.get("SnapshotId")
                 if pat.match(name) and sid not in keep:
                     print("deleting orphan CSI snapshot", sid, name, flush=True)
-                    subprocess.run(["aliyun", "ecs", "DeleteSnapshot", "--RegionId", R,
+                    subprocess.run(["{{ cloud_cli }}", "ecs", "DeleteSnapshot", "--RegionId", R,
                                     "--SnapshotId", sid, "--Force", "true", "--profile", P])
             PY
           environment:
@@ -901,7 +905,7 @@
         - name: Orphan sweep — find SnapshotForImage entries for this cluster
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DescribeSnapshots
               - --RegionId
@@ -944,7 +948,7 @@
         - name: Orphan sweep — delete each
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DeleteSnapshot
               - --RegionId
@@ -1020,14 +1024,14 @@
       block:
         - name: Audit — ROS stacks still bearing this cluster's names
           ansible.builtin.command:
-            argv: [aliyun, ros, ListStacks, --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
+            argv: ["{{ cloud_cli }}", ros, ListStacks, --RegionId, "{{ region }}", --profile, "{{ aliyun_profile }}"]
           register: _audit_stacks
           changed_when: false
           failed_when: false
 
         - name: Audit — ECS instances still bearing this cluster's names
           ansible.builtin.command:
-            argv: [aliyun, ecs, DescribeInstances, --RegionId, "{{ region }}",
+            argv: ["{{ cloud_cli }}", ecs, DescribeInstances, --RegionId, "{{ region }}",
                    --InstanceName, "{{ cluster_name }}-*",
                    --PageSize, "100",
                    --profile, "{{ aliyun_profile }}"]
@@ -1039,7 +1043,7 @@
         # cluster_name-*, so the name audit above misses them — check by tag.
         - name: Audit — CAPA worker ECS still tagged openshift-worker-pool=capa-multiaz
           ansible.builtin.command:
-            argv: [aliyun, ecs, DescribeInstances, --RegionId, "{{ region }}",
+            argv: ["{{ cloud_cli }}", ecs, DescribeInstances, --RegionId, "{{ region }}",
                    "--Tag.1.Key", openshift-worker-pool, "--Tag.1.Value", capa-multiaz,
                    --PageSize, "100", --profile, "{{ aliyun_profile }}"]
           register: _audit_capa_ecs
@@ -1048,7 +1052,7 @@
 
         - name: Audit — orphan SnapshotForImage (ISO + mirror-from-snap)
           ansible.builtin.command:
-            argv: [aliyun, ecs, DescribeSnapshots, --RegionId, "{{ region }}",
+            argv: ["{{ cloud_cli }}", ecs, DescribeSnapshots, --RegionId, "{{ region }}",
                    --SnapshotName, "{{ item }}",
                    --PageSize, "100",
                    --profile, "{{ aliyun_profile }}"]
@@ -1061,7 +1065,7 @@
 
         - name: Audit — mirror data/system snapshots
           ansible.builtin.command:
-            argv: [aliyun, ecs, DescribeSnapshots, --RegionId, "{{ region }}",
+            argv: ["{{ cloud_cli }}", ecs, DescribeSnapshots, --RegionId, "{{ region }}",
                    --SnapshotName, "{{ item }}",
                    --PageSize, "100",
                    --profile, "{{ aliyun_profile }}"]
@@ -1162,7 +1166,7 @@
               prior tasks marked OK but "changed=false".
 
               Quick manual cleanup commands:
-                aliyun ecs DescribeSnapshots --SnapshotName 'SnapshotForImage-openshift-{{ cluster_name }}-iso' --PageSize 100 --RegionId {{ region }} --profile {{ aliyun_profile }} | jq -r '.Snapshots.Snapshot[].SnapshotId' | xargs -n1 -I{} aliyun ecs DeleteSnapshot --SnapshotId {} --RegionId {{ region }} --profile {{ aliyun_profile }}
+                {{ cloud_cli }} ecs DescribeSnapshots --SnapshotName 'SnapshotForImage-openshift-{{ cluster_name }}-iso' --PageSize 100 --RegionId {{ region }} --profile {{ aliyun_profile }} | jq -r '.Snapshots.Snapshot[].SnapshotId' | xargs -n1 -I{} {{ cloud_cli }} ecs DeleteSnapshot --SnapshotId {} --RegionId {{ region }} --profile {{ aliyun_profile }}
             success_msg: |
               ✓ post-teardown sanity PASSED.
                 cluster-stack={{ _obs_cluster_stack }}/{{ _exp_cluster_stack }}

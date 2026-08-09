@@ -82,7 +82,7 @@
 - name: post-dns — query *.apps PrivateZone record id
   ansible.builtin.command:
     argv:
-      - aliyun
+      - "{{ cloud_cli }}"
       - pvtz
       - DescribeZoneRecords
       - --ZoneId
@@ -105,7 +105,7 @@
 - name: post-dns — UpdateZoneRecord *.apps → {{ _pd_apps_target_ip }}
   ansible.builtin.command:
     argv:
-      - aliyun
+      - "{{ cloud_cli }}"
       - pvtz
       - UpdateZoneRecord
       - --RecordId

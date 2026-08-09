@@ -19,22 +19,17 @@
 - name: "ship_via_oss [{{ ship_object }}] — set endpoints"
   ansible.builtin.set_fact:
     _ship_key: "transit/{{ ship_object }}"
-    _ship_pub_endpoint: "oss-{{ region }}.aliyuncs.com"
-    _ship_int_endpoint: "oss-{{ region }}-internal.aliyuncs.com"
+    _ship_pub_endpoint: "{{ _oss_pub_endpoint }}"
+    _ship_int_endpoint: "{{ _oss_int_endpoint }}"
     _ship_mirror_role: "{{ cluster_name }}-mirror-role"
 
-- name: "ship_via_oss [{{ ship_object }}] — read operator OSS AK/SK"
-  ansible.builtin.shell: >-
-    jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret'
-    ~/.aliyun/config.json
-  register: _ship_aksk
-  changed_when: false
-  no_log: true
+- name: "ship_via_oss [{{ ship_object }}] — resolve operator OSS AK/SK"
+  ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
 
 - name: "ship_via_oss [{{ ship_object }}] — set AK/SK facts"
   ansible.builtin.set_fact:
-    _ship_ak: "{{ _ship_aksk.stdout.split(' ')[0] }}"
-    _ship_sk: "{{ _ship_aksk.stdout.split(' ')[1] }}"
+    _ship_ak: "{{ _ak }}"
+    _ship_sk: "{{ _sk }}"
   no_log: true
 
 # run_cli: no_log (AK/SK in argv) + retries + surfaces the OSS error (stderr, no
@@ -45,9 +40,7 @@
     rc_label: "OSS upload {{ ship_object }}"
     rc_retries: 3
     rc_delay: 15
-    rc_argv:
-      - aliyun
-      - oss
+    _oss_rest:
       - cp
       - "{{ ship_local }}"
       - "oss://{{ oss_bucket }}/{{ _ship_key }}"
@@ -56,6 +49,7 @@
       - "--access-key-secret={{ _ship_sk }}"
       - "--region={{ region }}"
       - "--endpoint={{ _ship_pub_endpoint }}"
+    rc_argv: "{{ oss_cli_argv + _oss_rest }}"
 
 - name: "ship_via_oss [{{ ship_object }}] — mirror pulls from OSS (internal endpoint, RAM role)"
   ansible.builtin.include_tasks: ../tasks/run_cli.yml
@@ -65,15 +59,15 @@
     rc_retries: 3
     rc_delay: 15
     rc_cmd: >-
-      {{ _ssh_root_mirror }} 'aliyun oss cp oss://{{ oss_bucket }}/{{ _ship_key }} {{ ship_remote }} -f
+      {{ _ssh_root_mirror }} '{{ oss_cli }} cp oss://{{ oss_bucket }}/{{ _ship_key }} {{ ship_remote }} -f
       --mode=EcsRamRole --ecs-role-name "{{ _ship_mirror_role }}"
       --region={{ region }} --endpoint={{ _ship_int_endpoint }}'
 
 - name: "ship_via_oss [{{ ship_object }}] — delete the OSS transit object"
   ansible.builtin.command:
-    argv:
-      - aliyun
-      - oss
+    argv: "{{ oss_cli_argv + _a }}"
+  vars:
+    _a:
       - rm
       - "oss://{{ oss_bucket }}/{{ _ship_key }}"
       - -f

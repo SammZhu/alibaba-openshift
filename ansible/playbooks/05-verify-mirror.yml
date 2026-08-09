@@ -11,6 +11,7 @@
 #   ansible-playbook ansible/playbooks/mirror-verify.yml
 - name: Verify mirror-registry health + contents
   hosts: local
+  environment: "{{ cloud_env | default({}) }}"
   gather_facts: false
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
@@ -294,7 +295,7 @@
         - name: Look up the mirror ECS's system + data disk IDs
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DescribeDisks
               - --RegionId
@@ -342,7 +343,7 @@
         - name: Look up same-named old snapshots (deleted after new ones succeed)
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DescribeSnapshots
               - --RegionId
@@ -370,7 +371,7 @@
         - name: Create snapshot of data disk (vdb — now carries ALL Quay state)
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - CreateSnapshot
               - --RegionId
@@ -431,7 +432,7 @@
         - name: Wait until the data snapshot reaches Progress=100% in OSS (up to 30 min)
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DescribeSnapshots
               - --RegionId
@@ -485,7 +486,7 @@
             - name: CreateDisk from new data snapshot (temp verification disk)
               ansible.builtin.command:
                 argv:
-                  - aliyun
+                  - "{{ cloud_cli }}"
                   - ecs
                   - CreateDisk
                   - --RegionId
@@ -512,7 +513,7 @@
             - name: AttachDisk to live mirror ECS (will appear as /dev/vdc by default)
               ansible.builtin.command:
                 argv:
-                  - aliyun
+                  - "{{ cloud_cli }}"
                   - ecs
                   - AttachDisk
                   - --InstanceId
@@ -526,7 +527,7 @@
             - name: Wait for attach to complete (DescribeDisks until Status=In_use)
               ansible.builtin.command:
                 argv:
-                  - aliyun
+                  - "{{ cloud_cli }}"
                   - ecs
                   - DescribeDisks
                   - --RegionId
@@ -595,7 +596,7 @@
             - name: Verification failed — delete the just-taken data snapshot (leave no half-done state)
               ansible.builtin.command:
                 argv:
-                  - aliyun
+                  - "{{ cloud_cli }}"
                   - ecs
                   - DeleteSnapshot
                   - --RegionId
@@ -637,7 +638,7 @@
                 - name: DetachDisk temp disk
                   ansible.builtin.command:
                     argv:
-                      - aliyun
+                      - "{{ cloud_cli }}"
                       - ecs
                       - DetachDisk
                       - --InstanceId
@@ -652,7 +653,7 @@
                 - name: Wait for detach to complete (Status=Available)
                   ansible.builtin.command:
                     argv:
-                      - aliyun
+                      - "{{ cloud_cli }}"
                       - ecs
                       - DescribeDisks
                       - --RegionId
@@ -679,7 +680,7 @@
                 - name: DeleteDisk temp disk (retry until truly gone)
                   ansible.builtin.command:
                     argv:
-                      - aliyun
+                      - "{{ cloud_cli }}"
                       - ecs
                       - DeleteDisk
                       - --DiskId
@@ -697,7 +698,7 @@
                 - name: Confirm the temp disk really is gone
                   ansible.builtin.command:
                     argv:
-                      - aliyun
+                      - "{{ cloud_cli }}"
                       - ecs
                       - DescribeDisks
                       - --RegionId
@@ -717,7 +718,7 @@
         - name: Delete same-named old snapshots (overwrite semantics)
           ansible.builtin.command:
             argv:
-              - aliyun
+              - "{{ cloud_cli }}"
               - ecs
               - DeleteSnapshot
               - --RegionId

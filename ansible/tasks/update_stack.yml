@@ -32,7 +32,7 @@
             f"--Parameters.{i+1}.ParameterKey", p["ParameterKey"],
             f"--Parameters.{i+1}.ParameterValue", p["ParameterValue"],
         ])
-    cmd = ["aliyun", "ros", "UpdateStack",
+    cmd = ["{{ cloud_cli }}", "ros", "UpdateStack",
            "--RegionId", "{{ region }}",
            "--StackId", "{{ _cs_stack_id }}",
            "--TemplateBody", open("{{ _cs_template_path }}").read(),
@@ -69,7 +69,7 @@
     - name: "update_stack [{{ _cs_stack_name }}] — poll until UPDATE_COMPLETE"
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ros
           - GetStack
           - --RegionId
@@ -91,7 +91,7 @@
     # support NVMe") lives in the events, not the status — fetch + surface it.
     - name: "update_stack [{{ _cs_stack_name }}] — fetch stack events for the failure reason"
       ansible.builtin.command:
-        argv: [aliyun, ros, ListStackEvents, --RegionId, "{{ region }}",
+        argv: ["{{ cloud_cli }}", ros, ListStackEvents, --RegionId, "{{ region }}",
                --StackId, "{{ _cs_stack_id }}", --profile, "{{ aliyun_profile }}"]
       register: _cs_uevs
       changed_when: false

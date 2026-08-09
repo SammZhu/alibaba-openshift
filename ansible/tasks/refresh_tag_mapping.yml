@@ -102,18 +102,13 @@
       tag-mapping.tsv:
       {{ _tag_mapping_preview.stdout }}
 
-- name: Read OSS AK/SK from aliyun profile (ossutil does not understand --profile)
-  ansible.builtin.shell: |
-    jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret' \
-      ~/.aliyun/config.json
-  register: _rtm_oss_creds_raw
-  changed_when: false
-  no_log: true
+- name: Resolve OSS AK/SK (cloud_env on apsara, aliyun config on public)
+  ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
 
 - name: Set OSS facts
   ansible.builtin.set_fact:
-    _rtm_oss_ak: "{{ _rtm_oss_creds_raw.stdout.split(' ')[0] }}"
-    _rtm_oss_sk: "{{ _rtm_oss_creds_raw.stdout.split(' ')[1] }}"
+    _rtm_oss_ak: "{{ _ak }}"
+    _rtm_oss_sk: "{{ _sk }}"
   no_log: true
 
 # run_cli: no_log (the previous task had AK/SK in argv WITHOUT no_log — a leak on
@@ -124,14 +119,13 @@
     rc_label: "OSS upload tag-mapping.tsv"
     rc_retries: 3
     rc_delay: 15
-    rc_argv:
-      - aliyun
-      - oss
+    _oss_rest:
       - cp
       - "{{ output_dir }}/tag-mapping.tsv"
       - "oss://{{ oss_bucket }}/{{ mirror_oss_object }}.tag-mapping.tsv"
-      - "--endpoint=oss-{{ region }}.aliyuncs.com"
+      - "--endpoint={{ _oss_pub_endpoint }}"
       - "--access-key-id={{ _rtm_oss_ak }}"
       - "--access-key-secret={{ _rtm_oss_sk }}"
       - -f
+    rc_argv: "{{ oss_cli_argv + _oss_rest }}"
   no_log: true

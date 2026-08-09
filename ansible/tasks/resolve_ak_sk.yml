@@ -1,0 +1,47 @@
+---
+# Resolve the operator's Alibaba AccessKey pair into facts _ak / _sk from the
+# right source per platform, so callers use {{ _ak }} / {{ _sk }} regardless:
+#   apsara -> cloud_env.AK / cloud_env.SK — the aliyun CLI credential store
+#             (~/.aliyun/config.json) does not exist on the Apsara operator host;
+#             creds come from cloud_env (the same pair apsara-rpc signs with).
+#   public -> ~/.aliyun/config.json for {{ aliyun_profile }} (aliyun CLI's store).
+#
+# no_log throughout: these facts are the raw secret.
+
+- name: "resolve_ak_sk — from cloud_env (apsara)"
+  ansible.builtin.set_fact:
+    _ak: "{{ cloud_env.AK }}"
+    _sk: "{{ cloud_env.SK }}"
+  no_log: true
+  when: (cloud_platform | default('public')) == 'apsara'
+
+- name: "resolve_ak_sk — read from ~/.aliyun/config.json (public)"
+  ansible.builtin.command:
+    argv:
+      - jq
+      - -r
+      - '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret'
+      - "{{ lookup('env', 'HOME') }}/.aliyun/config.json"
+  register: _aksk_raw
+  changed_when: false
+  no_log: true
+  when: (cloud_platform | default('public')) != 'apsara'
+
+- name: "resolve_ak_sk — split into facts (public)"
+  ansible.builtin.set_fact:
+    _ak: "{{ _aksk_raw.stdout.split(' ')[0] }}"
+    _sk: "{{ _aksk_raw.stdout.split(' ')[1] }}"
+  no_log: true
+  when: (cloud_platform | default('public')) != 'apsara'
+
+- name: "resolve_ak_sk — assert both resolved"
+  ansible.builtin.assert:
+    that:
+      - (_ak | default('') | length) > 0
+      - (_sk | default('') | length) > 0
+    fail_msg: >-
+      Could not resolve AK/SK from
+      {{ 'cloud_env.AK/SK (apsara)' if (cloud_platform | default('public')) == 'apsara'
+         else 'profile ' + aliyun_profile + ' in ~/.aliyun/config.json' }}.
+    quiet: true
+  no_log: true

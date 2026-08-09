@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""cloudcli — dispatch an Aliyun RPC-style API call to either the public-cloud
+`aliyun` CLI or the Apsara `apsara-rpc` shim, based on $CLOUD_PLATFORM.
+
+It presents an aliyun-like interface so ansible call sites change only the
+command name (`aliyun` -> `cloudcli`); every existing argument is preserved.
+
+    cloudcli <product> <Action> [--Key val | --Key=val | --Key=@file] ...
+
+CLOUD_PLATFORM unset or "public":
+    exec  aliyun <product> <Action> <args...>            (pass-through, unchanged)
+
+CLOUD_PLATFORM=apsara:
+    exec  apsara-rpc <Product> <Version> <Action> <args-minus-aliyun-only>
+      - <Version> looked up per product (API_VERSION).
+      - <Product> normalised to the casing apsara-rpc/the gateway expect.
+      - aliyun-only flags dropped: --profile (apsara-rpc auths via env).
+      - RAM (and any HTTPS_PRODUCTS) gets SCHEME=https + INSECURE default.
+      - endpoint / proxy / org-rg headers all come from the environment; see
+        docs/apsara/QUICKSTART.md for the full variable set.
+
+Only RPC-style products belong here.  Object storage (OSS) is NOT an RPC API —
+it goes through ossutil with an Apsara endpoint, handled separately.
+"""
+import json
+import os
+import sys
+import urllib.request
+
+# Per-product API version + the Product name casing the calls were verified with.
+# Add products here as ansible call sites need them.
+PRODUCTS = {
+    "ros": ("ROS", "2019-09-10"),
+    "ecs": ("ECS", "2014-05-26"),
+    "vpc": ("Vpc", "2016-04-28"),
+    "ram": ("Ram", "2015-05-01"),
+    "pvtz": ("Pvtz", "2018-01-01"),
+    "slb": ("Slb", "2014-05-15"),
+    "nlb": ("Nlb", "2022-04-30"),
+}
+
+# Products whose Apsara endpoint requires HTTPS (RAM returns NeedSsl over HTTP).
+HTTPS_PRODUCTS = {"ram"}
+
+
+def main():
+    argv = sys.argv[1:]
+    if len(argv) < 2:
+        sys.exit("usage: cloudcli <product> <Action> [--Key val | --Key=val | --Key=@file] ...")
+    product, action, rest = argv[0], argv[1], argv[2:]
+    platform = os.environ.get("CLOUD_PLATFORM", "public")
+
+    if platform != "apsara":
+        # Public cloud: hand straight to the aliyun CLI, untouched.
+        os.execvp("aliyun", ["aliyun", product, action] + rest)
+
+    key = product.lower()
+    if key not in PRODUCTS:
+        sys.exit(f"cloudcli: no Apsara mapping for product '{product}' "
+                 f"(add it to PRODUCTS in {sys.argv[0]})")
+    name, version = PRODUCTS[key]
+
+    # Translate aliyun-CLI auth/global flags into what apsara-rpc consumes:
+    #   --profile <name>            dropped (apsara-rpc auths via env)
+    #   --region <r>                dropped (apsara-rpc uses REGION env / --RegionId)
+    #   --access-key-id/-secret     -> AK/SK env (explicit creds, e.g. jump host)
+    #   --mode EcsRamRole + --ram-role-name/--ecs-role-name <role>
+    #                               -> fetch STS from the ECS metadata service and
+    #                                  pass it via AK/SK/STS_TOKEN env
+    env = dict(os.environ)
+    filtered = []
+    ecs_ram = False
+    ram_role = None
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a in ("--profile", "--region"):
+            i += 2; continue
+        if a.startswith("--profile=") or a.startswith("--region="):
+            i += 1; continue
+        if a == "--mode":
+            ecs_ram = ecs_ram or (i + 1 < len(rest) and rest[i + 1] == "EcsRamRole"); i += 2; continue
+        if a.startswith("--mode="):
+            ecs_ram = ecs_ram or (a.split("=", 1)[1] == "EcsRamRole"); i += 1; continue
+        if a in ("--ram-role-name", "--ecs-role-name"):
+            ram_role = rest[i + 1]; i += 2; continue
+        if a.startswith("--ram-role-name=") or a.startswith("--ecs-role-name="):
+            ram_role = a.split("=", 1)[1]; i += 1; continue
+        if a == "--access-key-id":
+            env["AK"] = rest[i + 1]; i += 2; continue
+        if a.startswith("--access-key-id="):
+            env["AK"] = a.split("=", 1)[1]; i += 1; continue
+        if a == "--access-key-secret":
+            env["SK"] = rest[i + 1]; i += 2; continue
+        if a.startswith("--access-key-secret="):
+            env["SK"] = a.split("=", 1)[1]; i += 1; continue
+        filtered.append(a); i += 1
+
+    if ecs_ram:
+        if not ram_role:
+            sys.exit("cloudcli: --mode EcsRamRole needs --ram-role-name")
+        url = "http://100.100.100.200/latest/meta-data/ram/security-credentials/" + ram_role
+        with urllib.request.urlopen(url, timeout=5) as r:
+            c = json.load(r)
+        env["AK"], env["SK"], env["STS_TOKEN"] = c["AccessKeyId"], c["AccessKeySecret"], c["SecurityToken"]
+
+    if key in HTTPS_PRODUCTS:
+        env["SCHEME"] = "https"
+        env.setdefault("INSECURE", "1")
+
+    # Prefer the apsara-rpc binary built next to this script (scripts/apsara/
+    # apsara-rpc/apsara-rpc); fall back to PATH.  Ansible's `environment:` does
+    # not extend PATH, so relative resolution keeps the wrapper self-contained.
+    here = os.path.dirname(os.path.realpath(__file__))
+    rpc = os.path.join(here, "apsara-rpc", "apsara-rpc")
+    if not os.path.exists(rpc):
+        rpc = "apsara-rpc"
+    os.execvpe(rpc, [rpc, name, version, action] + filtered, env)
+
+
+if __name__ == "__main__":
+    main()

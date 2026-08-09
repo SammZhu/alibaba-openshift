@@ -16,6 +16,8 @@
 - name: Resolve Route B inputs (operator)
   hosts: local
   gather_facts: false
+  # apsara: dispatch {{ cloud_cli }} calls to apsara-rpc (public: no-op).
+  environment: "{{ cloud_env | default({}) }}"
   vars_files:
     - "{{ playbook_dir }}/../vars/images.yml"
   vars:
@@ -36,19 +38,13 @@
 
     - name: Discover a security group in the cluster VPC
       ansible.builtin.command:
-        argv: [aliyun, ecs, DescribeSecurityGroups, --RegionId, "{{ region }}",
+        argv: ["{{ cloud_cli }}", ecs, DescribeSecurityGroups, --RegionId, "{{ region }}",
                --VpcId, "{{ mirror_vpc_id }}", --PageSize, "50", --profile, "{{ aliyun_profile }}"]
       register: _sg_q
       changed_when: false
 
-    - name: Read AK/SK for alibaba-creds + ECS sweep
-      ansible.builtin.command:
-        argv: [jq, -r,
-               '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id + " " + .access_key_secret',
-               "{{ lookup('env', 'HOME') }}/.aliyun/config.json"]
-      register: _aksk
-      changed_when: false
-      no_log: true
+    - name: Resolve AK/SK (cloud_env on apsara, aliyun config on public) — for alibaba-creds + ECS sweep
+      ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
 
     - name: Add the jump host (carry Route B inputs)
       ansible.builtin.add_host:
@@ -68,13 +64,16 @@
         rb_ram_role: "{{ mirror_node_ram_role }}"
         rb_cp_host: "{{ api_lb_endpoint }}"
         rb_boot_image: "{{ worker_boot_image_id }}"
-        rb_ak: "{{ _aksk.stdout.split(' ')[0] }}"
-        rb_sk: "{{ _aksk.stdout.split(' ')[1] }}"
+        rb_ak: "{{ _ak }}"
+        rb_sk: "{{ _sk }}"
       no_log: true
 
 - name: Route B worker join (jump host)
   hosts: jumphost
   gather_facts: false
+  # apsara: ECS delete here runs ON the jump host — needs cloudcli + apsara-rpc +
+  # proxy reachable (deployment prereq).  Public: no-op.
+  environment: "{{ cloud_env | default({}) }}"
   vars:
     kc: "--kubeconfig /root/kubeconfig"
     ns: default
@@ -315,7 +314,7 @@
 
         - name: Cleanup — sweep the Route B ECS (operator)
           ansible.builtin.shell: |
-            aliyun ecs DeleteInstance --InstanceId '{{ rb_instance_id | default("") }}' --Force true \
+            {{ cloud_cli }} ecs DeleteInstance --InstanceId '{{ rb_instance_id | default("") }}' --Force true \
               --RegionId {{ rb_region }} --access-key-id '{{ rb_ak }}' --access-key-secret '{{ rb_sk }}' || true
           delegate_to: local
           when: rb_instance_id is defined and rb_instance_id | length > 0

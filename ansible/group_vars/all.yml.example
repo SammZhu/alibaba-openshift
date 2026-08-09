@@ -27,6 +27,42 @@ zone3:               cn-wulanchabu-c   # Agent-based multi-AZ control plane (mas
 oss_bucket:          openshift-iso-samzhu-test   # must be globally unique
 aliyun_profile:      openshift-test              # aliyun-cli profile
 
+# ── Cloud platform dispatch (public Aliyun Cloud vs Apsara Stack private cloud) ─
+# Public cloud (default): call sites invoke `aliyun` directly — byte-for-byte
+# unchanged.  Apsara: point cloud_cli at scripts/apsara/cloudcli and fill
+# cloud_env, and every `{{ cloud_cli }}` call dispatches to apsara-rpc instead.
+# The templates are transformed by scripts/apsara/apsara_ize.py first.
+# See docs/apsara/QUICKSTART.md.
+cloud_platform:      public
+cloud_cli:           aliyun     # apsara -> <repo>/scripts/apsara/cloudcli
+# OSS is the data plane (not RPC) — dispatched separately from cloud_cli.
+oss_cli:             "aliyun oss"   # apsara -> <repo>/scripts/apsara/apsara-oss/apsara-oss
+# List form of oss_cli for `command: argv:` tasks (aliyun oss is two tokens; the
+# apsara-oss path is one).  Use as: argv: "{{ oss_cli_argv + ['cp', src, dst] }}"
+oss_cli_argv:        "{{ oss_cli.split() }}"
+cloud_env:           {}         # apsara -> { CLOUD_PLATFORM: apsara, AK: .., SK: ..,
+                                #   REGION: cn-wulan-ste3-d01, APSARA_PROXY: http://..:3128,
+                                #   ORG_ID: org-.., RG_ID: rs-.., ENDPOINT_ROS: ros.cloud.ste3.com,
+                                #   ENDPOINT_ECS: .., ENDPOINT_VPC: vpc.cloud.ste3.com,
+                                #   ENDPOINT_RAM: ram.cloud.ste3.com }
+# apsara only: explicit image id (apsara_ize turns the DataSource image lookups
+# into MirrorImageId/JumpHostImageId params).  DescribeImages -> ImageId (== the
+# .vhd name on ste3), e.g. aliyun_4_x86_64_20G_alibase_20260407.vhd
+apsara_image_id:     ""
+# apsara only: OSS (object storage) endpoint — Apsara has its own, not
+# oss-<region>.aliyuncs.com.  Determine it from your Apsara console / OSS docs
+# (e.g. oss-<region>.<apsara-domain>), then `aliyun oss`/ossutil targets it via
+# tasks/oss_endpoint.yml.  OSS is a data-plane service (not the RPC gateway) —
+# it does NOT go through apsara-rpc/cloudcli; the operator host still needs the
+# aliyun CLI (or ossutil) able to reach this endpoint.
+apsara_oss_endpoint: ""
+# Computed OSS endpoints used across the OSS call sites.  Public cloud keeps the
+# deliberate internal(free)/public split; Apsara collapses both to its single
+# apsara_oss_endpoint.  (Lazy Jinja — evaluated per use, so region/cloud_platform
+# overrides apply.)
+_oss_pub_endpoint: "{{ apsara_oss_endpoint if (cloud_platform | default('public')) == 'apsara' else 'oss-' + region + '.aliyuncs.com' }}"
+_oss_int_endpoint: "{{ apsara_oss_endpoint if (cloud_platform | default('public')) == 'apsara' else 'oss-' + region + '-internal.aliyuncs.com' }}"
+
 # ── OADP / OSS backup (optional, day-2) ──────────────────────────────────────
 # Backs up cluster resources + PV data to Alibaba Cloud OSS (S3-compatible) via
 # the OADP/Velero operator. Disabled by default. To enable: provision an OSS

@@ -3,6 +3,7 @@
 #            (Runs against the cluster-stack created by Phase 06.)
 - name: Install OpenShift via Assisted Installer
   hosts: local
+  environment: "{{ cloud_env | default({}) }}"
   gather_facts: false
   vars:
     # Topology-effective sizing: for cluster_topology=sno the AI installer +
@@ -195,7 +196,7 @@
       # mirror_vpc_id (the LEGACY monolithic name `vpc_id` is gone after the split).
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - DescribeInstances
           - --RegionId
@@ -300,7 +301,7 @@
     - name: Stop hosts that need ReplaceSystemDisk (force)
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - StopInstance
           - --RegionId
@@ -321,7 +322,7 @@
     - name: Wait for those hosts to reach Stopped (up to 5 min)
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - DescribeInstances
           - --RegionId
@@ -348,7 +349,7 @@
       # path).  Instance stays Stopped → explicit StartInstance below.
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - ReplaceSystemDisk
           - --RegionId
@@ -370,7 +371,7 @@
     - name: StartInstance for replaced hosts (Aliyun doesn't auto-start)
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - StartInstance
           - --RegionId
@@ -394,7 +395,7 @@
       # returns ok without actually rebooting.
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - ecs
           - RebootInstance
           - --RegionId
@@ -862,7 +863,7 @@
     - name: Query *.apps PrivateZone record id
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - pvtz
           - DescribeZoneRecords
           - --ZoneId
@@ -885,7 +886,7 @@
     - name: UpdateZoneRecord *.apps → {{ _apps_target_ip }}
       ansible.builtin.command:
         argv:
-          - aliyun
+          - "{{ cloud_cli }}"
           - pvtz
           - UpdateZoneRecord
           - --RecordId
@@ -980,7 +981,7 @@
       block:
         - name: Look up the ISO image's backing snapshots (for cascade delete)
           ansible.builtin.command:
-            argv: [aliyun, ecs, DescribeImages, --RegionId, "{{ region }}",
+            argv: ["{{ cloud_cli }}", ecs, DescribeImages, --RegionId, "{{ region }}",
                    --ImageId, "{{ ecs_image_id }}", --profile, "{{ aliyun_profile }}"]
           register: _iso_img_desc
           changed_when: false
@@ -988,7 +989,7 @@
 
         - name: Delete the discovery ISO ECS image
           ansible.builtin.command:
-            argv: [aliyun, ecs, DeleteImage, --RegionId, "{{ region }}",
+            argv: ["{{ cloud_cli }}", ecs, DeleteImage, --RegionId, "{{ region }}",
                    --ImageId, "{{ ecs_image_id }}", --Force, "true",
                    --profile, "{{ aliyun_profile }}"]
           changed_when: true
@@ -996,7 +997,7 @@
 
         - name: Delete the ISO image's backing snapshots (DeleteImage does not cascade)
           ansible.builtin.command:
-            argv: [aliyun, ecs, DeleteSnapshot, --SnapshotId, "{{ item }}",
+            argv: ["{{ cloud_cli }}", ecs, DeleteSnapshot, --SnapshotId, "{{ item }}",
                    --Force, "true", --profile, "{{ aliyun_profile }}"]
           loop: "{{ ((_iso_img_desc.stdout | default('{}') | from_json).Images.Image
                     | default([]) | first | default({})).DiskDeviceMappings.DiskDeviceMapping
