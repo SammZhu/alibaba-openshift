@@ -1169,103 +1169,59 @@
       failed_when: "_csi_acr_pull.rc | default(0) != 0"
       when: mirror_private_ip | default('') | length > 0
 
-    # ── Group B: cross-border sig-storage sidecars (CAPA-style offline path) ──
-    - name: Define cross-border CSI sidecars (operator-host pull -> stage -> mirror push)
+    # ── Group B: sig-storage sidecars — tag them ON THE MIRROR from the digest
+    # oc-mirror already stored (fully offline).  The build mirrors these as
+    # additionalImages via apsara_sig_storage_registry / SIG_STORAGE_REGISTRY, and
+    # oc-mirror keeps digest-referenced images under their SOURCE repo path with a
+    # `sha256-<hex>` tag (e.g. google_containers/csi-provisioner:sha256-...).  So
+    # read that digest off the mirror and re-tag it into acs/<name>:<ver> in place
+    # — no cross-border pull.  (An older tarball that didn't mirror the sidecars →
+    # the task errors with a clear "rebuild with SIG_STORAGE_REGISTRY" hint.)
+    - name: Define sig-storage mirror namespace (source repo path on the mirror)
       ansible.builtin.set_fact:
-        # sig-storage default host (registry.k8s.io) is GFW-unreachable from the
-        # operator too; on apsara point src at the same reachable mirror the build
-        # used (apsara_sig_storage_registry, e.g. registry.aliyuncs.com/google_containers).
-        _csi_xb_images:
-          - { repo: acs/csi-provisioner, tag: v3.5.0, src: "{{ (apsara_sig_storage_registry | default('')) or 'registry.k8s.io/sig-storage' }}/csi-provisioner" }
-          - { repo: acs/csi-attacher,    tag: v4.3.0, src: "{{ (apsara_sig_storage_registry | default('')) or 'registry.k8s.io/sig-storage' }}/csi-attacher" }
-          - { repo: acs/csi-resizer,     tag: v1.8.0, src: "{{ (apsara_sig_storage_registry | default('')) or 'registry.k8s.io/sig-storage' }}/csi-resizer" }
-          - { repo: acs/csi-snapshotter, tag: v6.3.0, src: "{{ (apsara_sig_storage_registry | default('')) or 'registry.k8s.io/sig-storage' }}/csi-snapshotter" }
+        _csi_xb_ns: "{{ ((apsara_sig_storage_registry | default('')) or 'registry.k8s.io/sig-storage').split('/')[1:] | join('/') }}"
 
-    - name: Check whether each cross-border CSI sidecar is already on mirror
+    - name: Define sig-storage sidecar list (mirror source repo -> acs alias)
+      ansible.builtin.set_fact:
+        _csi_xb_images:
+          - { repo: acs/csi-provisioner, tag: v3.5.0, mirror_src: "{{ _csi_xb_ns }}/csi-provisioner" }
+          - { repo: acs/csi-attacher,    tag: v4.3.0, mirror_src: "{{ _csi_xb_ns }}/csi-attacher" }
+          - { repo: acs/csi-resizer,     tag: v1.8.0, mirror_src: "{{ _csi_xb_ns }}/csi-resizer" }
+          - { repo: acs/csi-snapshotter, tag: v6.3.0, mirror_src: "{{ _csi_xb_ns }}/csi-snapshotter" }
+
+    - name: Tag sig-storage sidecars on the mirror from their mirrored digest (offline)
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} bash <<'REMOTE'
         set -uo pipefail
+        export HOME=/root
         REG={{ mirror_private_ip }}:8443
-        REPO={{ item.repo }}
+        DST={{ item.repo }}
         TAG={{ item.tag }}
-        auth=$(jq -r '.auths[].auth' /root/.docker/config.json 2>/dev/null | head -1 | base64 -d 2>/dev/null) || { echo "MISSING $REPO:$TAG"; exit 0; }
-        token=$(curl -ks -u "$auth" "https://$REG/v2/auth?service=$REG&scope=repository:$REPO:pull" 2>/dev/null | jq -r '.token // empty' 2>/dev/null)
-        code=$(curl -ks -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${token:-x}" "https://$REG/v2/$REPO/manifests/$TAG" 2>/dev/null)
-        if [ "$code" = "200" ]; then echo "PRESENT $REPO:$TAG"; else echo "MISSING $REPO:$TAG"; fi
+        SRC={{ item.mirror_src }}
+        auth=$(jq -r '.auths[].auth' /root/.docker/config.json 2>/dev/null | head -1 | base64 -d 2>/dev/null)
+        tokp() { curl -ks -u "$auth" "https://$REG/v2/auth?service=$REG&scope=repository:$1:pull,push" 2>/dev/null | jq -r '.token // empty'; }
+        t=$(tokp "$DST")
+        code=$(curl -ks -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${t:-x}" "https://$REG/v2/$DST/manifests/$TAG" 2>/dev/null)
+        [ "$code" = "200" ] && { echo "PRESENT $DST:$TAG"; exit 0; }
+        ts=$(tokp "$SRC")
+        shatag=$(curl -ks -H "Authorization: Bearer ${ts:-x}" "https://$REG/v2/$SRC/tags/list" 2>/dev/null | jq -r '.tags[]? | select(startswith("sha256-"))' | head -1)
+        [ -n "$shatag" ] || { echo "ERROR: $SRC has no digest on the mirror — rebuild the tarball with SIG_STORAGE_REGISTRY set" >&2; exit 1; }
+        digest="sha256:${shatag#sha256-}"
+        podman pull --tls-verify=false "$REG/$SRC@$digest"
+        podman tag  "$REG/$SRC@$digest" "$REG/$DST:$TAG"
+        podman push --tls-verify=false "$REG/$DST:$TAG"
+        echo "OK offline: $DST:$TAG <- $SRC@$digest"
         REMOTE
       loop: "{{ _csi_xb_images }}"
       loop_control:
         label: "{{ item.repo }}:{{ item.tag }}"
-      register: _csi_xb_on_mirror
-      changed_when: false
-      when: mirror_private_ip | default('') | length > 0
-
-    - name: Remove stale local sidecar tar before skopeo (docker-archive can't overwrite)
-      ansible.builtin.file:
-        path: "/tmp/{{ item.item.repo | basename }}-{{ item.item.tag }}.tar"
-        state: absent
-      delegate_to: localhost
-      loop: "{{ _csi_xb_on_mirror.results | default([]) }}"
-      loop_control:
-        label: "{{ item.item.repo }}:{{ item.item.tag }}"
-      when: "'MISSING' in (item.stdout | default(''))"
-
-    - name: Pull cross-border CSI sidecar to operator-local docker-archive (skopeo)
-      # Operator host has cross-border egress; skopeo picks the host-arch (amd64)
-      # image, matching the cluster nodes. Retry past quay/CDN-style transient 5xx.
-      ansible.builtin.command:
-        argv:
-          - skopeo
-          - copy
-          - --src-tls-verify=true
-          - --retry-times=5
-          - "docker://{{ item.item.src }}:{{ item.item.tag }}"
-          - "docker-archive:/tmp/{{ item.item.repo | basename }}-{{ item.item.tag }}.tar:{{ item.item.src }}:{{ item.item.tag }}"
-      delegate_to: localhost
-      loop: "{{ _csi_xb_on_mirror.results | default([]) }}"
-      loop_control:
-        label: "{{ item.item.repo }}:{{ item.item.tag }}"
-      register: _csi_xb_pull
-      retries: 3
-      delay: 20
-      until: _csi_xb_pull.rc == 0
-      when: "'MISSING' in (item.stdout | default(''))"
-      changed_when: true
-
-    - name: Stage sidecar tar onto mirror ECS via OSS (not scp)
-      ansible.builtin.include_tasks: ../tasks/ship_via_oss.yml
-      vars:
-        ship_local: "/tmp/{{ item.item.repo | basename }}-{{ item.item.tag }}.tar"
-        ship_remote: "/tmp/{{ item.item.repo | basename }}-{{ item.item.tag }}.tar"
-        ship_object: "csi-{{ cluster_name }}-{{ item.item.repo | basename }}-{{ item.item.tag }}.tar"
-      loop: "{{ _csi_xb_on_mirror.results | default([]) }}"
-      loop_control:
-        label: "{{ item.item.repo }}:{{ item.item.tag }}"
-      when: "'MISSING' in (item.stdout | default(''))"
-
-    - name: Load + tag + push sidecar on mirror ECS
-      ansible.builtin.shell: |
-        {{ _ssh_root_mirror }} bash <<'REMOTE'
-        set -euxo pipefail
-        REG={{ mirror_private_ip }}:8443
-        TAR=/tmp/{{ item.item.repo | basename }}-{{ item.item.tag }}.tar
-        SRC={{ item.item.src }}:{{ item.item.tag }}
-        DST=$REG/{{ item.item.repo }}:{{ item.item.tag }}
-        podman load -i "$TAR"
-        podman tag  "$SRC" "$DST"
-        podman push --tls-verify=false "$DST"
-        rm -f "$TAR"
-        echo "OK: $DST now on mirror"
-        REMOTE
-      loop: "{{ _csi_xb_on_mirror.results | default([]) }}"
-      loop_control:
-        label: "{{ item.item.repo }}:{{ item.item.tag }}"
-      register: _csi_xb_push
+      register: _csi_xb_tag
       retries: 3
       delay: 10
-      until: _csi_xb_push.rc == 0
-      when: "'MISSING' in (item.stdout | default(''))"
-      changed_when: true
+      until: _csi_xb_tag.rc == 0
+      changed_when: "'OK offline' in (_csi_xb_tag.stdout | default(''))"
+      failed_when: _csi_xb_tag.rc != 0
+      when: mirror_private_ip | default('') | length > 0
 
     # ── CSI Operator (OLM bundle 3 images): same belt-and-suspenders pattern ──
     # custom_manifests/04-csi-{catalogsource,subscription}.yaml reference
