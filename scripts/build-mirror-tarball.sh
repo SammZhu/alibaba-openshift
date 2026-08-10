@@ -666,6 +666,15 @@ $OSS_CLI cp "$WORK_DIR/mirror-registry-version.txt" \
     "oss://${OSS_BUCKET}/${OSS_PREFIX}/mirror-registry-version.txt" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" --force
 
+# OpenShift patch version marker — 04 reads this to fetch the matching oc-mirror
+# from mirror.openshift.com.  Normally staged by ansible's mirror_stage_artefacts
+# (Assisted: phase 02; Agent-based: phase 06a) — but ABI runs 04 BEFORE 06a, so
+# stage it here from the build too, so 04 has it regardless of phase ordering.
+echo -n "$OPENSHIFT_PATCH_VERSION" > "$WORK_DIR/openshift-patch-version.txt"
+$OSS_CLI cp "$WORK_DIR/openshift-patch-version.txt" \
+    "oss://${OSS_BUCKET}/${OSS_PREFIX}/openshift-patch-version.txt" \
+    --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" --force
+
 cat <<EOF
 
 ═══════════════════════════════════════════════════════════════════════
