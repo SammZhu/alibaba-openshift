@@ -1172,11 +1172,14 @@
     # ── Group B: cross-border sig-storage sidecars (CAPA-style offline path) ──
     - name: Define cross-border CSI sidecars (operator-host pull -> stage -> mirror push)
       ansible.builtin.set_fact:
+        # sig-storage default host (registry.k8s.io) is GFW-unreachable from the
+        # operator too; on apsara point src at the same reachable mirror the build
+        # used (apsara_sig_storage_registry, e.g. registry.aliyuncs.com/google_containers).
         _csi_xb_images:
-          - { repo: acs/csi-provisioner, tag: v3.5.0, src: registry.k8s.io/sig-storage/csi-provisioner }
-          - { repo: acs/csi-attacher,    tag: v4.3.0, src: registry.k8s.io/sig-storage/csi-attacher }
-          - { repo: acs/csi-resizer,     tag: v1.8.0, src: registry.k8s.io/sig-storage/csi-resizer }
-          - { repo: acs/csi-snapshotter, tag: v6.3.0, src: registry.k8s.io/sig-storage/csi-snapshotter }
+          - { repo: acs/csi-provisioner, tag: v3.5.0, src: "{{ (apsara_sig_storage_registry | default('')) or 'registry.k8s.io/sig-storage' }}/csi-provisioner" }
+          - { repo: acs/csi-attacher,    tag: v4.3.0, src: "{{ (apsara_sig_storage_registry | default('')) or 'registry.k8s.io/sig-storage' }}/csi-attacher" }
+          - { repo: acs/csi-resizer,     tag: v1.8.0, src: "{{ (apsara_sig_storage_registry | default('')) or 'registry.k8s.io/sig-storage' }}/csi-resizer" }
+          - { repo: acs/csi-snapshotter, tag: v6.3.0, src: "{{ (apsara_sig_storage_registry | default('')) or 'registry.k8s.io/sig-storage' }}/csi-snapshotter" }
 
     - name: Check whether each cross-border CSI sidecar is already on mirror
       ansible.builtin.shell: |
