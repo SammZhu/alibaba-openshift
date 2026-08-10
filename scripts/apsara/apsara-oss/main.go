@@ -289,14 +289,17 @@ func main() {
 		if !ok {
 			die("stat: target must be an oss:// URI")
 		}
-		exist, err := newBucket(flags, b).IsObjectExist(key)
+		// GetObjectDetailedMeta both proves existence and yields the size — print
+		// Content-Length so callers can parse it exactly like `aliyun oss stat`
+		// (ansible greps for that header to get the expected tarball size).
+		meta, err := newBucket(flags, b).GetObjectDetailedMeta(key)
 		if err != nil {
-			die("stat:", err)
-		}
-		if !exist {
-			die("stat: object does not exist: " + pos[0])
+			die("stat: object does not exist: "+pos[0]+":", err)
 		}
 		fmt.Printf("oss://%s/%s exists\n", b, key)
+		if cl := meta.Get("Content-Length"); cl != "" {
+			fmt.Printf("Content-Length: %s\n", cl)
+		}
 	case "mb":
 		if len(pos) < 1 {
 			die("mb: need <oss://bucket>")
