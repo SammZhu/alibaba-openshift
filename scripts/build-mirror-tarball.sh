@@ -675,6 +675,16 @@ $OSS_CLI cp "$WORK_DIR/openshift-patch-version.txt" \
     "oss://${OSS_BUCKET}/${OSS_PREFIX}/openshift-patch-version.txt" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" --force
 
+# Stage oc-mirror in OSS too: 04 installs it on the mirror ECS, which reaches
+# mirror.openshift.com only at ~20 KB/s on Apsara — pull it from internal OSS
+# instead.  Download here (fast on the build host) and upload version-tagged.
+OCM_TGZ="$WORK_DIR/oc-mirror-${OPENSHIFT_PATCH_VERSION}.tar.gz"
+[[ -f "$OCM_TGZ" ]] || curl -fsSL -o "$OCM_TGZ" \
+  "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OPENSHIFT_PATCH_VERSION}/oc-mirror.tar.gz"
+$OSS_CLI cp "$OCM_TGZ" \
+    "oss://${OSS_BUCKET}/${OSS_PREFIX}/oc-mirror-${OPENSHIFT_PATCH_VERSION}.tar.gz" \
+    --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" --force
+
 cat <<EOF
 
 ═══════════════════════════════════════════════════════════════════════

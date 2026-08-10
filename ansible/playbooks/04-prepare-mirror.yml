@@ -388,7 +388,20 @@
         OCP_VERSION=$(cat ./ocp-version.txt | tr -d '[:space:]')
         rm -f ./ocp-version.txt
         echo "    OpenShift patch version: $OCP_VERSION"
-        curl -fLO "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OCP_VERSION/oc-mirror.tar.gz"
+        # Prefer oc-mirror from OSS (internal, fast) — the mirror ECS reaches
+        # mirror.openshift.com only at ~20 KB/s on Apsara.  Fall back to the CDN
+        # when it is not staged (public cloud, or an older build).
+        if {{ oss_cli }} cp \
+             "oss://{{ oss_bucket }}/mirror-tarballs/oc-mirror-$OCP_VERSION.tar.gz" \
+             ./oc-mirror.tar.gz \
+             --endpoint="{{ _oss_int_endpoint }}" \
+             --mode=EcsRamRole --ecs-role-name "{{ cluster_name }}-mirror-role" \
+             --region "{{ region }}" --force 2>/dev/null; then
+          echo "    oc-mirror: from OSS"
+        else
+          echo "    oc-mirror: from mirror.openshift.com (not staged in OSS)"
+          curl -fLO "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OCP_VERSION/oc-mirror.tar.gz"
+        fi
         tar xzf oc-mirror.tar.gz
         chmod +x oc-mirror
         install -m 0755 oc-mirror /usr/local/bin/
