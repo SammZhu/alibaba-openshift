@@ -82,6 +82,15 @@
         fail_msg: "Phase 01 (Assisted) must run before 04 for the install-config PATCH (cluster_id / infra_env_id)."
       when: installation_method | default('Assisted') | lower not in ['agent', 'agent-based']
 
+    # Local output_dir (~/openshift-install/<cluster>) holds mirror-ca.crt +
+    # tag-mapping.tsv that later tasks write.  On Assisted, phase 01 creates it;
+    # ABI skips 01, so ensure it exists here (idempotent).
+    - name: Ensure local output_dir exists
+      ansible.builtin.file:
+        path: "{{ output_dir }}"
+        state: directory
+        mode: "0755"
+
     # ── Step 1: wait for ECS bootstrap signal ────────────────────────────────
     # Cloud-init wrote /var/lib/mirror-bootstrap-ready when the host is
     # SSH-able + has the data disk mounted + has aliyun CLI installed.
