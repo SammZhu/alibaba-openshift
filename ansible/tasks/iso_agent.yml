@@ -433,31 +433,70 @@
     echo "rootfs HTTP never came up:"; systemctl status abi-rootfs.service --no-pager -l | tail -20; exit 1'
   changed_when: true
 
-- name: ABI — adopt existing agent image by name (idempotent)
+# ── adopt / ImportImage / poll ────────────────────────────────────────────────
+# public cloud: run on the mirror ECS via its instance RAM role (no AK/SK there).
+# apsara: cloud_cli (cloudcli) lives on the operator host, NOT the mirror ECS, so
+# run these LOCALLY on the operator (like Phase 06 does) using cloud_env AK/SK —
+# no _ssh_root_mirror, no RAM role.  (OSS upload/delete stay on the mirror, where
+# apsara-oss + the instance RAM role work.)
+- name: ABI — adopt existing agent image by name (mirror ECS / RAM role)
+  when: (cloud_platform | default('public')) != 'apsara'
   ansible.builtin.shell: |
     {{ _ssh_root_mirror }} '{{ cloud_cli }} ecs DescribeImages --region {{ region }} --RegionId {{ region }} --ImageName openshift-{{ cluster_name }}-agent --mode EcsRamRole --ram-role-name $(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/) | jq -r ".Images.Image[0].ImageId // empty"'
   register: _abi_img_lookup
   changed_when: false
 
+- name: ABI — adopt existing agent image by name (apsara, local cloudcli)
+  when: (cloud_platform | default('public')) == 'apsara'
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", ecs, DescribeImages, --RegionId, "{{ region }}",
+           --ImageName, "openshift-{{ cluster_name }}-agent", --profile, "{{ aliyun_profile }}"]
+  register: _abi_img_lookup_ap
+  changed_when: false
+
 - name: ABI — set ecs_image_id from adopted image
   ansible.builtin.set_fact:
-    ecs_image_id: "{{ _abi_img_lookup.stdout | trim }}"
-  when: _abi_img_lookup.stdout | trim | length > 0
+    ecs_image_id: >-
+      {{ (_abi_img_lookup.stdout | default('') | trim)
+         if (cloud_platform | default('public')) != 'apsara'
+         else ((_abi_img_lookup_ap.stdout | from_json).Images.Image | default([]) | map(attribute='ImageId') | list | first | default('')) }}
 
-- name: ABI — ImportImage the agent ISO (from the mirror ECS) when needed
+- name: ABI — ImportImage the agent ISO (mirror ECS / RAM role) when needed
+  when:
+    - (cloud_platform | default('public')) != 'apsara'
+    - ecs_image_id is not defined or ecs_image_id | length == 0
   ansible.builtin.shell: |
     {{ _ssh_root_mirror }} 'RR=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/)
     {{ cloud_cli }} ecs ImportImage --region {{ region }} --RegionId {{ region }} --mode EcsRamRole --ram-role-name "$RR" --ImageName openshift-{{ cluster_name }}-agent --OSType Linux --Platform CoreOS --Architecture x86_64 --BootMode UEFI --DiskDeviceMapping.1.Format RAW --DiskDeviceMapping.1.OSSBucket {{ oss_bucket }} --DiskDeviceMapping.1.OSSObject {{ oss_object }} | jq -r .ImageId'
   register: _abi_import
   changed_when: true
-  when: ecs_image_id is not defined or ecs_image_id | length == 0
+
+- name: ABI — ImportImage the agent ISO (apsara, local cloudcli) when needed
+  when:
+    - (cloud_platform | default('public')) == 'apsara'
+    - ecs_image_id is not defined or ecs_image_id | length == 0
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", ecs, ImportImage, --RegionId, "{{ region }}",
+           --ImageName, "openshift-{{ cluster_name }}-agent",
+           --OSType, Linux, --Platform, CoreOS, --Architecture, x86_64, --BootMode, UEFI,
+           --DiskDeviceMapping.1.Format, RAW,
+           --DiskDeviceMapping.1.OSSBucket, "{{ oss_bucket }}",
+           --DiskDeviceMapping.1.OSSObject, "{{ oss_object }}",
+           --profile, "{{ aliyun_profile }}"]
+  register: _abi_import_ap
+  changed_when: true
 
 - name: ABI — capture imported agent image id
   ansible.builtin.set_fact:
-    ecs_image_id: "{{ _abi_import.stdout | trim }}"
-  when: _abi_import is not skipped and (_abi_import.stdout | default('') | trim | length > 0)
+    ecs_image_id: >-
+      {{ (_abi_import.stdout | default('') | trim)
+         if ((cloud_platform | default('public')) != 'apsara' and (_abi_import is not skipped))
+         else ((_abi_import_ap.stdout | default('{}') | from_json).ImageId | default(''))
+              if ((cloud_platform | default('public')) == 'apsara' and (_abi_import_ap is not skipped))
+              else ecs_image_id }}
 
-- name: ABI — poll agent image until Available (~15-30 min)
+- name: ABI — poll agent image until Available (mirror ECS / RAM role, ~15-30 min)
+  when: (cloud_platform | default('public')) != 'apsara'
   ansible.builtin.shell: |
     {{ _ssh_root_mirror }} '{{ cloud_cli }} ecs DescribeImages --region {{ region }} --RegionId {{ region }} --ImageId {{ ecs_image_id }} --mode EcsRamRole --ram-role-name $(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/) | jq -r ".Images.Image[0].Status // empty"'
   register: _abi_img_status
@@ -465,6 +504,17 @@
   retries: 90
   delay: 30
   until: _abi_img_status.stdout | trim == 'Available'
+
+- name: ABI — poll agent image until Available (apsara, local cloudcli, ~15-30 min)
+  when: (cloud_platform | default('public')) == 'apsara'
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", ecs, DescribeImages, --RegionId, "{{ region }}",
+           --ImageId, "{{ ecs_image_id }}", --profile, "{{ aliyun_profile }}"]
+  register: _abi_img_status_ap
+  changed_when: false
+  retries: 90
+  delay: 30
+  until: ((_abi_img_status_ap.stdout | default('{}') | from_json).Images.Image | default([]) | map(attribute='Status') | list | first | default('')) == 'Available'
 
 # Delete the OSS agent ISO object now that the image is Available — it only
 # existed to feed ImportImage (same as the AI path deletes its discovery-ISO
