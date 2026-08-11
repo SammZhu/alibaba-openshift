@@ -137,6 +137,12 @@
     state: directory
     mode: "0755"
 
+- name: ABI — master IPs list (parallel to abi_master_macs, for apsara static nmstate)
+  ansible.builtin.set_fact:
+    abi_master_ips: "{{ [master_ip1 | default(''), master_ip2 | default(''), master_ip3 | default('')]
+                        | map('trim') | select() | list }}"
+  when: (cloud_platform | default('public')) == 'apsara'
+
 - name: ABI — render install-config.yaml + agent-config.yaml
   ansible.builtin.template:
     src: "../templates/{{ item }}.j2"

@@ -49,8 +49,37 @@ hosts:
     rootDeviceHints:
       deviceName: /dev/vda
     interfaces:
-      - name: eth0
+      - name: {{ apsara_node_nic | default('eth0') }}
         macAddress: "{{ mac | lower }}"
+    {% if (cloud_platform | default('public')) == 'apsara' %}
+    # Apsara: RHCOS's DHCP client does not get a lease on this VPC, so pin a
+    # STATIC address/gateway/DNS via nmstate (Alibaba Cloud Linux works via DHCP,
+    # RHCOS does not).  IP is the ENI's fixed address; NIC name is ens3 on Apsara.
+    networkConfig:
+      interfaces:
+        - name: {{ apsara_node_nic | default('eth0') }}
+          type: ethernet
+          state: up
+          mac-address: "{{ mac | lower }}"
+          ipv4:
+            enabled: true
+            dhcp: false
+            address:
+              - ip: {{ abi_master_ips[loop.index0] }}
+                prefix-length: {{ (private_subnet_cidr | default('10.0.16.0/20')).split('/')[1] }}
+      dns-resolver:
+        config:
+          server:
+      {% for ns in (apsara_node_dns | default([])) %}
+            - {{ ns }}
+      {% endfor %}
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: {{ apsara_node_gateway }}
+            next-hop-interface: {{ apsara_node_nic | default('eth0') }}
+            table-id: 254
+    {% endif %}
 {% endfor %}
 {% else %}
 # Fallback (no MACs harvested — e.g. ENI-first phase-1 not run): empty hosts[],

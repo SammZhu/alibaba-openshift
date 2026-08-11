@@ -197,6 +197,19 @@ installation_method:  Assisted
 #     for RHEL9 OCP clients — e.g. Alibaba Cloud Linux 3 (glibc 2.32) with OCP
 #     4.16+ clients (need glibc 2.34).  Needs podman + a pullable UBI9 image.
 agent_iso_build:      mirror-ecs
+
+# Apsara static node network (installation_method=agent).  RHCOS's DHCP client
+# does not get a lease on some Apsara VPCs (Alibaba Cloud Linux works via DHCP,
+# RHCOS does not), so agent-config pins a STATIC nmstate per host.  Values are for
+# the masters' subnet — read them off a working ECS on that subnet:
+#   ip -br -4 addr ; ip route | grep default ; grep nameserver /etc/resolv.conf
+# The DNS servers MUST resolve the cluster's CloudDns PrivateZone (api-int/*.apps).
+# Only used when cloud_platform == apsara + installation_method == agent.
+apsara_node_nic:      ens3            # RHCOS NIC name on Apsara (Alibaba Linux=eth0, RHCOS=ens3)
+apsara_node_gateway:  10.0.31.253     # default gateway for private_subnet_cidr
+apsara_node_dns:                      # resolvers that also resolve the CloudDns zone
+  - 103.32.0.20
+  - 103.32.0.21
 # agent_build_image:   registry.access.redhat.com/ubi9/ubi:latest   # container path base
 # agent_bootstrap_oc:  oc     # host oc used only to extract version-matched clients
 
