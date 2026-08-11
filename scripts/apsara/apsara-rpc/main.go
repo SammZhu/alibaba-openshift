@@ -58,7 +58,13 @@ func main() {
 	if p := os.Getenv("APSARA_PROXY"); p != "" {
 		u, e := url.Parse(p)
 		if e != nil { die("bad APSARA_PROXY:", e) }
-		tr.Proxy = http.ProxyURL(u)
+		tr.Proxy = func(req *http.Request) (*url.URL, error) {
+			if os.Getenv("APSARA_RPC_DEBUG") == "1" {
+				fmt.Fprintf(os.Stderr, "[apsara-rpc] transport req=%s (scheme=%s host=%s) -> proxy %s\n",
+					req.URL.String(), req.URL.Scheme, req.URL.Host, u.String())
+			}
+			return u, nil
+		}
 	}
 	client.SetTransport(tr)
 	// DoAction re-stamps TLSClientConfig.InsecureSkipVerify from this flag on
