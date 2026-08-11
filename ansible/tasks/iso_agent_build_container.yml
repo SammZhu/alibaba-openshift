@@ -8,152 +8,169 @@
 # to any operator host that has podman (the host need NOT be RHEL9).
 #
 # The build runs with --network=host so it reaches the in-VPC mirror registry
-# (mirror_private_ip:8443) over the VPC peering, exactly like the operator's own
-# oc/cloudcli calls.  Output (agent.x86_64.iso + boot-artifacts/) lands in the
-# LOCAL install_dir, then is pushed to the mirror ECS so the existing downstream
-# steps (OSS upload + in-VPC rootfs HTTP serve + ImportImage) run unchanged.
+# (mirror_private_ip:8443) over the VPC peering.  Output (agent.x86_64.iso +
+# boot-artifacts/) lands in the LOCAL install_dir, then is pushed to the mirror
+# ECS so the existing downstream steps (OSS upload + in-VPC rootfs HTTP serve +
+# ImportImage) run unchanged.
 #
-# Inputs already in scope from iso_agent.yml: install_dir (locally-rendered
-#   install-config/agent-config), mirror_private_ip, openshift_version, region,
-#   output_dir (mirror CA at {{ output_dir }}/mirror-ca.crt), mirror_init_user/
-#   mirror_init_password, _ssh_root_mirror, _ssh_common_args, _ssh_proxy_args,
-#   _m_iso, _m_install_dir.
-# Vars: agent_build_image (default UBI9), agent_bootstrap_oc (host oc used only to
-#   extract the version-matched clients from the mirror; default 'oc').
+# RESUME: the ~30 min build is skipped if the mirror ECS already has {{ _m_iso }}
+# (a prior build).  Set agent_iso_force_rebuild=true to force a rebuild (do this
+# whenever install-config/agent-config changed — the cached ISO would be stale).
+#
+# Inputs from iso_agent.yml: install_dir, mirror_private_ip, openshift_version,
+#   region, output_dir (CA at {{ output_dir }}/mirror-ca.crt), mirror_init_user/
+#   mirror_init_password, _ssh_root_mirror, _m_iso, _m_install_dir.
+# Vars: agent_build_image (default UBI9), agent_bootstrap_oc (host oc for extract),
+#   agent_iso_force_rebuild (default false).
 
 - name: "container-build: assert podman is available on the operator host"
   ansible.builtin.command: podman --version
   register: _cb_podman
   changed_when: false
 
-- name: "container-build: registry-config with the mirror auth (for client extract)"
-  ansible.builtin.copy:
-    dest: "{{ install_dir }}/abi-rc.json"
-    mode: "0600"
-    content: >-
-      {"auths":{"{{ mirror_private_ip }}:8443":{"auth":"{{
-        ((mirror_init_user | default('mirror-admin')) + ':' + mirror_init_password) | b64encode }}"}}}
-  no_log: true
+- name: "container-build: check for an existing ISO on the mirror (resume)"
+  ansible.builtin.shell: "{{ _ssh_root_mirror }} 'test -f {{ _m_iso }} && echo yes || echo no'"
+  register: _cb_iso_present
+  changed_when: false
 
-# ICSP so `oc adm release extract` redirects the component pulls (the
-# ocp-v4.0-art-dev @sha256 images that hold oc/openshift-install) from quay.io to
-# the mirror.  Without it, --from only locates the release image and the component
-# pulls hit quay.io -> unauthorized.
-- name: "container-build: ICSP mapping quay.io -> mirror (for client extract)"
-  ansible.builtin.copy:
-    dest: "{{ install_dir }}/abi-icsp.yaml"
-    mode: "0644"
-    content: |
-      apiVersion: operator.openshift.io/v1alpha1
-      kind: ImageContentSourcePolicy
-      metadata:
-        name: mirror
-      spec:
-        repositoryDigestMirrors:
-        - source: quay.io/openshift-release-dev/ocp-release
-          mirrors: ["{{ mirror_private_ip }}:8443/openshift/release-images"]
-        - source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
-          mirrors: ["{{ mirror_private_ip }}:8443/openshift/release"]
+- name: "container-build: decide whether to (re)build the ISO"
+  ansible.builtin.set_fact:
+    _cb_build_iso: "{{ (agent_iso_force_rebuild | default(false) | bool)
+                       or ((_cb_iso_present.stdout | trim) != 'yes') }}"
 
-# Extract the version-matched oc + openshift-install FROM the mirror release into
-# a local bin/ dir.  These are RHEL9 binaries — they will run INSIDE the UBI9
-# container (not necessarily on the host).  A bootstrap oc is only needed to pull
-# them out; any oc that runs on the host works (host oc, or override via
-# agent_bootstrap_oc).  --insecure avoids needing the CA just for extraction.
-- name: "container-build: extract oc + openshift-install {{ openshift_version }} from mirror"
-  ansible.builtin.command:
-    argv:
-      - "{{ agent_bootstrap_oc | default('oc') }}"
-      - adm
-      - release
-      - extract
-      - --command={{ item }}
-      - --to={{ install_dir }}/bin
-      - --from={{ mirror_private_ip }}:8443/openshift/release-images:{{ openshift_version }}-x86_64
-      - --registry-config={{ install_dir }}/abi-rc.json
-      - --icsp-file={{ install_dir }}/abi-icsp.yaml
-      - --insecure=true
-  loop:
-    - openshift-install
-    - oc
-  register: _cb_extract
-  changed_when: true
-
-- name: "container-build: write the in-container build script"
-  ansible.builtin.copy:
-    dest: "{{ install_dir }}/agent-build.sh"
-    mode: "0755"
-    content: |
-      #!/bin/bash
-      set -euo pipefail
-      # Trust the mirror registry CA (openshift-install pulls the release over TLS).
-      cp /work/mirror-ca.crt /etc/pki/ca-trust/source/anchors/mirror-ca.crt
-      update-ca-trust
-      export PATH=/work/bin:$PATH
-      export XDG_CACHE_HOME=/install/.cache TMPDIR=/install/tmp
-      mkdir -p "$XDG_CACHE_HOME" "$TMPDIR"
-      cd /install
-      # Fresh build: agent create image CONSUMES install-config/agent-config on
-      # success, so a stale state would poison `agent wait-for` later.
-      rm -f agent.x86_64.iso .openshift_install_state.json
-      openshift-install agent create image --dir /install --log-level=info
-      oc version --client
-      openshift-install version
-
-- name: "container-build: openshift-install agent create image (UBI9 container, host network)"
-  ansible.builtin.command:
-    argv:
-      - podman
-      - run
-      - --rm
-      - --network=host
-      - --security-opt=label=disable
-      - -v
-      - "{{ install_dir }}:/install:z"
-      - -v
-      - "{{ install_dir }}/bin:/work/bin:z"
-      - -v
-      - "{{ output_dir }}/mirror-ca.crt:/work/mirror-ca.crt:ro"
-      - --entrypoint
-      - /bin/bash
-      - "{{ agent_build_image | default('registry.access.redhat.com/ubi9/ubi:latest') }}"
-      - /install/agent-build.sh
-  register: _cb_build
-  changed_when: true
-
-- name: "container-build: show build tail"
-  ansible.builtin.debug:
-    msg: "{{ _cb_build.stdout_lines[-20:] | default([]) }}"
-
-- name: "container-build: assert ISO + rootfs were produced"
-  ansible.builtin.stat:
-    path: "{{ item }}"
-  register: _cb_out
-  failed_when: not _cb_out.stat.exists
-  loop:
-    - "{{ install_dir }}/agent.x86_64.iso"
-
-# ── push artifacts to the mirror ECS so the existing downstream steps run ──────
-- name: "container-build: ensure build dirs on the mirror ECS"
-  ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'mkdir -p {{ _m_install_dir }}/boot-artifacts'
-  changed_when: true
-
-- name: "container-build: push agent ISO to the mirror ECS (tar over ssh)"
-  ansible.builtin.shell: >-
-    tar -C {{ install_dir }} -czf - agent.x86_64.iso
-    | {{ _ssh_root_mirror }} 'tar -C {{ _m_install_dir }} -xzf -'
-  changed_when: true
-
-- name: "container-build: push boot-artifacts (rootfs) to the mirror ECS"
-  ansible.builtin.shell: >-
-    tar -C {{ install_dir }} -czf - boot-artifacts
-    | {{ _ssh_root_mirror }} 'tar -C {{ _m_install_dir }} -xzf -'
-  changed_when: true
-
-- name: "container-build: agent ISO built + pushed to mirror ECS"
+- name: "container-build: reuse existing ISO on mirror (skip ~30 min rebuild)"
   ansible.builtin.debug:
     msg: >-
-      ✓ agent ISO built in UBI9 container on the operator host and pushed to
-      {{ _m_iso }} (+ boot-artifacts) on the mirror ECS.  Downstream OSS upload /
-      rootfs serve / ImportImage run unchanged.
+      Existing {{ _m_iso }} on the mirror ECS — skipping the container rebuild.
+      Set agent_iso_force_rebuild=true to force a rebuild (needed if the
+      install-config / agent-config changed).
+  when: not _cb_build_iso
+
+- name: "container-build: build + push the agent ISO"
+  when: _cb_build_iso
+  block:
+    - name: "container-build: registry-config with the mirror auth (for client extract)"
+      ansible.builtin.copy:
+        dest: "{{ install_dir }}/abi-rc.json"
+        mode: "0600"
+        content: >-
+          {"auths":{"{{ mirror_private_ip }}:8443":{"auth":"{{
+            ((mirror_init_user | default('mirror-admin')) + ':' + mirror_init_password) | b64encode }}"}}}
+      no_log: true
+
+    # ICSP so `oc adm release extract` redirects the component pulls (the
+    # ocp-v4.0-art-dev @sha256 images holding oc/openshift-install) from quay.io to
+    # the mirror.  Without it, --from only locates the release image and the
+    # component pulls hit quay.io -> unauthorized.
+    - name: "container-build: ICSP mapping quay.io -> mirror (for client extract)"
+      ansible.builtin.copy:
+        dest: "{{ install_dir }}/abi-icsp.yaml"
+        mode: "0644"
+        content: |
+          apiVersion: operator.openshift.io/v1alpha1
+          kind: ImageContentSourcePolicy
+          metadata:
+            name: mirror
+          spec:
+            repositoryDigestMirrors:
+            - source: quay.io/openshift-release-dev/ocp-release
+              mirrors: ["{{ mirror_private_ip }}:8443/openshift/release-images"]
+            - source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
+              mirrors: ["{{ mirror_private_ip }}:8443/openshift/release"]
+
+    # Extract the version-matched oc + openshift-install FROM the mirror release
+    # into a local bin/ dir.  These are RHEL9 binaries — they run INSIDE the UBI9
+    # container (not necessarily on the host).  A bootstrap oc only pulls them out.
+    - name: "container-build: extract oc + openshift-install {{ openshift_version }} from mirror"
+      ansible.builtin.command:
+        argv:
+          - "{{ agent_bootstrap_oc | default('oc') }}"
+          - adm
+          - release
+          - extract
+          - --command={{ item }}
+          - --to={{ install_dir }}/bin
+          - --from={{ mirror_private_ip }}:8443/openshift/release-images:{{ openshift_version }}-x86_64
+          - --registry-config={{ install_dir }}/abi-rc.json
+          - --icsp-file={{ install_dir }}/abi-icsp.yaml
+          - --insecure=true
+      loop:
+        - openshift-install
+        - oc
+      register: _cb_extract
+      changed_when: true
+
+    - name: "container-build: write the in-container build script"
+      ansible.builtin.copy:
+        dest: "{{ install_dir }}/agent-build.sh"
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          set -euo pipefail
+          # Trust the mirror registry CA (openshift-install pulls the release over TLS).
+          cp /work/mirror-ca.crt /etc/pki/ca-trust/source/anchors/mirror-ca.crt
+          update-ca-trust
+          export PATH=/work/bin:$PATH
+          export XDG_CACHE_HOME=/install/.cache TMPDIR=/install/tmp
+          mkdir -p "$XDG_CACHE_HOME" "$TMPDIR"
+          cd /install
+          rm -f agent.x86_64.iso .openshift_install_state.json
+          openshift-install agent create image --dir /install --log-level=info
+          oc version --client
+          openshift-install version
+
+    - name: "container-build: openshift-install agent create image (UBI9 container, host network)"
+      ansible.builtin.command:
+        argv:
+          - podman
+          - run
+          - --rm
+          - --network=host
+          - --security-opt=label=disable
+          - -v
+          - "{{ install_dir }}:/install:z"
+          - -v
+          - "{{ install_dir }}/bin:/work/bin:z"
+          - -v
+          - "{{ output_dir }}/mirror-ca.crt:/work/mirror-ca.crt:ro"
+          - --entrypoint
+          - /bin/bash
+          - "{{ agent_build_image | default('registry.access.redhat.com/ubi9/ubi:latest') }}"
+          - /install/agent-build.sh
+      register: _cb_build
+      changed_when: true
+
+    - name: "container-build: show build tail"
+      ansible.builtin.debug:
+        msg: "{{ _cb_build.stdout_lines[-20:] | default([]) }}"
+
+    - name: "container-build: assert ISO was produced"
+      ansible.builtin.stat:
+        path: "{{ install_dir }}/agent.x86_64.iso"
+      register: _cb_out
+      failed_when: not _cb_out.stat.exists
+
+    # ── push artifacts to the mirror ECS so the existing downstream steps run ────
+    - name: "container-build: ensure build dirs on the mirror ECS"
+      ansible.builtin.shell: >-
+        {{ _ssh_root_mirror }} 'mkdir -p {{ _m_install_dir }}/boot-artifacts'
+      changed_when: true
+
+    - name: "container-build: push agent ISO to the mirror ECS (tar over ssh)"
+      ansible.builtin.shell: >-
+        tar -C {{ install_dir }} -czf - agent.x86_64.iso
+        | {{ _ssh_root_mirror }} 'tar -C {{ _m_install_dir }} -xzf -'
+      changed_when: true
+
+    - name: "container-build: push boot-artifacts (rootfs) to the mirror ECS"
+      ansible.builtin.shell: >-
+        tar -C {{ install_dir }} -czf - boot-artifacts
+        | {{ _ssh_root_mirror }} 'tar -C {{ _m_install_dir }} -xzf -'
+      changed_when: true
+
+- name: "container-build: agent ISO ready on the mirror ECS"
+  ansible.builtin.debug:
+    msg: >-
+      ✓ agent ISO at {{ _m_iso }} on the mirror ECS
+      ({{ 'built in UBI9 container + pushed' if _cb_build_iso else 'reused existing (resume)' }}).
+      Downstream OSS upload / rootfs serve / ImportImage run unchanged.

@@ -462,7 +462,7 @@
     {{ _ssh_root_mirror }} '{{ cloud_cli }} ecs DescribeImages --region {{ region }} --RegionId {{ region }} --ImageId {{ ecs_image_id }} --mode EcsRamRole --ram-role-name $(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/) | jq -r ".Images.Image[0].Status // empty"'
   register: _abi_img_status
   changed_when: false
-  retries: 60
+  retries: 90
   delay: 30
   until: _abi_img_status.stdout | trim == 'Available'
 
