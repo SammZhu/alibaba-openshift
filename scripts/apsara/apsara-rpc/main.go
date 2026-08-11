@@ -6,12 +6,18 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha1"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk"
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/auth/credentials"
@@ -76,18 +82,9 @@ func main() {
 			product, version, action, endpoint, os.Getenv("SCHEME"), os.Getenv("APSARA_PROXY"), insecure)
 	}
 
-	r := requests.NewCommonRequest()
-	sc := requests.HTTP
-	if os.Getenv("SCHEME") == "https" { sc = requests.HTTPS }
-	r.SetScheme(sc)
-	r.Product, r.Version, r.ApiName, r.Domain, r.Method = product, version, action, endpoint, "POST"
-	r.Headers["x-acs-caller-sdk-source"] = "apsara-rpc"
-	r.Headers["x-acs-regionid"] = region
-	if v := os.Getenv("ORG_ID"); v != "" { r.Headers["x-acs-organizationid"] = v }
-	if v := os.Getenv("RG_ID"); v != "" { r.Headers["x-acs-resourcegroupid"] = v }
-	r.QueryParams["Action"] = action
-	r.QueryParams["RegionId"] = region
-
+	// Parse --Key val / --Key=val / --Key=@file into a param map.
+	cli := map[string]string{}   // normal params (query)
+	large := map[string]string{} // big params -> body on the SDK path
 	args := os.Args[4:]
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -104,14 +101,111 @@ func main() {
 			b, e := os.ReadFile(val[1:]); if e != nil { die("read", val[1:], ":", e) }; val = string(b)
 		}
 		if len(val) > 1024 || k == "TemplateBody" || k == "PolicyDocument" {
-			r.FormParams[k] = val // 大参数走 body
+			large[k] = val
 		} else {
-			r.QueryParams[k] = val
+			cli[k] = val
 		}
 	}
+
+	// Native send path (NATIVE_SEND=1): sign with ACS Signature v1 and send with
+	// a bare net/http client, bypassing the SDK's send path.  The CloudDns POP
+	// (dns-control.pop.cloud.ste3.com) is HTTPS-only and reachable only through
+	// the Squid proxy; over that CONNECT tunnel the SDK's own send is rejected
+	// with InvalidProtocol.NeedSsl, while a plain http.Client over the identical
+	// transport passes (verified).  Only cloudcli's POP products set this, so
+	// ROS/ECS/VPC/RAM keep using the SDK unchanged.
+	if os.Getenv("NATIVE_SEND") == "1" {
+		for k, v := range large { cli[k] = v } // native puts everything in the query
+		var px *url.URL
+		if p := os.Getenv("APSARA_PROXY"); p != "" {
+			if pu, e := url.Parse(p); e == nil { px = pu }
+		}
+		nativeSend(endpoint, version, action, region, cli, insecure, px)
+		return
+	}
+
+	// SDK path (default): unchanged behaviour for ROS/ECS/VPC/RAM/...
+	r := requests.NewCommonRequest()
+	sc := requests.HTTP
+	if os.Getenv("SCHEME") == "https" { sc = requests.HTTPS }
+	r.SetScheme(sc)
+	r.Product, r.Version, r.ApiName, r.Domain, r.Method = product, version, action, endpoint, "POST"
+	r.Headers["x-acs-caller-sdk-source"] = "apsara-rpc"
+	r.Headers["x-acs-regionid"] = region
+	if v := os.Getenv("ORG_ID"); v != "" { r.Headers["x-acs-organizationid"] = v }
+	if v := os.Getenv("RG_ID"); v != "" { r.Headers["x-acs-resourcegroupid"] = v }
+	r.QueryParams["Action"] = action
+	r.QueryParams["RegionId"] = region
+	for k, v := range cli { r.QueryParams[k] = v }
+	for k, v := range large { r.FormParams[k] = v } // 大参数走 body
 	r.SetContentType(requests.Form)
 
 	resp, err := client.ProcessCommonRequest(r)
 	if err != nil { die(err) }
 	fmt.Println(resp.GetHttpContentString())
+}
+
+// acsEscape percent-encodes per ACS Signature v1 (RFC3986 + Aliyun tweaks).
+func acsEscape(s string) string {
+	e := url.QueryEscape(s)
+	e = strings.ReplaceAll(e, "+", "%20")
+	e = strings.ReplaceAll(e, "*", "%2A")
+	e = strings.ReplaceAll(e, "%7E", "~")
+	return e
+}
+
+// nativeSend signs an RPC request with ACS Signature v1 (HMAC-SHA1) and sends it
+// with a plain net/http client.  See the NATIVE_SEND note in main() for why.
+func nativeSend(endpoint, version, action, region string, cli map[string]string,
+	insecure bool, proxy *url.URL) {
+
+	ak, sk, st := os.Getenv("AK"), os.Getenv("SK"), os.Getenv("STS_TOKEN")
+
+	p := map[string]string{}
+	for k, v := range cli { p[k] = v }
+	p["Action"] = action
+	p["Version"] = version
+	p["Format"] = "JSON"
+	p["AccessKeyId"] = ak
+	p["SignatureMethod"] = "HMAC-SHA1"
+	p["SignatureVersion"] = "1.0"
+	p["SignatureNonce"] = fmt.Sprintf("%d%d", time.Now().UnixNano(), os.Getpid())
+	p["Timestamp"] = time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	if _, ok := p["RegionId"]; !ok { p["RegionId"] = region }
+	if st != "" { p["SecurityToken"] = st }
+
+	// canonicalized query = sorted key=acsEscape(value) joined by '&'
+	keys := make([]string, 0, len(p))
+	for k := range p { keys = append(keys, k) }
+	sort.Strings(keys)
+	parts := make([]string, 0, len(p))
+	for _, k := range keys {
+		parts = append(parts, acsEscape(k)+"="+acsEscape(p[k]))
+	}
+	canon := strings.Join(parts, "&")
+	sts := "POST&" + acsEscape("/") + "&" + acsEscape(canon)
+	mac := hmac.New(sha1.New, []byte(sk+"&"))
+	mac.Write([]byte(sts))
+	sig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+
+	target := "https://" + endpoint + "/?" + canon + "&Signature=" + acsEscape(sig)
+	req, err := http.NewRequest("POST", target, nil)
+	if err != nil { die("native build:", err) }
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("x-acs-caller-sdk-source", "apsara-rpc")
+	req.Header.Set("x-acs-regionid", region)
+	if v := os.Getenv("ORG_ID"); v != "" { req.Header.Set("x-acs-organizationid", v) }
+	if v := os.Getenv("RG_ID"); v != "" { req.Header.Set("x-acs-resourcegroupid", v) }
+
+	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure}}
+	if proxy != nil { tr.Proxy = http.ProxyURL(proxy) }
+	if os.Getenv("APSARA_RPC_DEBUG") == "1" {
+		fmt.Fprintf(os.Stderr, "[apsara-rpc] NATIVE_SEND %s proxy=%v insecure=%v\n", target, proxy, insecure)
+	}
+	resp, err := (&http.Client{Transport: tr}).Do(req)
+	if err != nil { die("native send:", err) }
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	fmt.Println(string(b))
+	if resp.StatusCode >= 300 { os.Exit(1) } // surface API errors to run_cli
 }
