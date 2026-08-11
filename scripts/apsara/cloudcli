@@ -35,12 +35,21 @@ PRODUCTS = {
     "vpc": ("Vpc", "2016-04-28"),
     "ram": ("Ram", "2015-05-01"),
     "pvtz": ("Pvtz", "2018-01-01"),
+    "clouddns": ("CloudDns", "2021-06-24"),  # Apsara PrivateZone lives here (POP)
     "slb": ("Slb", "2014-05-15"),
     "nlb": ("Nlb", "2022-04-30"),
 }
 
 # Products whose Apsara endpoint requires HTTPS (RAM returns NeedSsl over HTTP).
 HTTPS_PRODUCTS = {"ram"}
+
+# Products served by a POP gateway that only accepts requests over HTTP-through-
+# the-proxy with a SecureTransport=true signed param (a real HTTPS/CONNECT tunnel
+# is rejected).  The aliyun SDK's send path does not work there, so apsara-rpc
+# signs (ACS v1) and sends with a bare http.Client — enabled via NATIVE_SEND=1.
+# See project_apsara_clouddns_pvtz memory + docs.  Endpoint = ENDPOINT_CLOUDDNS
+# (dns-control.pop.cloud.ste3.com), set in the environment / group_vars.
+NATIVE_PRODUCTS = {"clouddns"}
 
 
 def main():
@@ -106,6 +115,10 @@ def main():
 
     if key in HTTPS_PRODUCTS:
         env["SCHEME"] = "https"
+        env.setdefault("INSECURE", "1")
+
+    if key in NATIVE_PRODUCTS:
+        env["NATIVE_SEND"] = "1"
         env.setdefault("INSECURE", "1")
 
     # Prefer the apsara-rpc binary built next to this script (scripts/apsara/
