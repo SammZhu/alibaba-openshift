@@ -120,12 +120,16 @@
 
 # ── render configs + manifests into a LOCAL staging dir on the operator host ──
 # (render-on-operator rule); this dir is then scp'd to the mirror ECS.
+# mirror-ECS path: wipe + recreate (fresh render, then scp'd to the mirror).
+# container path: DO NOT wipe — the build output (auth/, .openshift_install_state.json,
+# bin/openshift-install) stays in install_dir on THIS host and is consumed by 07's
+# local `agent wait-for`.  A resume (skipped rebuild) must keep those assets.
 - name: ABI — reset local staging install_dir
   ansible.builtin.file:
     path: "{{ install_dir }}"
     state: "{{ item }}"
     mode: "0755"
-  loop: [absent, directory]
+  loop: "{{ ['absent', 'directory'] if not (_agent_build_container | default(false)) else ['directory'] }}"
 
 - name: ABI — create local install_dir/openshift
   ansible.builtin.file:
