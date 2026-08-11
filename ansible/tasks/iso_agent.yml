@@ -28,7 +28,12 @@
   ansible.builtin.set_fact:
     _ssh_keepalive: "-o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes"
     _ssh_common_args: "-i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes"
-    _ssh_proxy_args: "-o ProxyCommand='ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}'"
+    # Jump host (public cloud) -> ProxyCommand.  Direct reachability (apsara VPC
+    # peering / BYO, jump_host_ip empty) -> no ProxyCommand, connect straight to
+    # mirror_private_ip.  Same pattern as 04-prepare-mirror.yml.
+    _ssh_proxy_args: >-
+      {{ ("-o ProxyCommand='ssh -i " ~ ssh_priv_key_file ~ " -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@" ~ jump_host_ip ~ "'")
+         if (jump_host_ip | default('')) | length > 0 else "" }}
     # All build artifacts live on the 200 GB data disk, never the 40 GB system disk.
     _m_build_dir: /var/lib/quay-storage/agent-build
     _m_install_dir: /var/lib/quay-storage/agent-build/install
@@ -46,13 +51,15 @@
     that:
       - mirror_enabled | default(false) | bool
       - mirror_private_ip is defined and mirror_private_ip | length > 0
-      - jump_host_ip is defined and jump_host_ip | length > 0
+      # apsara: Helper reaches mirror_private_ip directly via VPC peering — no jump host.
+      - (jump_host_ip | default('') | length > 0) or (cloud_platform | default('public')) == 'apsara'
       - rendezvous_ip is defined and rendezvous_ip | length > 0
       - mirror_vpc_id is defined and mirror_vpc_id | length > 0
       - mirror_private_vsw_1 is defined and mirror_private_vsw_1 | length > 0
     fail_msg: >-
-      ABI build needs a running mirror (03/04/05) + jump host + rendezvous_ip.
-      mirror_enabled must be true (the agent ISO is built on the mirror ECS).
+      ABI build needs a running mirror (03/04/05) + a route to it (jump host on
+      public cloud, or direct/peering on apsara) + rendezvous_ip.  mirror_enabled
+      must be true (the agent ISO is built on the mirror ECS).
 
 # ── pull secret (+ mirror auth) + ssh key + mirror CA — for rendering ────────
 - name: ABI — read pull secret + ssh public key
