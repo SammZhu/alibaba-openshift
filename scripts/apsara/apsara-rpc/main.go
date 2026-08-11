@@ -216,7 +216,12 @@ func nativeSend(endpoint, version, action, region string, cli map[string]string,
 	if v := os.Getenv("ORG_ID"); v != "" { req.Header.Set("x-acs-organizationid", v) }
 	if v := os.Getenv("RG_ID"); v != "" { req.Header.Set("x-acs-resourcegroupid", v) }
 
-	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure}}
+	tr := &http.Transport{
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: insecure},
+		ForceAttemptHTTP2: false,
+		// Force HTTP/1.1 over the tunnel (disable h2), matching curl.
+		TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{},
+	}
 	if proxy != nil { tr.Proxy = http.ProxyURL(proxy) }
 	if os.Getenv("APSARA_RPC_DEBUG") == "1" {
 		fmt.Fprintf(os.Stderr, "[apsara-rpc] NATIVE_SEND %s proxy=%v insecure=%v\n", target, proxy, insecure)
@@ -224,6 +229,9 @@ func nativeSend(endpoint, version, action, region string, cli map[string]string,
 	resp, err := (&http.Client{Transport: tr}).Do(req)
 	if err != nil { die("native send:", err) }
 	defer resp.Body.Close()
+	if os.Getenv("APSARA_RPC_DEBUG") == "1" {
+		fmt.Fprintf(os.Stderr, "[apsara-rpc] resp proto=%s status=%s tls=%v\n", resp.Proto, resp.Status, resp.TLS != nil)
+	}
 	b, _ := io.ReadAll(resp.Body)
 	fmt.Println(string(b))
 	if resp.StatusCode >= 300 { os.Exit(1) } // surface API errors to run_cli
