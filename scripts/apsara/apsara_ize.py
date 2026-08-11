@@ -42,6 +42,15 @@ BARE_KEY = {"Ref", "Condition"}
 # Resource types Apsara lacks — dropped, replaced by an explicit-id parameter.
 REMOVE_TYPES = {"DATASOURCE::ECS::Images"}
 
+# Resource types provisioned OUTSIDE ROS on Apsara (dropped here, created by
+# ansible after the stack).  All private-DNS (PVTZ) resources: on Apsara
+# PrivateZone is served by the CloudDns POP (see project_apsara_clouddns_pvtz),
+# which ROS cannot reach — ROS would hit the public pvtz.aliyuncs.com and fail.
+# ansible/tasks/apsara_privatezone.yml builds the zone/binding/records via
+# `cloudcli clouddns`; 99-teardown deletes it.  DependsOn/Outputs that reference
+# these dropped resources are cleaned up automatically below.
+DROP_TYPE_PREFIXES = ("ALIYUN::PVTZ::",)
+
 # Properties to strip per resource type (Apsara rejects them).
 PROP_STRIP = {"ALIYUN::PVTZ::Zone": ["Tags"]}
 
@@ -145,6 +154,44 @@ def main():
 
     d = walk(d, repl)
 
+    # 2b. Drop PVTZ resources — provisioned by ansible (CloudDns) after the stack.
+    res = d.get("Resources", {})  # re-fetch: walk() above rebuilt d into a new dict
+    dropped_pvtz = [n for n in list(res)
+                    if any(res[n].get("Type", "").startswith(p) for p in DROP_TYPE_PREFIXES)]
+    for n in dropped_pvtz:
+        del res[n]
+    dropped = set(dropped_pvtz)
+
+    # Clean DependsOn entries pointing at dropped resources.
+    for r in res.values():
+        dep = r.get("DependsOn")
+        if isinstance(dep, list):
+            kept = [x for x in dep if x not in dropped]
+            if kept:
+                r["DependsOn"] = kept
+            else:
+                r.pop("DependsOn", None)
+        elif isinstance(dep, str) and dep in dropped:
+            r.pop("DependsOn", None)
+
+    # Drop Outputs whose Value references a dropped resource (Ref / GetAtt).
+    def refs_dropped(x):
+        if isinstance(x, dict):
+            if x.get("Ref") in dropped:
+                return True
+            ga = x.get("Fn::GetAtt")
+            if isinstance(ga, list) and ga and ga[0] in dropped:
+                return True
+            return any(refs_dropped(v) for v in x.values())
+        if isinstance(x, list):
+            return any(refs_dropped(v) for v in x)
+        return False
+
+    outs = d.get("Outputs", {})
+    for oname in list(outs):
+        if refs_dropped(outs[oname].get("Value")):
+            del outs[oname]
+
     # 3. Strip properties Apsara rejects.
     for r in d.get("Resources", {}).values():
         st = PROP_STRIP.get(r.get("Type"))
@@ -161,6 +208,7 @@ def main():
     yaml.safe_load(open(dst))  # fail loudly if we emitted invalid YAML
     print("OK", src, "->", dst,
           "| removed", list(removed),
+          "| dropped-pvtz", dropped_pvtz,
           "| stripped", PROP_STRIP,
           "| subst", {k: list(v.values()) for k, v in VALUE_SUBST.items()})
 
