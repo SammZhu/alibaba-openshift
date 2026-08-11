@@ -196,6 +196,11 @@ func nativeSend(endpoint, version, action, region string, cli map[string]string,
 	req.Header.Set("x-acs-regionid", region)
 	if v := os.Getenv("ORG_ID"); v != "" { req.Header.Set("x-acs-organizationid", v) }
 	if v := os.Getenv("RG_ID"); v != "" { req.Header.Set("x-acs-resourcegroupid", v) }
+	// The POP validates SSL AFTER the signature; when we tunnel through the proxy
+	// it wants an explicit assertion that the original transport was secure, or it
+	// returns InvalidProtocol.NeedSsl.  (Mirrors the SDK's SecureTransport header.)
+	req.Header.Set("x-acs-proxy-secure-transport", "true")
+	if v := os.Getenv("PROXY_SOURCE_IP"); v != "" { req.Header.Set("x-acs-proxy-source-ip", v) }
 
 	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure}}
 	if proxy != nil { tr.Proxy = http.ProxyURL(proxy) }
