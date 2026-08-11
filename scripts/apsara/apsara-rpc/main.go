@@ -210,11 +210,13 @@ func nativeSend(endpoint, version, action, region string, cli map[string]string,
 	target := "https://" + endpoint + "/?" + canon + "&Signature=" + acsEscape(sig)
 	req, err := http.NewRequest("POST", target, nil)
 	if err != nil { die("native build:", err) }
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("x-acs-caller-sdk-source", "apsara-rpc")
-	req.Header.Set("x-acs-regionid", region)
-	if v := os.Getenv("ORG_ID"); v != "" { req.Header.Set("x-acs-organizationid", v) }
-	if v := os.Getenv("RG_ID"); v != "" { req.Header.Set("x-acs-resourcegroupid", v) }
+	if os.Getenv("NATIVE_MINIMAL_HEADERS") != "1" {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("x-acs-caller-sdk-source", "apsara-rpc")
+		req.Header.Set("x-acs-regionid", region)
+		if v := os.Getenv("ORG_ID"); v != "" { req.Header.Set("x-acs-organizationid", v) }
+		if v := os.Getenv("RG_ID"); v != "" { req.Header.Set("x-acs-resourcegroupid", v) }
+	}
 
 	tr := &http.Transport{
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: insecure},
