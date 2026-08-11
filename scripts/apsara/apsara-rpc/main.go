@@ -207,7 +207,12 @@ func nativeSend(endpoint, version, action, region string, cli map[string]string,
 	mac.Write([]byte(sts))
 	sig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
 
-	target := "https://" + endpoint + "/?" + canon + "&Signature=" + acsEscape(sig)
+	// IMPORTANT: the CloudDns POP is reached over HTTP THROUGH the proxy, with the
+	// SecureTransport=true + SourceIp signed params asserting the original hop was
+	// secure — this is the SDK's SecureTransport mechanism and it is what the POP
+	// accepts.  A real HTTPS CONNECT tunnel to the POP is *rejected* with
+	// InvalidProtocol.NeedSsl, counter-intuitive as that is (verified empirically).
+	target := "http://" + endpoint + "/?" + canon + "&Signature=" + acsEscape(sig)
 	if os.Getenv("NATIVE_DRYRUN") == "1" { fmt.Println(target); return } // print signed URL, don't send
 	req, err := http.NewRequest("POST", target, nil)
 	if err != nil { die("native build:", err) }
