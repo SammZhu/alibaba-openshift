@@ -12,6 +12,11 @@
 - name: Build OpenShift agent ISO + import image (Agent-based Installer)
   hosts: local
   gather_facts: false
+  # apsara: carries CLOUD_PLATFORM + AK/SK + endpoints (incl. ENDPOINT_ECS) +
+  # APSARA_PROXY + org/rg so the operator-host cloudcli calls (container build's
+  # release extract, and the local ImportImage/adopt/poll) work.  Public cloud:
+  # cloud_env is {} — a no-op (those steps run on the mirror ECS instead).
+  environment: "{{ cloud_env | default({}) }}"
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
     - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
