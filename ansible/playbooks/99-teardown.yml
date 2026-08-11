@@ -266,6 +266,15 @@
         - teardown_target in ['cluster', 'both']
         - cluster_stack_id is defined and cluster_stack_id | length > 0
       block:
+        # apsara: the private DNS is a CloudDns PrivateZone (not a ROS resource, so
+        # DeleteStack won't remove it).  Delete it first — DeletePrivateZone cascades
+        # (records + VPC bindings).  Best-effort; tolerates an already-gone zone.
+        - name: Apsara — delete CloudDns PrivateZone
+          ansible.builtin.include_tasks: ../tasks/apsara_privatezone_teardown.yml
+          when:
+            - (cloud_platform | default('public')) == 'apsara'
+            - forward_zone_id is defined and forward_zone_id | length > 0
+
         - name: DeleteStack — cluster
           ansible.builtin.command:
             argv:

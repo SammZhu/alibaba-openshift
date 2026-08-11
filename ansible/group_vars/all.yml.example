@@ -44,7 +44,12 @@ cloud_env:           {}         # apsara -> { CLOUD_PLATFORM: apsara, AK: .., SK
                                 #   REGION: cn-wulan-ste3-d01, APSARA_PROXY: http://..:3128,
                                 #   ORG_ID: org-.., RG_ID: rs-.., ENDPOINT_ROS: ros.cloud.ste3.com,
                                 #   ENDPOINT_ECS: .., ENDPOINT_VPC: vpc.cloud.ste3.com,
-                                #   ENDPOINT_RAM: ram.cloud.ste3.com }
+                                #   ENDPOINT_RAM: ram.cloud.ste3.com,
+                                #   ENDPOINT_CLOUDDNS: dns-control.pop.cloud.ste3.com }
+                                # ENDPOINT_CLOUDDNS = the DNS POP (private DNS / PrivateZone);
+                                # from Tianji: dnsProduct/dnsService docker env pop_out_endpoint.
+                                # cloudcli routes `clouddns` there via apsara-rpc NATIVE_SEND
+                                # (HTTP + SecureTransport through the proxy).
 # apsara only: explicit image id (apsara_ize turns the DataSource image lookups
 # into MirrorImageId/JumpHostImageId params).  DescribeImages -> ImageId (== the
 # .vhd name on ste3), e.g. aliyun_4_x86_64_20G_alibase_20260407.vhd

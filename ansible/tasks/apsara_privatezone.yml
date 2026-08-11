@@ -1,0 +1,104 @@
+# apsara_privatezone.yml — create the cluster's private DNS on Apsara via the
+# CloudDns POP (cloudcli clouddns -> apsara-rpc NATIVE_SEND).  This replaces the
+# ALIYUN::PVTZ::* resources that apsara_ize.py strips from cluster-stack: on
+# Apsara PrivateZone is served by the CloudDns POP, which ROS cannot reach (ROS
+# would call the public pvtz.aliyuncs.com and fail).  See the memory note
+# project_apsara_clouddns_pvtz for the full recipe (HTTP+SecureTransport via proxy,
+# BindZoneVpc needs Id+Name, DeletePrivateZone cascades).
+#
+# Runs under the caller's `environment: cloud_env` (CLOUD_PLATFORM=apsara, AK/SK,
+# ORG_ID/RG_ID, APSARA_PROXY, ENDPOINT_CLOUDDNS=dns-control.pop.cloud.ste3.com).
+# cloudcli maps `clouddns` -> (CloudDns, 2021-06-24) and auto-sets NATIVE_SEND.
+#
+# Inputs (already in scope in 06): cluster_name, base_domain, region, cloud_cli,
+#   aliyun_profile, master_ip1 (SNO node IP), mirror_vpc_id (the cluster VPC),
+#   apsara_peer_operator_vpc_id (operator/Helper VPC — optional, for `oc` access).
+# Sets: forward_zone_id — the new zone's Id (caller saves it to state).
+#
+# SNO only for now: api / api-int / *.apps / etcd-0 all resolve to the single
+# master IP (no NLB).  HA would point api/api-int at the NLB instead.
+
+- name: "clouddns: create PrivateZone {{ cluster_name }}.{{ base_domain }}."
+  ansible.builtin.command:
+    argv:
+      - "{{ cloud_cli }}"
+      - clouddns
+      - AddPrivateZone
+      - --Name
+      - "{{ cluster_name }}.{{ base_domain }}."   # trailing dot is REQUIRED
+      - --RegionId
+      - "{{ region }}"
+      - --profile
+      - "{{ aliyun_profile }}"
+  register: _cd_zone
+  changed_when: true
+  failed_when: (_cd_zone.rc != 0) or ('"asapiSuccess":true' not in _cd_zone.stdout)
+
+- name: "clouddns: set forward_zone_id"
+  ansible.builtin.set_fact:
+    forward_zone_id: "{{ (_cd_zone.stdout | from_json).Id }}"
+
+# Bind the zone to every VPC that must resolve it: the cluster VPC (so the node
+# resolves api-int/*.apps to itself) and the operator VPC (so the Helper resolves
+# api.<cluster> over the peering to run `oc`).  BindZoneVpc requires BOTH Id and
+# Name per VPC entry (the doc marks Name optional but the POP rejects without it).
+- name: "clouddns: VPC list to bind (cluster + operator)"
+  ansible.builtin.set_fact:
+    _cd_bind_vpcs: "{{ [mirror_vpc_id]
+                       + ([apsara_peer_operator_vpc_id]
+                          if (apsara_peer_operator_vpc_id | default('') | length > 0) else []) }}"
+
+- name: "clouddns: build BindZoneVpc argv"
+  ansible.builtin.set_fact:
+    _cd_vpc_argv: "{{ _cd_vpc_argv | default([])
+                      + ['--Vpcs.' ~ (idx + 1) ~ '.Id', item,
+                         '--Vpcs.' ~ (idx + 1) ~ '.Name', cluster_name ~ '-vpc-' ~ (idx + 1)] }}"
+  loop: "{{ _cd_bind_vpcs }}"
+  loop_control:
+    index_var: idx
+
+- name: "clouddns: bind zone to VPCs"
+  ansible.builtin.command:
+    argv: "{{ [cloud_cli, 'clouddns', 'BindZoneVpc', '--Id', forward_zone_id, '--RegionId', region]
+              + _cd_vpc_argv + ['--profile', aliyun_profile] }}"
+  register: _cd_bind
+  changed_when: true
+  failed_when: (_cd_bind.rc != 0) or ('"asapiSuccess":true' not in _cd_bind.stdout)
+
+- name: "clouddns: add A records (api / api-int / *.apps / etcd-0 -> {{ master_ip1 }})"
+  ansible.builtin.command:
+    argv:
+      - "{{ cloud_cli }}"
+      - clouddns
+      - AddPrivateZoneRecord
+      - --ZoneId
+      - "{{ forward_zone_id }}"
+      - --Name
+      - "{{ item }}"
+      - --Type
+      - A
+      - --Ttl
+      - "60"
+      - --LbaStrategy
+      - ALL_RR
+      - --RDatas.1.Value
+      - "{{ master_ip1 }}"
+      - --LineIds
+      - '["default"]'
+      - --profile
+      - "{{ aliyun_profile }}"
+  loop:
+    - api
+    - api-int
+    - "*.apps"
+    - etcd-0
+  register: _cd_recs
+  changed_when: true
+  failed_when: (_cd_recs.rc != 0) or ('"asapiSuccess":true' not in _cd_recs.stdout)
+
+- name: "clouddns: private zone ready"
+  ansible.builtin.debug:
+    msg: |
+      ✓ CloudDns PrivateZone {{ cluster_name }}.{{ base_domain }} (id={{ forward_zone_id }})
+        bound VPCs : {{ _cd_bind_vpcs | join(', ') }}
+        records    : api, api-int, *.apps, etcd-0 -> {{ master_ip1 }}

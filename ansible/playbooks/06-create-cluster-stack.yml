@@ -263,8 +263,10 @@
         master_ip1:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp1')           | first).OutputValue }}"
         master_ip2:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp2')           | first).OutputValue }}"
         master_ip3:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp3')           | first).OutputValue }}"
-        reverse_zone_id1: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId1')      | first).OutputValue }}"
-        reverse_zone_id2: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId2')      | first).OutputValue }}"
+        # Tolerant lookups: on Apsara apsara_ize.py drops the PVTZ ReverseZone
+        # resources AND their ReverseZoneId outputs, so these are absent there.
+        reverse_zone_id1: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId1')      | list | first | default({})).OutputValue | default('') }}"
+        reverse_zone_id2: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId2')      | list | first | default({})).OutputValue | default('') }}"
         reverse_zone_id3: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId3')      | list | first | default({})).OutputValue | default('') }}"
         dynamic_manifest: "{{ (_cs_outputs | selectattr('OutputKey','equalto','DynamicCustomManifest')| first).OutputValue }}"
 
@@ -336,6 +338,16 @@
         dest: "{{ output_dir }}/alibaba-ccm-config.yaml"
         mode: "0644"
 
+    # ── Apsara: private DNS = CloudDns POP (apsara_ize.py stripped the ROS PVTZ
+    # resources because ROS can't reach it).  Create the zone + VPC binding +
+    # api/api-int/*.apps/etcd-0 records here via cloudcli clouddns.  Sets
+    # forward_zone_id.  SNO only for now (records -> single master IP).
+    - name: Apsara — provision CloudDns PrivateZone (zone + binding + records)
+      ansible.builtin.include_tasks: ../tasks/apsara_privatezone.yml
+      when:
+        - (cloud_platform | default('public')) == 'apsara'
+        - (cluster_topology | default('ha')) == 'sno'
+
     - name: Resolve forward-zone ID by name (for Phase 07 PTR/DNS PATCHes)
       ansible.builtin.command:
         argv:
@@ -348,8 +360,10 @@
           - "{{ aliyun_profile }}"
       register: _pvtz_list
       changed_when: false
+      when: (cloud_platform | default('public')) != 'apsara'   # apsara set forward_zone_id above (CloudDns)
 
     - name: Set forward_zone_id fact
+      when: (cloud_platform | default('public')) != 'apsara'
       # Don't use json_query — it needs the community.general collection
       # which the RHEL 8 default ansible install does not ship.  Plain dict
       # attribute access works (and is equally idempotent: on a miss,

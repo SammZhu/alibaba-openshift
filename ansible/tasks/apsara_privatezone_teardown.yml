@@ -1,0 +1,22 @@
+# apsara_privatezone_teardown.yml — delete the cluster's CloudDns PrivateZone on
+# Apsara.  DeletePrivateZone cascades (removes records + unbinds every VPC), so a
+# single call is the whole teardown.  Counterpart of apsara_privatezone.yml.
+# Gated by the caller on cloud_platform == apsara + forward_zone_id present.
+
+- name: "clouddns teardown: delete PrivateZone {{ forward_zone_id }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ cloud_cli }}"
+      - clouddns
+      - DeletePrivateZone
+      - --Id
+      - "{{ forward_zone_id }}"
+      - --profile
+      - "{{ aliyun_profile }}"
+  register: _cd_del
+  changed_when: "'\"asapiSuccess\":true' in (_cd_del.stdout | default(''))"
+  failed_when: false   # tolerate already-deleted / missing zone — teardown is best-effort
+
+- name: "clouddns teardown: result"
+  ansible.builtin.debug:
+    msg: "DeletePrivateZone {{ forward_zone_id }} -> rc={{ _cd_del.rc | default('?') }} {{ (_cd_del.stdout | default('')) | trim }}"
