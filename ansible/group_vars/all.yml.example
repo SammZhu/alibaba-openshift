@@ -189,6 +189,17 @@ output_dir:           "{{ lookup('env', 'HOME') }}/openshift-install/{{ cluster_
 #               Value is matched case-insensitively.
 installation_method:  Assisted
 
+# Agent ISO build location (installation_method=agent only):
+#   mirror-ecs (default) — build on the mirror ECS.  Requires the mirror ECS glibc
+#     to match the OCP clients (fine for RHEL8-era hosts).
+#   container            — build on THIS operator host in a UBI9 container (podman).
+#     Portable (host OS-agnostic) and REQUIRED when the mirror ECS glibc is too old
+#     for RHEL9 OCP clients — e.g. Alibaba Cloud Linux 3 (glibc 2.32) with OCP
+#     4.16+ clients (need glibc 2.34).  Needs podman + a pullable UBI9 image.
+agent_iso_build:      mirror-ecs
+# agent_build_image:   registry.access.redhat.com/ubi9/ubi:latest   # container path base
+# agent_bootstrap_oc:  oc     # host oc used only to extract version-matched clients
+
 # ── Repo locations on the local machine ──────────────────────────────────────
 repo_root:            "{{ playbook_dir }}/../.."
 
