@@ -208,6 +208,7 @@ func nativeSend(endpoint, version, action, region string, cli map[string]string,
 	sig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
 
 	target := "https://" + endpoint + "/?" + canon + "&Signature=" + acsEscape(sig)
+	if os.Getenv("NATIVE_DRYRUN") == "1" { fmt.Println(target); return } // print signed URL, don't send
 	req, err := http.NewRequest("POST", target, nil)
 	if err != nil { die("native build:", err) }
 	if os.Getenv("NATIVE_MINIMAL_HEADERS") != "1" {
