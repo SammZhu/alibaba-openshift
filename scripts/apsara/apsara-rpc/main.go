@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -145,6 +146,15 @@ func main() {
 	fmt.Println(resp.GetHttpContentString())
 }
 
+// localIP returns this host's outbound IP (no packet sent — UDP "dial" just picks
+// the routing interface).  Used as the SecureTransport SourceIp assertion.
+func localIP() string {
+	c, err := net.Dial("udp", "100.100.100.200:80")
+	if err != nil { return "127.0.0.1" }
+	defer c.Close()
+	return c.LocalAddr().(*net.UDPAddr).IP.String()
+}
+
 // acsEscape percent-encodes per ACS Signature v1 (RFC3986 + Aliyun tweaks).
 func acsEscape(s string) string {
 	e := url.QueryEscape(s)
@@ -173,6 +183,15 @@ func nativeSend(endpoint, version, action, region string, cli map[string]string,
 	p["Timestamp"] = time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	if _, ok := p["RegionId"]; !ok { p["RegionId"] = region }
 	if st != "" { p["SecurityToken"] = st }
+	// The POP enforces its SSL requirement AFTER signature validation; when the
+	// request is tunnelled through the proxy it must carry the SecureTransport
+	// assertion as SIGNED QUERY PARAMS — SourceIp (non-empty) + SecureTransport=true
+	// — exactly as the SDK does for RPC requests (see client.go DoAction). Headers
+	// alone do NOT satisfy it (verified).
+	src := os.Getenv("PROXY_SOURCE_IP")
+	if src == "" { src = localIP() }
+	p["SourceIp"] = src
+	p["SecureTransport"] = "true"
 
 	// canonicalized query = sorted key=acsEscape(value) joined by '&'
 	keys := make([]string, 0, len(p))
@@ -196,11 +215,6 @@ func nativeSend(endpoint, version, action, region string, cli map[string]string,
 	req.Header.Set("x-acs-regionid", region)
 	if v := os.Getenv("ORG_ID"); v != "" { req.Header.Set("x-acs-organizationid", v) }
 	if v := os.Getenv("RG_ID"); v != "" { req.Header.Set("x-acs-resourcegroupid", v) }
-	// The POP validates SSL AFTER the signature; when we tunnel through the proxy
-	// it wants an explicit assertion that the original transport was secure, or it
-	// returns InvalidProtocol.NeedSsl.  (Mirrors the SDK's SecureTransport header.)
-	req.Header.Set("x-acs-proxy-secure-transport", "true")
-	if v := os.Getenv("PROXY_SOURCE_IP"); v != "" { req.Header.Set("x-acs-proxy-source-ip", v) }
 
 	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure}}
 	if proxy != nil { tr.Proxy = http.ProxyURL(proxy) }
