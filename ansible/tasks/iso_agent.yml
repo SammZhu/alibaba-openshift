@@ -420,9 +420,17 @@
     UNIT
     systemctl daemon-reload
     systemctl reset-failed abi-rootfs.service 2>/dev/null || true
-    systemctl enable --now abi-rootfs.service
-    sleep 2
-    curl -sS -o /dev/null -w "local rootfs HTTP: %{http_code}\n" http://127.0.0.1:8080/agent.x86_64-rootfs.img -r 0-0'
+    systemctl enable abi-rootfs.service
+    systemctl restart abi-rootfs.service
+    # python http.server takes a moment to bind :8080 (esp. after a 1.2G cp), so
+    # poll instead of a single eager curl.
+    for i in $(seq 1 15); do
+      code=$(curl -sS -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/agent.x86_64-rootfs.img -r 0-0 2>/dev/null || true)
+      echo "attempt $i: local rootfs HTTP $code"
+      if [ "$code" = "200" ] || [ "$code" = "206" ]; then exit 0; fi
+      sleep 2
+    done
+    echo "rootfs HTTP never came up:"; systemctl status abi-rootfs.service --no-pager -l | tail -20; exit 1'
   changed_when: true
 
 - name: ABI — adopt existing agent image by name (idempotent)
