@@ -188,10 +188,12 @@ func nativeSend(endpoint, version, action, region string, cli map[string]string,
 	// assertion as SIGNED QUERY PARAMS — SourceIp (non-empty) + SecureTransport=true
 	// — exactly as the SDK does for RPC requests (see client.go DoAction). Headers
 	// alone do NOT satisfy it (verified).
-	src := os.Getenv("PROXY_SOURCE_IP")
-	if src == "" { src = localIP() }
-	p["SourceIp"] = src
 	p["SecureTransport"] = "true"
+	// SourceIp is NOT a real API parameter — it is only the SecureTransport
+	// assertion's optional companion.  Some actions (e.g. BindZoneVpc) validate it
+	// and reject any value ("InvalidSourceIp"), while SecureTransport=true alone
+	// satisfies the SSL check.  So send SourceIp only when explicitly requested.
+	if src := os.Getenv("PROXY_SOURCE_IP"); src != "" { p["SourceIp"] = src }
 
 	// canonicalized query = sorted key=acsEscape(value) joined by '&'
 	keys := make([]string, 0, len(p))
