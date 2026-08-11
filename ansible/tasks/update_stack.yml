@@ -20,6 +20,26 @@
     content: "{{ _cs_parameters | to_nice_json }}"
     mode: "0600"
 
+# Apsara ROS rejects the public-cloud template verbatim (short intrinsic tags,
+# etc.) — transform it the same way create_stack.yml does, or UpdateStack fails
+# with "TemplateBody ... not of JSON or YAML format".  Public cloud uses it as-is.
+- name: "update_stack [{{ _cs_stack_name }}] — (apsara) transform template for Apsara"
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ repo_root }}/scripts/apsara/apsara_ize.py"
+      - "{{ _cs_template_path }}"
+      - "/tmp/{{ _cs_stack_name }}.apsara.yaml"
+  changed_when: true
+  when: (cloud_platform | default('public')) == 'apsara'
+
+- name: "update_stack [{{ _cs_stack_name }}] — resolve effective template path"
+  ansible.builtin.set_fact:
+    _cs_effective_template: >-
+      {{ ('/tmp/' + _cs_stack_name + '.apsara.yaml')
+         if ((cloud_platform | default('public')) == 'apsara')
+         else _cs_template_path }}
+
 - name: "update_stack [{{ _cs_stack_name }}] — submit UpdateStack"
   ansible.builtin.shell: |
     set -euo pipefail
@@ -35,7 +55,7 @@
     cmd = ["{{ cloud_cli }}", "ros", "UpdateStack",
            "--RegionId", "{{ region }}",
            "--StackId", "{{ _cs_stack_id }}",
-           "--TemplateBody", open("{{ _cs_template_path }}").read(),
+           "--TemplateBody", open("{{ _cs_effective_template }}").read(),
            "--profile", "{{ aliyun_profile }}",
            *cli_params]
     r = subprocess.run(cmd, capture_output=True, text=True)
