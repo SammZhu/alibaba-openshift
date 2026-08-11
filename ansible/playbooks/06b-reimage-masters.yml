@@ -18,6 +18,10 @@
 - name: Reimage control-plane masters to the agent image (ABI ENI-first phase-2)
   hosts: local
   gather_facts: false
+  # apsara: cloud_env carries CLOUD_PLATFORM + AK/SK + endpoints (ENDPOINT_ROS/ECS)
+  # + APSARA_PROXY + org/rg for the local cloudcli UpdateStack/ECS calls.  Public
+  # cloud: cloud_env is {} — a no-op.
+  environment: "{{ cloud_env | default({}) }}"
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
     - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
