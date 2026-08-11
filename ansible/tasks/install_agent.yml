@@ -21,9 +21,24 @@
   ansible.builtin.set_fact:
     _ssh_root_mirror: "ssh {{ _ssh_common_args }} {{ _ssh_proxy_args }} root@{{ mirror_private_ip }}"
 
-- name: ABI — assert agent assets exist on the mirror ECS (01/06 ran)
-  ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'test -f {{ _m_install_dir }}/.openshift_install_state.json'
+# Where the agent assets + openshift-install live, and how to invoke it:
+#   apsara (container build) — on THIS operator host: install_dir (auth/state) +
+#     install_dir/bin/openshift-install (the 4.20 binary extracted during 06a).
+#     Run locally; the Helper reaches the cluster (api-int) via the peering +
+#     CloudDns.  No mirror-ECS ssh, no jump host.
+#   public cloud — on the mirror ECS via ssh (openshift-install shipped there).
+- name: ABI — resolve wait-for location (apsara = local operator host)
+  ansible.builtin.set_fact:
+    _abi_local: "{{ (cloud_platform | default('public')) == 'apsara' }}"
+    _abi_dir: "{{ install_dir if ((cloud_platform | default('public')) == 'apsara') else _m_install_dir }}"
+
+- name: ABI — resolve command wrapper (local vs ssh-to-mirror)
+  ansible.builtin.set_fact:
+    _abi_pre: "{{ ('export PATH=' ~ install_dir ~ '/bin:$PATH; ') if _abi_local else (_ssh_root_mirror ~ \" '\") }}"
+    _abi_post: "{{ '' if _abi_local else \"'\" }}"
+
+- name: ABI — assert agent assets exist (01/06 ran)
+  ansible.builtin.shell: "{{ _abi_pre }}test -f {{ _abi_dir }}/.openshift_install_state.json{{ _abi_post }}"
   changed_when: false
 
 # ABI monitoring is `openshift-install agent wait-for` (NOT oc/clusteroperator
@@ -45,8 +60,7 @@
 
 # Phase 1: agent wait-for bootstrap-complete (authoritative).
 - name: ABI — start bootstrap-complete monitor (agent wait-for, background)
-  ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'set -o pipefail; openshift-install agent wait-for bootstrap-complete --dir {{ _m_install_dir }} --log-level=info 2>&1 | tee {{ _m_install_dir }}/wait-bootstrap.log'
+  ansible.builtin.shell: "{{ _abi_pre }}set -o pipefail; openshift-install agent wait-for bootstrap-complete --dir {{ _abi_dir }} --log-level=info 2>&1 | tee {{ _abi_dir }}/wait-bootstrap.log{{ _abi_post }}"
   args:
     executable: /bin/bash
   async: 3600
@@ -86,7 +100,20 @@
     state: directory
     mode: "0700"
 
+# apsara: the assets are already local (install_dir/auth) — just copy across.
+- name: ABI — copy kubeconfig + kubeadmin-password from local install_dir (apsara)
+  ansible.builtin.copy:
+    src: "{{ install_dir }}/auth/{{ item }}"
+    dest: "{{ output_dir }}/auth/{{ item }}"
+    mode: "0600"
+    remote_src: true
+  loop:
+    - kubeconfig
+    - kubeadmin-password
+  when: _abi_local | bool
+
 - name: ABI — scp kubeconfig + kubeadmin-password back from the mirror ECS
+  when: not (_abi_local | bool)
   ansible.builtin.command:
     argv:
       - scp
@@ -124,14 +151,17 @@
 # rewrite the *.apps wildcard PrivateZone record to a real router node so the
 # console/ingress/auth operators can converge.  MUST run before install-complete
 # (see ordering note above).
+# apsara SNO: *.apps already resolves to the single node IP in CloudDns (the one
+# node runs router-default), and there is no jump host — so the placeholder
+# rewrite + jump-host staging don't apply.  08+ run oc on the operator host.
 - name: ABI — stage kubeconfig on jump host + rewrite *.apps DNS
   ansible.builtin.include_tasks: ../tasks/post_install_apps_dns.yml
+  when: not (_abi_local | bool)
 
 # Phase 2: agent wait-for install-complete (authoritative).  *.apps was rewritten
 # above, so the ingress/console/auth operators can converge — no deadlock.
 - name: ABI — start install-complete monitor (agent wait-for, background)
-  ansible.builtin.shell: >-
-    {{ _ssh_root_mirror }} 'set -o pipefail; openshift-install agent wait-for install-complete --dir {{ _m_install_dir }} --log-level=info 2>&1 | tee {{ _m_install_dir }}/wait-install.log'
+  ansible.builtin.shell: "{{ _abi_pre }}set -o pipefail; openshift-install agent wait-for install-complete --dir {{ _abi_dir }} --log-level=info 2>&1 | tee {{ _abi_dir }}/wait-install.log{{ _abi_post }}"
   args:
     executable: /bin/bash
   async: 7200
