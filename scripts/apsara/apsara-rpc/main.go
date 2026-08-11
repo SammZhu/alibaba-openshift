@@ -6,7 +6,10 @@
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -42,8 +45,30 @@ func main() {
 	}
 	client, err := sdk.NewClientWithOptions(region, sdk.NewConfig(), cred)
 	if err != nil { die("client:", err) }
-	if p := os.Getenv("APSARA_PROXY"); p != "" { client.SetHttpProxy(p); client.SetHttpsProxy(p) }
-	if os.Getenv("INSECURE") == "1" { client.SetHTTPSInsecure(true) }
+
+	// Install an explicit transport so HTTPS-through-proxy uses a real CONNECT
+	// tunnel (end-to-end TLS).  The SDK's SetHttpsProxy path did NOT tunnel for
+	// the CloudDns POP endpoint (dns-control.pop.cloud.ste3.com): the request
+	// reached the POP as plain HTTP and was rejected (InvalidProtocol.NeedSsl).
+	// A plain http.Transport with Proxy set does CONNECT for https URLs (exactly
+	// like `curl -x <proxy> https://…`) and forwards http for http URLs, so the
+	// existing HTTP products (ROS/ECS/VPC) keep working unchanged.
+	insecure := os.Getenv("INSECURE") == "1"
+	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure}}
+	if p := os.Getenv("APSARA_PROXY"); p != "" {
+		u, e := url.Parse(p)
+		if e != nil { die("bad APSARA_PROXY:", e) }
+		tr.Proxy = http.ProxyURL(u)
+	}
+	client.SetTransport(tr)
+	// DoAction re-stamps TLSClientConfig.InsecureSkipVerify from this flag on
+	// every call, so keep it in sync or our transport's value gets reset to false.
+	client.SetHTTPSInsecure(insecure)
+
+	if os.Getenv("APSARA_RPC_DEBUG") == "1" {
+		fmt.Fprintf(os.Stderr, "[apsara-rpc] product=%s version=%s action=%s endpoint=%s scheme=%s proxy=%q insecure=%v\n",
+			product, version, action, endpoint, os.Getenv("SCHEME"), os.Getenv("APSARA_PROXY"), insecure)
+	}
 
 	r := requests.NewCommonRequest()
 	sc := requests.HTTP
