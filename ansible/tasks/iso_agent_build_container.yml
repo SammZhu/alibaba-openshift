@@ -35,6 +35,26 @@
         ((mirror_init_user | default('mirror-admin')) + ':' + mirror_init_password) | b64encode }}"}}}
   no_log: true
 
+# ICSP so `oc adm release extract` redirects the component pulls (the
+# ocp-v4.0-art-dev @sha256 images that hold oc/openshift-install) from quay.io to
+# the mirror.  Without it, --from only locates the release image and the component
+# pulls hit quay.io -> unauthorized.
+- name: "container-build: ICSP mapping quay.io -> mirror (for client extract)"
+  ansible.builtin.copy:
+    dest: "{{ install_dir }}/abi-icsp.yaml"
+    mode: "0644"
+    content: |
+      apiVersion: operator.openshift.io/v1alpha1
+      kind: ImageContentSourcePolicy
+      metadata:
+        name: mirror
+      spec:
+        repositoryDigestMirrors:
+        - source: quay.io/openshift-release-dev/ocp-release
+          mirrors: ["{{ mirror_private_ip }}:8443/openshift/release-images"]
+        - source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
+          mirrors: ["{{ mirror_private_ip }}:8443/openshift/release"]
+
 # Extract the version-matched oc + openshift-install FROM the mirror release into
 # a local bin/ dir.  These are RHEL9 binaries — they will run INSIDE the UBI9
 # container (not necessarily on the host).  A bootstrap oc is only needed to pull
@@ -51,6 +71,7 @@
       - --to={{ install_dir }}/bin
       - --from={{ mirror_private_ip }}:8443/openshift/release-images:{{ openshift_version }}-x86_64
       - --registry-config={{ install_dir }}/abi-rc.json
+      - --icsp-file={{ install_dir }}/abi-icsp.yaml
       - --insecure=true
   loop:
     - openshift-install
