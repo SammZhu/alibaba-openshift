@@ -392,7 +392,9 @@
 # which would split a single command across lines on the remote shell.
 # LIVE-VERIFY: `aliyun oss` (ossutil) STS-token flag (-t) + internal endpoint
 # reachability; and `{{ cloud_cli }} ecs --mode EcsRamRole --ram-role-name` inline flags.
+# public / mirror-ECS build: upload from the mirror via its instance RAM role.
 - name: ABI — upload agent ISO to OSS via internal endpoint (mirror ECS RAM role)
+  when: not (_agent_build_container | default(false))
   ansible.builtin.shell: |
     {{ _ssh_root_mirror }} 'set -e
     RR=$(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/)
@@ -400,6 +402,34 @@
     AK=$(echo "$C" | jq -r .AccessKeyId); SK=$(echo "$C" | jq -r .AccessKeySecret); TK=$(echo "$C" | jq -r .SecurityToken)
     {{ oss_cli }} cp {{ _m_iso }} oss://{{ oss_bucket }}/{{ oss_object }} -f --access-key-id="$AK" --access-key-secret="$SK" --sts-token="$TK" --region={{ region }} --endpoint={{ _oss_internal_endpoint }}'
   changed_when: true
+
+# container build: upload from THIS operator host with the SAME AK/SK that runs
+# ImportImage, so the OSS object's owner matches the import caller.  Uploading via
+# the mirror's instance RAM role instead makes the object owned by a different
+# identity, and ImportImage then fails NoSetRoletoECSServiceAcount (the ECS import
+# service can't read an object owned by another identity).  The ISO is local
+# (container build wrote it to install_dir).
+- name: ABI — resolve OSS AK/SK (container build, operator host)
+  ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
+  when: _agent_build_container | default(false)
+
+- name: ABI — upload agent ISO to OSS from the operator host (container build)
+  when: _agent_build_container | default(false)
+  ansible.builtin.include_tasks: ../tasks/run_cli.yml
+  vars:
+    rc_label: "OSS upload agent ISO"
+    rc_retries: 3
+    rc_delay: 10
+    _oss_rest:
+      - cp
+      - "{{ install_dir }}/agent.x86_64.iso"
+      - "oss://{{ oss_bucket }}/{{ oss_object }}"
+      - "--endpoint={{ _oss_pub_endpoint }}"
+      - "--access-key-id={{ _ak }}"
+      - "--access-key-secret={{ _sk }}"
+      - -f
+    rc_argv: "{{ oss_cli_argv + _oss_rest }}"
+  no_log: true
 
 # Air-gap: serve the minimal ISO's rootfs from an in-VPC HTTP server on the
 # mirror ECS (agent-config bootArtifactsBaseURL = http://<mirror>:8080) so nodes
