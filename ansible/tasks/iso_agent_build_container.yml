@@ -110,6 +110,12 @@
           # Trust the mirror registry CA (openshift-install pulls the release over TLS).
           cp /work/mirror-ca.crt /etc/pki/ca-trust/source/anchors/mirror-ca.crt
           update-ca-trust
+          # A static-network agent-config needs nmstatectl to validate the nmstate
+          # YAML at ISO-build time.  UBI9 has no nmstate by default — install it from
+          # the UBI repos (http_proxy is passed in for the Squid egress).
+          if ! command -v nmstatectl >/dev/null 2>&1; then
+            dnf install -y nmstate
+          fi
           export PATH=/work/bin:$PATH
           export XDG_CACHE_HOME=/install/.cache TMPDIR=/install/tmp
           mkdir -p "$XDG_CACHE_HOME" "$TMPDIR"
@@ -127,6 +133,12 @@
           - --rm
           - --network=host
           - --security-opt=label=disable
+          - -e
+          - "http_proxy={{ cloud_env.APSARA_PROXY | default('') }}"
+          - -e
+          - "https_proxy={{ cloud_env.APSARA_PROXY | default('') }}"
+          - -e
+          - "no_proxy={{ mirror_private_ip }},localhost,127.0.0.1"
           - -v
           - "{{ install_dir }}:/install:z"
           - -v
