@@ -1,0 +1,237 @@
+---
+# Phase 00a — turn a bare Linux box into a working operator host.
+#
+# Everything the flow needs on the machine that runs ansible: OS packages, the
+# SSH keypair, the Apsara Go tools (apsara-rpc / apsara-oss), and the OpenShift
+# clients.  Idempotent — safe to re-run; already-satisfied steps no-op.
+#
+# Runs on the operator itself by default (hosts: local, like every other phase).
+# To prepare a REMOTE box from another machine, add it to the inventory and pass
+#   -e operator_hosts=<inventory-host>
+#
+# Bootstrap order on a brand-new machine (ansible/git don't exist yet):
+#   1. scripts/bootstrap-operator.sh   # installs git + ansible only
+#   2. git clone <repo> && cd ansible
+#   3. ansible-playbook -i inventory.yml playbooks/00a-prepare-operator.yml
+#   4. edit group_vars/all.yml, then 00-preflight.yml onwards
+#
+# Network: on Apsara the box usually reaches the internet only through an HTTP
+# proxy.  Set operator_proxy (defaults to cloud_env.APSARA_PROXY) and this
+# configures dnf, git and go to use it.  Leave it empty for a direct connection.
+- name: Prepare the operator host (packages, keys, tools, clients)
+  hosts: "{{ operator_hosts | default('local') }}"
+  gather_facts: true
+  become: "{{ operator_become | default(true) }}"
+  vars:
+    # Proxy for package/git/go traffic; empty = direct.
+    _op_proxy: "{{ operator_proxy | default((cloud_env | default({})).APSARA_PROXY | default('')) }}"
+    # Apsara needs the Go tools (cloudcli -> apsara-rpc, apsara-oss); public cloud
+    # uses the aliyun CLI instead.
+    _op_apsara: "{{ (cloud_platform | default('public')) == 'apsara' }}"
+    _op_repo: "{{ repo_root | default(playbook_dir + '/../..') }}"
+  tasks:
+    - name: "operator: show what will be prepared"
+      ansible.builtin.debug:
+        msg: |
+          host       : {{ inventory_hostname }} ({{ ansible_distribution | default('?') }} {{ ansible_distribution_version | default('') }})
+          repo       : {{ _op_repo }}
+          proxy      : {{ _op_proxy | default('(direct)', true) }}
+          apsara     : {{ _op_apsara }} (build apsara-rpc/apsara-oss: {{ _op_apsara }})
+          ssh key    : {{ ssh_priv_key_file | default('~/.ssh/openshift_ed25519') }}
+
+    # ── 1. package manager proxy (Apsara: no direct egress) ──────────────────
+    - name: "operator: point dnf at the proxy"
+      ansible.builtin.lineinfile:
+        path: /etc/dnf/dnf.conf
+        regexp: '^proxy='
+        line: "proxy={{ _op_proxy }}"
+        create: true
+        mode: "0644"
+      when: _op_proxy | length > 0
+
+    # ── 2. OS packages ───────────────────────────────────────────────────────
+    # git/curl/jq/tar: always.  skopeo: mirror-build + tag-mapping.  podman: the
+    # UBI9 agent-ISO container build (06a).  golang: apsara-rpc/apsara-oss.
+    # rsync/openssh-clients: file pushes to the mirror ECS.
+    - name: "operator: install base packages"
+      ansible.builtin.package:
+        name: "{{ operator_packages | default(_op_default_packages) }}"
+        state: present
+      vars:
+        _op_default_packages: >-
+          {{ ['git', 'curl', 'jq', 'tar', 'gzip', 'rsync', 'openssh-clients',
+              'python3', 'python3-pip', 'skopeo', 'podman']
+             + (['golang'] if _op_apsara else []) }}
+      register: _op_pkgs
+      retries: 2
+      delay: 5
+      until: _op_pkgs is succeeded
+
+    # ── 3. SSH keypair the playbooks expect ──────────────────────────────────
+    - name: "operator: ensure ~/.ssh exists"
+      ansible.builtin.file:
+        path: "{{ (ssh_priv_key_file | default('~/.ssh/openshift_ed25519')) | dirname }}"
+        state: directory
+        mode: "0700"
+
+    - name: "operator: check for the SSH keypair"
+      ansible.builtin.stat:
+        path: "{{ ssh_priv_key_file | default('~/.ssh/openshift_ed25519') }}"
+      register: _op_key
+
+    - name: "operator: generate the SSH keypair (ed25519, no passphrase)"
+      ansible.builtin.command:
+        argv:
+          - ssh-keygen
+          - -t
+          - ed25519
+          - -f
+          - "{{ ssh_priv_key_file | default('~/.ssh/openshift_ed25519') }}"
+          - -N
+          - ""
+      when: not _op_key.stat.exists
+      changed_when: true
+
+    # ── 4. git through the proxy (the repo lives on GitHub) ──────────────────
+    - name: "operator: configure git for the proxy"
+      community.general.git_config:
+        name: "{{ item.name }}"
+        scope: global
+        value: "{{ item.value }}"
+      loop:
+        - { name: "http.proxy", value: "{{ _op_proxy }}" }
+        - { name: "http.version", value: "HTTP/1.1" }   # HTTP/2 is flaky via Squid
+      when: _op_proxy | length > 0
+      failed_when: false      # collection may be absent; the shell fallback below covers it
+      register: _op_gitcfg
+
+    - name: "operator: configure git for the proxy (shell fallback)"
+      ansible.builtin.shell: |
+        git config --global http.proxy "{{ _op_proxy }}"
+        git config --global http.version HTTP/1.1
+      when:
+        - _op_proxy | length > 0
+        - _op_gitcfg is failed or (_op_gitcfg is skipped)
+      changed_when: true
+
+    # ── 5. Apsara Go tools ───────────────────────────────────────────────────
+    # apsara-oss is built STATIC (CGO_ENABLED=0): phase 04 pushes this same binary
+    # to the mirror ECS, which runs a different OS/glibc.
+    - name: "operator: build apsara-rpc + apsara-oss"
+      when: _op_apsara
+      block:
+        - name: "operator: go build apsara-rpc"
+          ansible.builtin.command:
+            cmd: go build -o apsara-rpc .
+            chdir: "{{ _op_repo }}/scripts/apsara/apsara-rpc"
+          environment:
+            HTTP_PROXY: "{{ _op_proxy }}"
+            HTTPS_PROXY: "{{ _op_proxy }}"
+            GOFLAGS: -mod=mod
+          changed_when: true
+
+        - name: "operator: go build apsara-oss (static)"
+          ansible.builtin.command:
+            cmd: go build -o apsara-oss .
+            chdir: "{{ _op_repo }}/scripts/apsara/apsara-oss"
+          environment:
+            CGO_ENABLED: "0"
+            HTTP_PROXY: "{{ _op_proxy }}"
+            HTTPS_PROXY: "{{ _op_proxy }}"
+            GOFLAGS: -mod=mod
+          changed_when: true
+
+        - name: "operator: make cloudcli executable"
+          ansible.builtin.file:
+            path: "{{ _op_repo }}/scripts/apsara/cloudcli"
+            mode: "0755"
+
+    # ── 6. OpenShift clients (oc + openshift-install) ────────────────────────
+    # Only a BOOTSTRAP pair is needed: 06a's container build extracts the exact
+    # version-matched clients from the mirror release.  Skipped if oc is present.
+    - name: "operator: check for oc"
+      ansible.builtin.command: oc version --client
+      register: _op_oc
+      changed_when: false
+      failed_when: false
+
+    - name: "operator: install oc + openshift-install"
+      when: (_op_oc.rc | default(1)) != 0
+      block:
+        - name: "operator: download the OpenShift clients"
+          ansible.builtin.get_url:
+            url: "{{ operator_client_mirror | default('https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/' ~ (operator_client_channel | default('stable-4.20'))) }}/{{ item }}"
+            dest: "/tmp/{{ item }}"
+            mode: "0644"
+            timeout: 120
+          environment:
+            http_proxy: "{{ _op_proxy }}"
+            https_proxy: "{{ _op_proxy }}"
+          loop:
+            - openshift-client-linux.tar.gz
+            - openshift-install-linux.tar.gz
+          register: _op_dl
+          retries: 3
+          delay: 10
+          until: _op_dl is succeeded
+
+        - name: "operator: unpack the clients into /usr/local/bin"
+          ansible.builtin.unarchive:
+            src: "/tmp/{{ item.f }}"
+            dest: /usr/local/bin
+            remote_src: true
+            extra_opts: "{{ item.only }}"
+            mode: "0755"
+          loop:
+            - { f: openshift-client-linux.tar.gz, only: ["oc", "kubectl"] }
+            - { f: openshift-install-linux.tar.gz, only: ["openshift-install"] }
+          loop_control:
+            label: "{{ item.f }}"
+
+    # ── 7. working directories ───────────────────────────────────────────────
+    - name: "operator: ensure the output directory exists"
+      ansible.builtin.file:
+        path: "{{ output_dir | default(ansible_env.HOME ~ '/openshift-install/' ~ (cluster_name | default('cluster1'))) }}"
+        state: directory
+        mode: "0755"
+
+    # ── 8. verify + summarise ────────────────────────────────────────────────
+    - name: "operator: verify the toolchain"
+      ansible.builtin.shell: |
+        for t in git curl jq tar skopeo podman oc openshift-install{{ ' go' if _op_apsara else '' }}; do
+          if command -v "$t" >/dev/null 2>&1; then
+            printf '%-18s %s\n' "$t" "$(command -v $t)"
+          else
+            printf '%-18s MISSING\n' "$t"
+          fi
+        done
+        {% if _op_apsara %}
+        for b in {{ _op_repo }}/scripts/apsara/apsara-rpc/apsara-rpc {{ _op_repo }}/scripts/apsara/apsara-oss/apsara-oss; do
+          [ -x "$b" ] && printf '%-18s %s\n' "$(basename $b)" "$b" || printf '%-18s MISSING\n' "$(basename $b)"
+        done
+        {% endif %}
+      register: _op_verify
+      changed_when: false
+
+    - name: "operator: toolchain"
+      ansible.builtin.debug:
+        msg: "{{ _op_verify.stdout_lines }}"
+
+    - name: "operator: fail if anything is missing"
+      ansible.builtin.assert:
+        that: "'MISSING' not in _op_verify.stdout"
+        fail_msg: |
+          Some tools are still missing (see the list above).  Install them by hand
+          or extend operator_packages, then re-run this playbook.
+
+    - name: "operator: ready"
+      ansible.builtin.debug:
+        msg: |
+          ✓ Operator host prepared.
+
+          Next:
+            1. cp group_vars/all.yml.example group_vars/all.yml   # then fill it in
+               (apsara: cloud_platform/cloud_cli/oss_cli/cloud_env + endpoints —
+                see docs/apsara/DEPLOY.md)
+            2. put the Red Hat pull-secret at {{ pull_secret_file | default('<pull_secret_file>') }}
+            3. ansible-playbook -i inventory.yml playbooks/00-preflight.yml

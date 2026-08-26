@@ -213,6 +213,16 @@ apsara_node_dns:                      # resolvers that also resolve the CloudDns
 # agent_build_image:   registry.access.redhat.com/ubi9/ubi:latest   # container path base
 # agent_bootstrap_oc:  oc     # host oc used only to extract version-matched clients
 
+# ── Operator-host preparation (playbooks/00a-prepare-operator.yml) ───────────
+# Turns a bare Linux box into a working operator host: packages, SSH keypair,
+# Apsara Go tools, OpenShift clients.  All optional — sane defaults below.
+# operator_hosts:        local          # inventory host to prepare (default: local)
+# operator_become:       true           # sudo for package installs
+# operator_proxy:        ""             # HTTP proxy for dnf/git/go; defaults to cloud_env.APSARA_PROXY
+# operator_packages:     []             # override the default package list entirely
+# operator_client_channel: stable-4.20  # bootstrap oc/openshift-install channel
+# operator_client_mirror:  ""           # full base URL if not mirror.openshift.com
+
 # ── Repo locations on the local machine ──────────────────────────────────────
 repo_root:            "{{ playbook_dir }}/../.."
 

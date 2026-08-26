@@ -29,33 +29,44 @@ OSS bucket: create it in the **owning account's** console (apsara-oss cannot
 create a bucket — the gateway does per-bucket TLS vhosts, so a not-yet-existing
 bucket's SNI is rejected). Then set `oss_bucket` to it.
 
-## 1. Get the repo onto the operator (git via proxy)
+## 1. Prepare the operator host (automated)
 
-The operator reaches GitHub only through the proxy:
-
-```sh
-cd /root/alibaba-openshift
-git config http.proxy "http://<squid-host>:3128"   # same APSARA_PROXY
-git config http.version HTTP/1.1                    # avoid HTTP/2 flakiness
-git fetch origin && git checkout main && git pull
-```
-
-## 2. Build the local tools
-
-`cloudcli` is Python (already executable). `apsara-rpc` and `apsara-oss` are Go —
-build them where they live (cloudcli resolves apsara-rpc relative to itself, and
-`oss_cli` points at the apsara-oss binary):
+On a brand-new box, one manual step installs git + ansible; everything else is a
+playbook (`playbooks/00a-prepare-operator.yml`): OS packages (git/curl/jq/tar/
+skopeo/podman/golang), the SSH keypair, the Apsara Go tools, and bootstrap
+oc/openshift-install.
 
 ```sh
-cd /root/alibaba-openshift/scripts/apsara/apsara-rpc && go build -o apsara-rpc .
-# Build apsara-oss STATIC (CGO_ENABLED=0): phase 04 pushes this same binary to the
-# mirror ECS, which runs a different OS — a static build runs on both.
-cd /root/alibaba-openshift/scripts/apsara/apsara-oss && CGO_ENABLED=0 go build -o apsara-oss .
-# go.sum is committed; if module download is needed it goes via the proxy:
-#   go env -w GOPROXY=... ; or export the proxy for `go`
+# 1. bootstrap: git + ansible only  (PROXY= the Squid proxy, if egress needs one)
+PROXY=http://<squid-host>:3128 ./scripts/bootstrap-operator.sh
+
+# 2. get the repo (git is configured for the proxy by the playbook; for the first
+#    clone, export it here)
+export https_proxy=http://<squid-host>:3128
+git clone <repo-url> /root/alibaba-openshift
+
+# 3. prepare everything else
+cd /root/alibaba-openshift/ansible
+ansible-playbook -i inventory.yml playbooks/00a-prepare-operator.yml \
+  -e operator_proxy=http://<squid-host>:3128 -e cloud_platform=apsara
 ```
 
-## 3. Config (group_vars/all.yml — single file, gitignored)
+Re-runnable; already-satisfied steps no-op.  After `group_vars/all.yml` exists,
+the `-e` flags are unnecessary (it reads `cloud_env.APSARA_PROXY` +
+`cloud_platform`).  To prepare a REMOTE box, add it to the inventory and pass
+`-e operator_hosts=<host>`.
+
+What it does (was manual before):
+
+| Step | Detail |
+| ---- | ------ |
+| dnf/git proxy | `/etc/dnf/dnf.conf` + `git config --global http.proxy`, `http.version HTTP/1.1` (HTTP/2 is flaky via Squid) |
+| packages | git, curl, jq, tar, gzip, rsync, openssh-clients, python3(+pip), skopeo, podman, golang (apsara) |
+| SSH keypair | `ssh-keygen -t ed25519 -f {{ ssh_priv_key_file }} -N ""` if absent |
+| Go tools | `apsara-rpc` (dynamic) and `apsara-oss` (**CGO_ENABLED=0**, static — phase 04 pushes it to the mirror ECS, a different OS) |
+| clients | bootstrap `oc` + `openshift-install` into /usr/local/bin (06a extracts the version-matched pair from the mirror release) |
+
+## 2. Config (group_vars/all.yml — single file, gitignored)
 
 The operator's `all.yml` holds the whole Apsara config; **no `-e` extra-vars file
 is needed** (a separate file duplicating keys already in all.yml caused
@@ -101,7 +112,7 @@ mirror_enabled: true
 Also generate the SSH keypair the playbooks expect if absent:
 `ssh-keygen -t ed25519 -f /root/.ssh/openshift_ed25519 -N ""`.
 
-## 4. OSS specifics (the non-obvious part)
+## 3. OSS specifics (the non-obvious part)
 
 Apsara OSS is **not** reachable the way public OSS is. `apsara-oss` handles all of
 this (see `scripts/apsara/apsara-oss`), but for the record:
@@ -218,7 +229,7 @@ Phase 04 runs the large OSS downloads **on the mirror ECS** over SSH with
    the proxy (same `tls: unrecognized name` symptom as the operator did), the
    remote heredocs must export `APSARA_PROXY` — surfaces on 04's first OSS call.
 
-## 4b. Build + ship the mirror content to OSS (prerequisite for 04)
+## 3b. Build + ship the mirror content to OSS (prerequisite for 04)
 
 04 downloads the OpenShift release + AI images (~25-30 GB) and the mirror-registry
 installer from OSS. Those must be built + uploaded first — the bucket starts empty.
@@ -252,13 +263,13 @@ as a blob cache, so a dropped run resumes cheaply on re-run.
 The mirror-registry installer + oc-mirror binary are staged into OSS by
 `02-import-image` (task `mirror_stage_artefacts`); run 02 before 04.
 
-## 5. Run
+## 4. Run
 
 ```sh
 cd /root/alibaba-openshift/ansible
 ansible-playbook playbooks/00-preflight.yml
 ansible-playbook playbooks/03-create-mirror-stack.yml     # validated: builds mirror-stack + auto-peers to the operator VPC
-# ansible-playbook playbooks/04-prepare-mirror.yml        # after 4b (OSS content) + 02 (mirror-registry staged)
+# ansible-playbook playbooks/04-prepare-mirror.yml        # after 3b (OSS content) + 02 (mirror-registry staged)
 # ... 06 / 07 ...
 ```
 
