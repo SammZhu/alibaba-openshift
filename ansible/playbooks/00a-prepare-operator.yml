@@ -29,6 +29,16 @@
     # uses the aliyun CLI instead.
     _op_apsara: "{{ (cloud_platform | default('public')) == 'apsara' }}"
     _op_repo: "{{ repo_root | default(playbook_dir + '/../..') }}"
+    # Go module fetching: proxy.golang.org and sum.golang.org are Google-hosted and
+    # unreachable from China, so default to a domestic module proxy.  GOSUMDB=off
+    # because the checksum DB is behind the same wall; go.sum is committed, so
+    # module integrity is still verified against it.
+    _op_go_env:
+      GOPROXY: "{{ operator_goproxy | default('https://goproxy.cn,https://mirrors.aliyun.com/goproxy/,direct') }}"
+      GOSUMDB: "off"
+      GOFLAGS: -mod=mod
+      HTTP_PROXY: "{{ _op_proxy }}"
+      HTTPS_PROXY: "{{ _op_proxy }}"
   tasks:
     - name: "operator: show what will be prepared"
       ansible.builtin.debug:
@@ -112,21 +122,14 @@
           ansible.builtin.command:
             cmd: go build -o apsara-rpc .
             chdir: "{{ _op_repo }}/scripts/apsara/apsara-rpc"
-          environment:
-            HTTP_PROXY: "{{ _op_proxy }}"
-            HTTPS_PROXY: "{{ _op_proxy }}"
-            GOFLAGS: -mod=mod
+          environment: "{{ _op_go_env }}"
           changed_when: true
 
         - name: "operator: go build apsara-oss (static)"
           ansible.builtin.command:
             cmd: go build -o apsara-oss .
             chdir: "{{ _op_repo }}/scripts/apsara/apsara-oss"
-          environment:
-            CGO_ENABLED: "0"
-            HTTP_PROXY: "{{ _op_proxy }}"
-            HTTPS_PROXY: "{{ _op_proxy }}"
-            GOFLAGS: -mod=mod
+          environment: "{{ _op_go_env | combine({'CGO_ENABLED': '0'}) }}"
           changed_when: true
 
         - name: "operator: make cloudcli executable"

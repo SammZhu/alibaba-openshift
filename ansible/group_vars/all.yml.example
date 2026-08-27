@@ -222,6 +222,7 @@ apsara_node_dns:                      # resolvers that also resolve the CloudDns
 # operator_packages:     []             # override the default package list entirely
 # operator_client_channel: stable-4.20  # bootstrap oc/openshift-install channel
 # operator_client_mirror:  ""           # full base URL if not mirror.openshift.com
+# operator_goproxy:      https://goproxy.cn,direct   # Go module proxy (proxy.golang.org is blocked in CN)
 
 # ── Repo locations on the local machine ──────────────────────────────────────
 repo_root:            "{{ playbook_dir }}/../.."
