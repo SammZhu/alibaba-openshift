@@ -29,6 +29,14 @@
     # uses the aliyun CLI instead.
     _op_apsara: "{{ (cloud_platform | default('public')) == 'apsara' }}"
     _op_repo: "{{ repo_root | default(playbook_dir + '/../..') }}"
+    # Which clients to fetch.  Only `oc` is truly needed to bootstrap: 06a's
+    # container build extracts the version-matched oc AND openshift-install from
+    # the mirror release.  mirror.openshift.com is slow from China, so allow
+    # skipping the (much larger) installer archive: -e operator_oc_only=true
+    _op_clients: >-
+      {{ [{'f': 'openshift-client-linux.tar.gz', 'only': ['oc', 'kubectl']}]
+         + ([] if (operator_oc_only | default(false) | bool)
+              else [{'f': 'openshift-install-linux.tar.gz', 'only': ['openshift-install']}]) }}
     # Go module fetching: proxy.golang.org and sum.golang.org are Google-hosted and
     # unreachable from China, so default to a domestic module proxy.  GOSUMDB=off
     # because the checksum DB is behind the same wall; go.sum is committed, so
@@ -158,9 +166,7 @@
           environment:
             http_proxy: "{{ _op_proxy }}"
             https_proxy: "{{ _op_proxy }}"
-          loop:
-            - openshift-client-linux.tar.gz
-            - openshift-install-linux.tar.gz
+          loop: "{{ _op_clients | map(attribute='f') | list }}"
           register: _op_dl
           retries: 3
           delay: 10
@@ -173,9 +179,7 @@
             remote_src: true
             extra_opts: "{{ item.only }}"
             mode: "0755"
-          loop:
-            - { f: openshift-client-linux.tar.gz, only: ["oc", "kubectl"] }
-            - { f: openshift-install-linux.tar.gz, only: ["openshift-install"] }
+          loop: "{{ _op_clients }}"
           loop_control:
             label: "{{ item.f }}"
 
@@ -189,7 +193,7 @@
     # ── 8. verify + summarise ────────────────────────────────────────────────
     - name: "operator: verify the toolchain"
       ansible.builtin.shell: |
-        for t in git curl jq tar skopeo podman oc openshift-install{{ ' go' if _op_apsara else '' }}; do
+        for t in git curl jq tar skopeo podman oc{{ '' if (operator_oc_only | default(false) | bool) else ' openshift-install' }}{{ ' go' if _op_apsara else '' }}; do
           if command -v "$t" >/dev/null 2>&1; then
             printf '%-18s %s\n' "$t" "$(command -v $t)"
           else
