@@ -94,24 +94,12 @@
 
     # ── 4. git through the proxy (the repo lives on GitHub) ──────────────────
     - name: "operator: configure git for the proxy"
-      community.general.git_config:
-        name: "{{ item.name }}"
-        scope: global
-        value: "{{ item.value }}"
-      loop:
-        - { name: "http.proxy", value: "{{ _op_proxy }}" }
-        - { name: "http.version", value: "HTTP/1.1" }   # HTTP/2 is flaky via Squid
-      when: _op_proxy | length > 0
-      failed_when: false      # collection may be absent; the shell fallback below covers it
-      register: _op_gitcfg
-
-    - name: "operator: configure git for the proxy (shell fallback)"
+      # Plain shell, not community.general.git_config: ansible-core ships without
+      # collections and the rest of the repo deliberately avoids them.
       ansible.builtin.shell: |
         git config --global http.proxy "{{ _op_proxy }}"
         git config --global http.version HTTP/1.1
-      when:
-        - _op_proxy | length > 0
-        - _op_gitcfg is failed or (_op_gitcfg is skipped)
+      when: _op_proxy | length > 0
       changed_when: true
 
     # ── 5. Apsara Go tools ───────────────────────────────────────────────────
