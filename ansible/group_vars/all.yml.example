@@ -50,6 +50,16 @@ cloud_env:           {}         # apsara -> { CLOUD_PLATFORM: apsara, AK: .., SK
                                 # from Tianji: dnsProduct/dnsService docker env pop_out_endpoint.
                                 # cloudcli routes `clouddns` there via apsara-rpc NATIVE_SEND
                                 # (HTTP + SecureTransport through the proxy).
+                                # ⚠ APSARA_PROXY only when the operator CANNOT reach the
+                                # OpenAPI endpoints directly.  A proxy that only has public
+                                # DNS cannot resolve the internal *.cloud.<env>.com names and
+                                # every call dies with a Squid ERR_DNS_FAIL page.  Note the
+                                # Go SDK also picks up HTTP_PROXY/HTTPS_PROXY from the
+                                # environment, so an exported shell proxy (e.g. one set for
+                                # `git clone`) silently hijacks API calls — set them empty
+                                # here to immunise the run:
+                                #   HTTP_PROXY: ""
+                                #   HTTPS_PROXY: ""
 # apsara only: explicit image id (apsara_ize turns the DataSource image lookups
 # into MirrorImageId/JumpHostImageId params).  DescribeImages -> ImageId (== the
 # .vhd name on ste3), e.g. aliyun_4_x86_64_20G_alibase_20260407.vhd
