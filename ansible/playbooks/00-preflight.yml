@@ -147,24 +147,26 @@
       loop_control:
         label: "{{ item.role }} → {{ item.type or '(MISSING)' }}"
 
+    # Decide stock with jq on the parsed JSON, not by pattern-matching the raw
+    # text: the aliyun CLI pretty-prints and apsara-rpc emits compact JSON, and a
+    # text match on '"StatusCategory": "WithStock"' silently reported every Apsara
+    # instance type as sold out.  `jq -e` exits non-zero when nothing matches (and
+    # when the call itself failed), so rc alone tells us the answer.
     - name: Probe each (zone, instance_type) for stock
-      ansible.builtin.command:
-        argv:
-          - "{{ cloud_cli }}"
-          - ecs
-          - DescribeAvailableResource
-          - --RegionId
-          - "{{ region }}"
-          - --DestinationResource
-          - InstanceType
-          - --InstanceType
-          - "{{ item.type }}"
-          - --ZoneId
-          - "{{ item.zone }}"
-          - --profile
-          - "{{ aliyun_profile }}"
+      ansible.builtin.shell: >-
+        {{ cloud_cli }} ecs DescribeAvailableResource
+        --RegionId {{ region }}
+        --DestinationResource InstanceType
+        --InstanceType {{ item.type }}
+        --ZoneId {{ item.zone }}
+        --profile {{ aliyun_profile }} 2>/dev/null
+        | jq -e '[.AvailableZones.AvailableZone[]?
+                  .AvailableResources.AvailableResource[]?
+                  .SupportedResources.SupportedResource[]?
+                  | select(.StatusCategory == "WithStock")] | length > 0' >/dev/null
       register: _stock_results
       changed_when: false
+      failed_when: false
       loop: "{{ _stock_checks }}"
       loop_control:
         label: "{{ item.zone }} / {{ item.type }} ({{ item.role }})"
@@ -175,17 +177,15 @@
     #                    "ClosedWithStock" / "SoldOut" → ROS CreateStack will fail
     # We must check StatusCategory == "WithStock" at the (innermost)
     # SupportedResource level.  Using Status would (and did) green-light
-    # types that ROS then rejects with ResourceNoStock.
-    # The regex tolerates optional whitespace after the colon: the aliyun CLI
-    # pretty-prints its JSON ("key": "value") while apsara-rpc emits compact JSON
-    # ("key":"value"), and matching only the spaced form marked every Apsara
-    # instance type as sold out.
+    # types that ROS then rejects with ResourceNoStock.  The probe above does that
+    # check in jq, so here a non-zero rc simply means "no stock" (or the call
+    # failed — treated the same, conservatively).
     - name: Identify out-of-stock combinations
       ansible.builtin.set_fact:
         _stock_failures: >-
           {{ _stock_results.results
-             | selectattr('stdout','defined')
-             | rejectattr('stdout','search','"StatusCategory":\\s*"WithStock"')
+             | selectattr('rc', 'defined')
+             | selectattr('rc', 'ne', 0)
              | map(attribute='item') | list }}
 
     - name: Fail with actionable stockout report
