@@ -36,7 +36,9 @@ declare -A API=(
 # Product name casing apsara-rpc/the gateway expect.
 declare -A PROD=([ecs]=Ecs [vpc]=Vpc [ros]=ROS [ram]=Ram)
 # Endpoint name patterns seen in the wild.
-PATTERNS=("%s.%s" "%s-internal.%s" "%s-vpc.%s" "%s-pop.%s")
+# NOTE: POP services live under a separate ".pop." label (dns-control.pop.<domain>),
+# not a hyphen — that cost us hours on ste3.  OSS carries region (+zone) in the name.
+PATTERNS=("%s.%s" "%s-internal.%s" "%s-vpc.%s" "%s-pop.%s" "%s.pop.%s")
 
 probe_tcp() {  # host -> prints "DNS=<ip> 80:OK 443:OK"
   local h="$1" ip
@@ -57,6 +59,14 @@ for svc in ecs vpc ros ram oss dns dns-control; do
     probe_tcp "$host"
   done
 done
+
+# OSS is named oss-<region>[-<zone-letter>].<domain> — probe those when REGION is known.
+if [ -n "${REGION:-}" ]; then
+  echo "  -- OSS (region-qualified) --"
+  for h in "oss-$REGION.$DOMAIN" "oss-$REGION-a.$DOMAIN" "oss-$REGION-b.$DOMAIN"; do
+    printf '  %-45s ' "$h"; probe_tcp "$h"
+  done
+fi
 
 [ "$DO_CALL" = "--call" ] || { echo; echo "(add --call plus AK/SK/REGION[/ORG_ID/RG_ID] for phase 2)"; exit 0; }
 [ -x "$RPC" ] || { echo "!! $RPC not built — run 00a-prepare-operator.yml first"; exit 1; }
