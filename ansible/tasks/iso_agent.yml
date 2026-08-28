@@ -137,6 +137,29 @@
     state: directory
     mode: "0755"
 
+# The nodes sit in the SAME VPC/subnet as the mirror ECS, so the mirror's own
+# default gateway + resolvers are exactly what the nodes need.  Read them off the
+# mirror instead of hand-copying them into group_vars (they change with every new
+# Apsara deployment / VPC).  Explicit apsara_node_gateway / apsara_node_dns win.
+- name: ABI — discover node network defaults from the mirror ECS
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} 'ip route | awk "/^default/{print \$3; exit}";
+    grep "^nameserver" /etc/resolv.conf | awk "{print \$2}" | head -3'
+  register: _abi_netinfo
+  changed_when: false
+  when: (cloud_platform | default('public')) == 'apsara'
+
+- name: ABI — node gateway/DNS facts (explicit values win, else auto-discovered)
+  ansible.builtin.set_fact:
+    apsara_node_gateway: "{{ (apsara_node_gateway | default('')) or (_abi_netinfo.stdout_lines[0] | default('')) }}"
+    apsara_node_dns: "{{ (apsara_node_dns | default([])) or (_abi_netinfo.stdout_lines[1:] | default([])) }}"
+  when: (cloud_platform | default('public')) == 'apsara'
+
+- name: ABI — show the node network that will be baked into agent-config
+  ansible.builtin.debug:
+    msg: "nic={{ apsara_node_nic | default('eth0') }} gateway={{ apsara_node_gateway }} dns={{ apsara_node_dns }}"
+  when: (cloud_platform | default('public')) == 'apsara'
+
 - name: ABI — master IPs list (parallel to abi_master_macs, for apsara static nmstate)
   ansible.builtin.set_fact:
     abi_master_ips: "{{ [master_ip1 | default(''), master_ip2 | default(''), master_ip3 | default('')]

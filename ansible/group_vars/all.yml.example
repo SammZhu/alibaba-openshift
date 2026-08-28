@@ -205,11 +205,13 @@ agent_iso_build:      mirror-ecs
 #   ip -br -4 addr ; ip route | grep default ; grep nameserver /etc/resolv.conf
 # The DNS servers MUST resolve the cluster's CloudDns PrivateZone (api-int/*.apps).
 # Only used when cloud_platform == apsara + installation_method == agent.
-apsara_node_nic:      ens3            # RHCOS NIC name on Apsara (Alibaba Linux=eth0, RHCOS=ens3)
-apsara_node_gateway:  10.0.31.253     # default gateway for private_subnet_cidr
-apsara_node_dns:                      # resolvers that also resolve the CloudDns zone
-  - 103.32.0.20
-  - 103.32.0.21
+apsara_node_nic:      ens3            # RHCOS NIC name on Apsara (Alibaba Linux shows eth0; RHCOS=ens3)
+# gateway + DNS are AUTO-DISCOVERED from the mirror ECS (same VPC/subnet as the
+# nodes) during 06a — leave them unset unless you need to override.  Hard-coding
+# them is a trap: they differ per Apsara deployment and per mirror VPC.
+# apsara_node_gateway:  10.0.31.253
+# apsara_node_dns:
+#   - 10.x.x.x
 # agent_build_image:   registry.access.redhat.com/ubi9/ubi:latest   # container path base
 # agent_bootstrap_oc:  oc     # host oc used only to extract version-matched clients
 
