@@ -231,19 +231,23 @@
     - ansible.builtin.include_tasks: ../tasks/oss_endpoint.yml
 
     # ossutil requires --flag=value form; space-separated (-i VALUE) is not supported.
-    - name: Verify OSS access
-      ansible.builtin.command:
-        argv: "{{ oss_cli_argv + _a }}"
+    # List the bucket we actually use, not the account's buckets: apsara-oss's `ls`
+    # requires an oss:// target, and checking the real bucket is the stronger test
+    # anyway (it must exist AND belong to the cloud_env account).
+    # Run through run_cli.yml so the credentials stay hidden but a failure still
+    # prints the OSS error — a bare no_log here swallowed the reason entirely.
+    - name: Verify OSS access ({{ oss_bucket }})
+      ansible.builtin.include_tasks: ../tasks/run_cli.yml
       vars:
-        _a:
+        rc_label: "OSS access check (ls oss://{{ oss_bucket }}/)"
+        rc_changed: false
+        _oss_rest:
           - ls
+          - "oss://{{ oss_bucket }}/"
           - "--endpoint={{ _oss_endpoint }}"
           - "--access-key-id={{ _ak }}"
           - "--access-key-secret={{ _sk }}"
-      register: oss_check
-      changed_when: false
-      failed_when: oss_check.rc != 0
-      no_log: true  # Don't print credentials to Ansible output
+        rc_argv: "{{ oss_cli_argv + _oss_rest }}"
 
     - name: Ensure output directory exists
       ansible.builtin.file:
