@@ -81,6 +81,16 @@
     # Extract the version-matched oc + openshift-install FROM the mirror release
     # into a local bin/ dir.  These are RHEL9 binaries — they run INSIDE the UBI9
     # container (not necessarily on the host).  A bootstrap oc only pulls them out.
+    # Delete before extracting: if any process still has the old binary mapped
+    # (a lingering `openshift-install agent wait-for`, a previous build), writing
+    # over it fails with ETXTBSY and the whole run dies.  Unlinking always works —
+    # the running process keeps its inode, the extract creates a fresh file.
+    - name: "container-build: remove previously-extracted clients"
+      ansible.builtin.file:
+        path: "{{ install_dir }}/bin/{{ item }}"
+        state: absent
+      loop: [oc, openshift-install, kubectl]
+
     - name: "container-build: extract oc + openshift-install {{ openshift_version }} from mirror"
       ansible.builtin.command:
         argv:
