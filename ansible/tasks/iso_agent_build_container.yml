@@ -110,6 +110,23 @@
       register: _cb_extract
       changed_when: true
 
+    # The container needs nmstatectl (to validate the static nmstate in
+    # agent-config), but UBI's default repos live on cdn.redhat.com — from China
+    # that dnf can hang for an hour+.  The operator host installs packages fast
+    # because it uses the cloud's RHUI mirror, so lend the container the same repo
+    # config + entitlement certs when they exist.
+    - name: "container-build: look for host RHUI config to lend the container"
+      ansible.builtin.stat:
+        path: /etc/pki/rhui
+      register: _cb_rhui
+
+    - name: "container-build: repo mount args"
+      ansible.builtin.set_fact:
+        _cb_repo_mounts: >-
+          {{ ['-v', '/etc/yum.repos.d:/etc/yum.repos.d:ro',
+              '-v', '/etc/pki/rhui:/etc/pki/rhui:ro']
+             if _cb_rhui.stat.exists else [] }}
+
     - name: "container-build: write the in-container build script"
       ansible.builtin.copy:
         dest: "{{ install_dir }}/agent-build.sh"
@@ -124,7 +141,10 @@
           # YAML at ISO-build time.  UBI9 has no nmstate by default — install it from
           # the UBI repos (http_proxy is passed in for the Squid egress).
           if ! command -v nmstatectl >/dev/null 2>&1; then
-            dnf install -y nmstate
+            # Bounded: a hanging repo must fail loudly, not stall the build for an
+            # hour with no output (cdn.redhat.com from China does exactly that).
+            dnf install -y --setopt=timeout=30 --setopt=retries=2 nmstate \
+              || { echo "ERROR: could not install nmstate — check the container's dnf repos"; exit 1; }
           fi
           export PATH=/work/bin:$PATH
           export XDG_CACHE_HOME=/install/.cache TMPDIR=/install/tmp
@@ -137,28 +157,17 @@
 
     - name: "container-build: openshift-install agent create image (UBI9 container, host network)"
       ansible.builtin.command:
-        argv:
-          - podman
-          - run
-          - --rm
-          - --network=host
-          - --security-opt=label=disable
-          - -e
-          - "http_proxy={{ cloud_env.APSARA_PROXY | default('') }}"
-          - -e
-          - "https_proxy={{ cloud_env.APSARA_PROXY | default('') }}"
-          - -e
-          - "no_proxy={{ mirror_private_ip }},localhost,127.0.0.1"
-          - -v
-          - "{{ install_dir }}:/install:z"
-          - -v
-          - "{{ install_dir }}/bin:/work/bin:z"
-          - -v
-          - "{{ output_dir }}/mirror-ca.crt:/work/mirror-ca.crt:ro"
-          - --entrypoint
-          - /bin/bash
-          - "{{ agent_build_image | default('registry.access.redhat.com/ubi9/ubi:latest') }}"
-          - /install/agent-build.sh
+        argv: "{{ ['podman', 'run', '--rm', '--network=host', '--security-opt=label=disable',
+                   '-e', 'http_proxy=' ~ (cloud_env.APSARA_PROXY | default('')),
+                   '-e', 'https_proxy=' ~ (cloud_env.APSARA_PROXY | default('')),
+                   '-e', 'no_proxy=' ~ mirror_private_ip ~ ',localhost,127.0.0.1',
+                   '-v', install_dir ~ ':/install:z',
+                   '-v', install_dir ~ '/bin:/work/bin:z',
+                   '-v', output_dir ~ '/mirror-ca.crt:/work/mirror-ca.crt:ro']
+                  + _cb_repo_mounts
+                  + ['--entrypoint', '/bin/bash',
+                     agent_build_image | default('registry.access.redhat.com/ubi9/ubi:latest'),
+                     '/install/agent-build.sh'] }}"
       register: _cb_build
       changed_when: true
 
