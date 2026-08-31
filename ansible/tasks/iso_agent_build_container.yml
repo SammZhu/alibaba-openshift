@@ -120,10 +120,15 @@
         path: /etc/pki/rhui
       register: _cb_rhui
 
+    # Mount the host repos at a SIDE path, not over /etc/yum.repos.d: replacing
+    # that directory hides UBI's own public repos and leaves only entitlement-
+    # requiring rhel-9-* ones, so dnf goes to cdn.redhat.com looking for a client
+    # certificate the container doesn't have.  The build script copies just the
+    # RHUI definitions across, keeping the image's repos as a fallback.
     - name: "container-build: repo mount args"
       ansible.builtin.set_fact:
         _cb_repo_mounts: >-
-          {{ ['-v', '/etc/yum.repos.d:/etc/yum.repos.d:ro',
+          {{ ['-v', '/etc/yum.repos.d:/host-repos:ro',
               '-v', '/etc/pki/rhui:/etc/pki/rhui:ro']
              if _cb_rhui.stat.exists else [] }}
 
@@ -141,8 +146,16 @@
           # YAML at ISO-build time.  UBI9 has no nmstate by default — install it from
           # the UBI repos (http_proxy is passed in for the Squid egress).
           if ! command -v nmstatectl >/dev/null 2>&1; then
-            # Bounded: a hanging repo must fail loudly, not stall the build for an
-            # hour with no output (cdn.redhat.com from China does exactly that).
+            # Add the host's RHUI repos (in-cloud, fast) alongside the image's own.
+            # UBI's public repos still work but reach cdn.redhat.com, which from
+            # China can take an hour — hence the timeout, so a slow/broken repo
+            # fails loudly instead of stalling the build with no output.
+            if [ -d /host-repos ]; then
+              grep -ls rhui /host-repos/*.repo 2>/dev/null | while read -r f; do
+                cp -f "$f" /etc/yum.repos.d/ 2>/dev/null || true
+              done
+              echo "repos available:"; dnf repolist 2>/dev/null | tail -n +2
+            fi
             dnf install -y --setopt=timeout=30 --setopt=retries=2 nmstate \
               || { echo "ERROR: could not install nmstate — check the container's dnf repos"; exit 1; }
           fi
