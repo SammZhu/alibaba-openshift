@@ -275,3 +275,64 @@ ansible-playbook playbooks/03-create-mirror-stack.yml     # validated: builds mi
 
 Teardown of the persistent (mirror) stack needs RAM delete permissions the
 sub-user may lack — see the teardown note in `QUICKSTART.md`.
+
+## 5. Known limitation: no cloud-controller-manager
+
+**The Alibaba CCM is not deployed on Apsara** (`ccm_enabled` defaults to false
+there). This is deliberate — deploying it deadlocks the install — but it costs
+you some cloud integration, so it is worth understanding.
+
+### Why it cannot work as-is
+
+Two problems, one of which is fundamental:
+
+1. **Endpoints are built in the public-cloud shape.** The CCM composes
+   `ecs-vpc.<region>.aliyuncs.com`; Apsara serves `ecs-internal.cloud.<env>.com`.
+   Different structure, not a string swap. This one is *probably* solvable —
+   some CCM versions accept a custom endpoint in cloud-config (not investigated).
+
+2. **Apsara requires `x-acs-organizationid` / `x-acs-resourcegroupid` on every
+   request.** The CCM uses the stock Alibaba Go SDK, which never sends them.
+   This is exactly why `scripts/apsara/apsara-rpc` exists — it adds those headers
+   (plus `x-acs-regionid`, `x-acs-caller-sdk-source`) to each call. Without them
+   the gateway either rejects the request or returns an empty result set (a
+   `DescribeImages` returning `TotalCount:0` looks like "no images exist" rather
+   than "wrong scope" — that cost us an afternoon once).
+
+So even with the endpoint fixed, the CCM would get no data back. Making it work
+means patching the CCM's SDK usage — maintaining a fork, not setting a config
+value.
+
+### Why leaving it out is safe here
+
+Nothing this deployment does depends on it:
+
+| CCM provides | Why it isn't needed |
+| ------------ | ------------------- |
+| `LoadBalancer` Services (SLB/NLB) | api / api-int / `*.apps` resolve through CloudDns straight to the node IP |
+| ProviderID on nodes | SNO, no Machine API managing it |
+| zone/region labels | single availability zone |
+| Node lifecycle (ECS deleted → node removed) | single node, managed by hand |
+
+### Why leaving it IN is actively harmful
+
+`install-config` declaring `cloudControllerManager: External` makes kubelet run
+with `--cloud-provider=external`, which taints every node
+`node.cloudprovider.kubernetes.io/uninitialized:NoSchedule` until a CCM clears
+it. The CCM never can, so the taint never lifts: nothing schedules, OVN never
+starts, the node stays `NotReady`, and the install stalls at ~50% with no error
+pointing anywhere near the CCM. Two install attempts died this way before we
+traced it.
+
+### When this becomes a problem again
+
+- You need `type: LoadBalancer` Services → wire up SLB yourself, or use
+  NodePort / MetalLB
+- You add CAPA-managed workers → node lifecycle and ProviderID start to matter
+- CSI turns out to need topology labels → verify; the CSI driver here uses
+  explicit AK/SK rather than the cloud provider, so it likely does not
+
+The real fix, if it is ever needed, is to give the CCM the same treatment
+`apsara-rpc` gives our own calls: custom endpoints plus the org/resource-group
+headers. That is a project of its own and should not block installing clusters.
+
