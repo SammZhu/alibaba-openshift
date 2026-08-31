@@ -257,7 +257,7 @@
             securityGroupIDs: ["{{ smoke_sg }}"]
             ramRoleName: {{ smoke_ram_role }}
             systemDisk:
-              category: cloud_essd
+              category: "{{ data_disk_category | default(system_disk_category | default('cloud_essd')) }}"
               size: 40
           ---
           apiVersion: cluster.x-k8s.io/v1beta2

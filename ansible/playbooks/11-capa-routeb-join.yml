@@ -214,7 +214,7 @@
             vSwitchID: {{ rb_vsw }}
             securityGroupIDs: ["{{ rb_sg }}"]
             ramRoleName: {{ rb_ram_role }}
-            systemDisk: {category: cloud_essd, size: 40}
+            systemDisk: {category: "{{ system_disk_category | default('cloud_essd') }}", size: 40}
           ---
           apiVersion: cluster.x-k8s.io/v1beta2
           kind: Cluster

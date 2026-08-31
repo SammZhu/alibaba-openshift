@@ -505,7 +505,10 @@
                   - --SnapshotId
                   - "{{ _new_vdb_snap_id }}"
                   - --DiskCategory
-                  - cloud_essd
+                  # cloud_essd doesn't exist on Apsara (cloud_pperf there) — this
+                  # call hits the ECS API directly, so apsara_ize's template-level
+                  # substitution doesn't cover it.
+                  - "{{ data_disk_category | default(system_disk_category | default('cloud_essd')) }}"
                   - --DiskName
                   - "{{ _verify_disk_name }}"
                   - --Description

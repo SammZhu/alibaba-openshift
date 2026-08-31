@@ -225,6 +225,13 @@ apsara_node_nic:      ens3            # RHCOS NIC name on Apsara (Alibaba Linux 
 # agent_build_image:   registry.access.redhat.com/ubi9/ubi:latest   # container path base
 # agent_bootstrap_oc:  oc     # host oc used only to extract version-matched clients
 
+# Disk categories.  Apsara's ste3/dyz7 don't offer cloud_essd (use cloud_pperf);
+# apsara_ize.py rewrites the ROS templates, but playbooks that call the ECS API
+# directly (05's verification disk, CAPA machine specs) read these instead.
+# data_disk_category defaults to system_disk_category when unset.
+system_disk_category: cloud_essd
+# data_disk_category:  cloud_essd
+
 # ── mirror-build tuning (playbooks/mirror-build.yml) ─────────────────────────
 # oc-mirror defaults (4 images in parallel, 10m per-image timeout) assume a fast
 # link.  On a slow/high-latency one the parallel images split the bandwidth and
