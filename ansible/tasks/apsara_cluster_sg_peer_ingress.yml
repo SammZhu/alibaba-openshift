@@ -1,0 +1,63 @@
+# apsara_cluster_sg_peer_ingress.yml — let the operator host reach the cluster
+# nodes across the VPC peering.
+#
+# cluster-stack's security group only admits the cluster VPC (10.0.0.0/16).  The
+# operator lives in a DIFFERENT VPC and reaches the nodes over the peering, so
+# without this every operator-side call to a node is dropped: `openshift-install
+# agent wait-for` sits on "Cannot access Rendezvous Host" forever even though the
+# node is healthy and answering on 8090 from inside the cluster VPC.
+#
+# tasks/apsara_peer_vpc.yml does the equivalent for the MIRROR's security group;
+# this is the cluster-side counterpart, applied after 06 creates the stack.
+# Idempotent — re-authorizing an existing rule is not an error.
+#
+# Gated by the caller on: cloud_platform == apsara AND peering mode
+# (apsara_peer_operator_vpc_id set).
+
+- name: "cluster-sg: resolve the operator VPC CIDR"
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", vpc, DescribeVpcs, --RegionId, "{{ region }}",
+           --VpcId, "{{ apsara_peer_operator_vpc_id }}", --profile, "{{ aliyun_profile }}"]
+  register: _csg_vpc
+  changed_when: false
+  when: (apsara_peer_operator_cidr | default('')) | length == 0
+
+- name: "cluster-sg: operator CIDR fact"
+  ansible.builtin.set_fact:
+    _csg_cidr: >-
+      {{ apsara_peer_operator_cidr
+         if ((apsara_peer_operator_cidr | default('')) | length > 0)
+         else (_csg_vpc.stdout | from_json).Vpcs.Vpc[0].CidrBlock }}
+
+- name: "cluster-sg: find the control-plane security group (via the master instance)"
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", ecs, DescribeInstances, --RegionId, "{{ region }}",
+           --InstanceIds, '["{{ rendezvous_instance_id }}"]', --profile, "{{ aliyun_profile }}"]
+  register: _csg_inst
+  changed_when: false
+
+- name: "cluster-sg: security group id fact"
+  ansible.builtin.set_fact:
+    _csg_id: "{{ (_csg_inst.stdout | from_json).Instances.Instance[0].SecurityGroupIds.SecurityGroupId[0] }}"
+
+- name: "cluster-sg: allow the operator CIDR ({{ _csg_cidr }}) into {{ _csg_id }}"
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", ecs, AuthorizeSecurityGroup, --RegionId, "{{ region }}",
+           --SecurityGroupId, "{{ _csg_id }}",
+           --IpProtocol, all, --PortRange, "-1/-1",
+           --SourceCidrIp, "{{ _csg_cidr }}",
+           --Priority, "1",
+           --Description, "operator VPC over peering (06)",
+           --profile, "{{ aliyun_profile }}"]
+  register: _csg_auth
+  changed_when: _csg_auth.rc == 0
+  failed_when:
+    - _csg_auth.rc != 0
+    - "'AlreadyExist' not in (_csg_auth.stderr | default(''))"
+    - "'already exist' not in (_csg_auth.stderr | default('') | lower)"
+
+- name: "cluster-sg: done"
+  ansible.builtin.debug:
+    msg: >-
+      Cluster SG {{ _csg_id }} now admits {{ _csg_cidr }} — the operator can reach
+      the nodes (agent API 8090, api 6443, machine-config 22623) over the peering.

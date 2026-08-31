@@ -261,6 +261,7 @@
         # Instances always exist (placeholder at ABI phase-1), so MasterIp{1,2,3}
         # GetAtt the actual primary-NIC IP — which for ABI equals the fixed param.
         master_ip1:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp1')           | first).OutputValue }}"
+        rendezvous_instance_id: "{{ (_cs_outputs | selectattr('OutputKey','equalto','RendezvousInstanceId') | list | first | default({})).OutputValue | default('') }}"
         master_ip2:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp2')           | first).OutputValue }}"
         master_ip3:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp3')           | first).OutputValue }}"
         # Tolerant lookups: on Apsara apsara_ize.py drops the PVTZ ReverseZone
@@ -347,6 +348,17 @@
       when:
         - (cloud_platform | default('public')) == 'apsara'
         - (cluster_topology | default('ha')) == 'sno'
+
+    # cluster-stack's SG only admits the cluster VPC.  In peering mode the operator
+    # sits in another VPC, so without this `agent wait-for` (which runs on the
+    # operator) can never reach the node's agent API and reports "Cannot access
+    # Rendezvous Host" while the node is perfectly healthy.
+    - name: Apsara — open the cluster SG to the operator VPC (peering mode)
+      ansible.builtin.include_tasks: ../tasks/apsara_cluster_sg_peer_ingress.yml
+      when:
+        - (cloud_platform | default('public')) == 'apsara'
+        - (apsara_peer_operator_vpc_id | default('')) | length > 0
+        - (rendezvous_instance_id | default('')) | length > 0
 
     - name: Resolve forward-zone ID by name (for Phase 07 PTR/DNS PATCHes)
       ansible.builtin.command:
