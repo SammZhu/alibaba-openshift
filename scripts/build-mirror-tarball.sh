@@ -449,6 +449,8 @@ fi
 echo "[3/6] Running oc-mirror v2 (will take 15-60 min depending on link speed)..."
 echo "      cache dir : ${OC_MIRROR_CACHE_DIR:-$HOME/.oc-mirror}"
 echo "      retries   : ${OC_MIRROR_RETRIES:-10}"
+echo "      parallel  : ${OC_MIRROR_PARALLEL_IMAGES:-4} images x ${OC_MIRROR_PARALLEL_LAYERS:-5} layers"
+echo "      img timeout: ${OC_MIRROR_IMAGE_TIMEOUT:-10m}"
 OC_MIRROR_LOG="$WORK_DIR/oc-mirror.log"
 
 # CRITICAL: wipe the per-run output dir before each oc-mirror invocation.
@@ -474,11 +476,20 @@ rm -rf openshift-mirror
 # writes the same content (and more) to
 #   openshift-mirror/working-dir/logs/oc-mirror.log
 # which our post-run validation reads from.
+# Concurrency vs a slow/high-latency link: oc-mirror defaults to 4 images in
+# parallel with a 10m per-image timeout.  On a ~4 MB/s link that budget is split
+# four ways, so the multi-GB release images can't finish inside 10m and the whole
+# run dies with "context deadline exceeded" (seen on Apsara: 17/192 mirrored —
+# only the small images made it).  Fewer parallel images + a longer per-image
+# timeout trades wall-clock for actually completing.
 oc-mirror \
   -c imageset-config.yaml \
   --cache-dir "${OC_MIRROR_CACHE_DIR:-$HOME/.oc-mirror}" \
   --retry-times "${OC_MIRROR_RETRIES:-10}" \
   --retry-delay "${OC_MIRROR_RETRY_DELAY:-5s}" \
+  --parallel-images "${OC_MIRROR_PARALLEL_IMAGES:-4}" \
+  --parallel-layers "${OC_MIRROR_PARALLEL_LAYERS:-5}" \
+  --image-timeout "${OC_MIRROR_IMAGE_TIMEOUT:-10m}" \
   file://./openshift-mirror --v2
 OCM_RC=$?
 # Mirror v2's internal log captures everything (with timestamps) for the post-run

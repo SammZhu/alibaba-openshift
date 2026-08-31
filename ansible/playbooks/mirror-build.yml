@@ -101,6 +101,13 @@
                'WORK_DIR': repo_root ~ '/mirror-build'
              } | combine(
                {
+                 'OC_MIRROR_PARALLEL_IMAGES': oc_mirror_parallel_images | default('') | string,
+                 'OC_MIRROR_PARALLEL_LAYERS': oc_mirror_parallel_layers | default('') | string,
+                 'OC_MIRROR_IMAGE_TIMEOUT':   oc_mirror_image_timeout   | default('') | string,
+                 'OC_MIRROR_RETRIES':         oc_mirror_retries         | default('') | string
+               } | dict2items | rejectattr('value', 'equalto', '') | list | items2dict
+             ) | combine(
+               {
                  'OSS_ENDPOINT': apsara_oss_endpoint | default(''),
                  'AK': _ak,
                  'SK': _sk,

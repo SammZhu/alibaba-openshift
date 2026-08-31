@@ -225,6 +225,17 @@ apsara_node_nic:      ens3            # RHCOS NIC name on Apsara (Alibaba Linux 
 # agent_build_image:   registry.access.redhat.com/ubi9/ubi:latest   # container path base
 # agent_bootstrap_oc:  oc     # host oc used only to extract version-matched clients
 
+# ── mirror-build tuning (playbooks/mirror-build.yml) ─────────────────────────
+# oc-mirror defaults (4 images in parallel, 10m per-image timeout) assume a fast
+# link.  On a slow/high-latency one the parallel images split the bandwidth and
+# the multi-GB release images blow the timeout ("context deadline exceeded",
+# only the small images get mirrored).  Fewer in parallel + a longer timeout
+# trades wall-clock for completing at all.  Unset = oc-mirror's own defaults.
+# oc_mirror_parallel_images: 2
+# oc_mirror_parallel_layers: 4
+# oc_mirror_image_timeout:   45m
+# oc_mirror_retries:         10
+
 # ── Operator-host preparation (playbooks/00a-prepare-operator.yml) ───────────
 # Turns a bare Linux box into a working operator host: packages, SSH keypair,
 # Apsara Go tools, OpenShift clients.  All optional — sane defaults below.
