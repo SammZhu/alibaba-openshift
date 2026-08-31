@@ -110,21 +110,22 @@
       register: _cb_extract
       changed_when: true
 
-    # The container needs nmstatectl (to validate the static nmstate in
-    # agent-config), but UBI's default repos live on cdn.redhat.com — from China
-    # that dnf can hang for an hour+.  The operator host installs packages fast
-    # because it uses the cloud's RHUI mirror, so lend the container the same repo
-    # config + entitlement certs when they exist.
+    # The container needs nmstatectl to validate the static nmstate in
+    # agent-config.  UBI's own public repos (ubi-9-baseos/appstream) can install
+    # it in ~80s, so the important thing is simply NOT to break them — see the
+    # mount note below.  If the host happens to use RHUI (some clouds do), lend
+    # those repos too, since they are usually faster from inside the VPC.
     - name: "container-build: look for host RHUI config to lend the container"
       ansible.builtin.stat:
         path: /etc/pki/rhui
       register: _cb_rhui
 
-    # Mount the host repos at a SIDE path, not over /etc/yum.repos.d: replacing
-    # that directory hides UBI's own public repos and leaves only entitlement-
-    # requiring rhel-9-* ones, so dnf goes to cdn.redhat.com looking for a client
-    # certificate the container doesn't have.  The build script copies just the
-    # RHUI definitions across, keeping the image's repos as a fallback.
+    # Mount the host repos at a SIDE path, never over /etc/yum.repos.d.  Replacing
+    # that directory hides UBI's own public repos and leaves only the host's
+    # entitlement-requiring rhel-9-* ones, so dnf goes to cdn.redhat.com hunting
+    # for a client certificate the container doesn't have and fails outright —
+    # that is exactly how the first attempt broke.  The build script copies only
+    # RHUI definitions across (if any); UBI's repos stay and do the actual work.
     - name: "container-build: repo mount args"
       ansible.builtin.set_fact:
         _cb_repo_mounts: >-
