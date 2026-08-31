@@ -237,7 +237,10 @@
   no_log: true
   when: abi_clone_hook_enabled | default(false) | bool
 
+# Skipped when CCM is disabled (Apsara): the image only exists on the public ACK
+# registry and the controller can't reach the Apsara ECS API anyway.
 - name: ABI — render CCM manifest + alibaba-ccm-config into openshift/
+  when: ccm_enabled | default((cloud_platform | default('public')) != 'apsara')
   ansible.builtin.template:
     src: "{{ item.src }}"
     dest: "{{ install_dir }}/openshift/{{ item.dest }}"

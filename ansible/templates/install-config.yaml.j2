@@ -36,7 +36,19 @@ controlPlane:
 platform:
   external:
     platformName: AlibabaCloud
+{% if ccm_enabled | default((cloud_platform | default('public')) != 'apsara') %}
     cloudControllerManager: External
+{% else %}
+    # No cloudControllerManager: the Alibaba CCM only knows the public-cloud
+    # endpoint layout (ecs-vpc.<region>.aliyuncs.com), which does not exist on
+    # Apsara, so it can never initialise the nodes.  Declaring External makes
+    # kubelet run with --cloud-provider=external and taint every node
+    # node.cloudprovider.kubernetes.io/uninitialized until a CCM clears it —
+    # i.e. forever here, deadlocking the install (nothing schedules, OVN never
+    # starts, the node stays NotReady).  Omitting it means no taint and no CCM.
+    # Trade-off: no ProviderID and no LoadBalancer Services — neither of which
+    # this deployment uses (api/*.apps resolve via CloudDns to the node IP).
+{% endif %}
 {% if mirror_enabled | default(false) | bool %}
 # Mirror redirect — identical source->mirror mapping as the AI install-config
 # PATCH (04-prepare-mirror.yml: oc-mirror v2 publishes exactly these two repos).

@@ -232,6 +232,14 @@ apsara_node_nic:      ens3            # RHCOS NIC name on Apsara (Alibaba Linux 
 system_disk_category: cloud_essd
 # data_disk_category:  cloud_essd
 
+# Alibaba Cloud Controller Manager.  Defaults to true on public cloud, false on
+# Apsara: the CCM builds endpoints as ecs-vpc.<region>.aliyuncs.com, which does
+# not resolve on a private cloud, so it never initialises the nodes — and while
+# install-config declares cloudControllerManager: External, kubelet taints every
+# node uninitialized until a CCM clears it, deadlocking the install.  With it
+# off there is no taint, no CCM: you lose ProviderID and LoadBalancer Services.
+# ccm_enabled: false
+
 # ── mirror-build tuning (playbooks/mirror-build.yml) ─────────────────────────
 # oc-mirror defaults (4 images in parallel, 10m per-image timeout) assume a fast
 # link.  On a slow/high-latency one the parallel images split the bandwidth and
