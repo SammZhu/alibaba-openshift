@@ -24,7 +24,7 @@
   register: _rc_argv
   no_log: "{{ rc_no_log | default(true) }}"
   failed_when: false              # never abort opaquely — surface below
-  changed_when: "{{ rc_changed | default(true) }}"
+  changed_when: rc_changed | default(true)
   retries: "{{ rc_retries | default(1) }}"
   delay: "{{ rc_delay | default(0) }}"
   until: _rc_argv.rc == 0         # retry transient failures; last result drops to surface
@@ -35,7 +35,7 @@
   register: _rc_shell
   no_log: "{{ rc_no_log | default(true) }}"
   failed_when: false
-  changed_when: "{{ rc_changed | default(true) }}"
+  changed_when: rc_changed | default(true)
   retries: "{{ rc_retries | default(1) }}"
   delay: "{{ rc_delay | default(0) }}"
   until: _rc_shell.rc == 0
