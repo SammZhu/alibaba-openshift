@@ -35,10 +35,21 @@ bootArtifactsBaseURL: http://{{ mirror_private_ip }}:8080
 # covers the discovery+bootstrap window so a node never drifts (+8h CST) and
 # fails the "Host clock is not synchronized" validation, regardless of NAT.
 # This is an agent-config field (NOT install-config — that one panics wait-for).
+# On Apsara these are auto-discovered from the mirror ECS (apsara_node_ntp): the
+# public-cloud NTP names below are NOT resolvable there, chrony never syncs, and
+# the node's clock ends up +8h (CST read as UTC).  Every certificate it then
+# issues has a NotBefore 8 hours in the future and the cluster fails TLS against
+# itself — install dies at ~50% with "certificate is not yet valid".
 additionalNTPSources:
+{% if (apsara_node_ntp | default([])) | length > 0 %}
+{% for s in apsara_node_ntp %}
+  - {{ s }}
+{% endfor %}
+{% else %}
   - ntp.cloud.aliyuncs.com
   - ntp1.cloud.aliyuncs.com
   - 100.100.5.1
+{% endif %}
 # One host entry per master, count-driven by abi_master_macs (06 harvests it:
 # SNO=1, HA=3).  loop.index gives master-1, master-2, ...
 {% if (abi_master_macs | default([])) | length > 0 %}

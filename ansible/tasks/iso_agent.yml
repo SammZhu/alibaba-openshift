@@ -149,15 +149,29 @@
   changed_when: false
   when: (cloud_platform | default('public')) == 'apsara'
 
-- name: ABI — node gateway/DNS facts (explicit values win, else auto-discovered)
+# NTP matters more than it looks: the nodes' clock skewing +8h (CST read as UTC,
+# which is what happens when no NTP source is reachable) makes every certificate
+# they issue have a NotBefore 8 hours in the future, and the whole cluster then
+# fails TLS against itself.  The public-cloud NTP names baked in below are NOT
+# reachable on Apsara, so take the mirror's actually-synced sources instead.
+- name: ABI — discover reachable NTP sources from the mirror ECS
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} "chronyc -n sources 2>/dev/null | awk '/^\^/ {print \$2}' | head -3"
+  register: _abi_ntpinfo
+  changed_when: false
+  failed_when: false
+  when: (cloud_platform | default('public')) == 'apsara'
+
+- name: ABI — node gateway/DNS/NTP facts (explicit values win, else auto-discovered)
   ansible.builtin.set_fact:
     apsara_node_gateway: "{{ (apsara_node_gateway | default('')) or (_abi_netinfo.stdout_lines[0] | default('')) }}"
     apsara_node_dns: "{{ (apsara_node_dns | default([])) or (_abi_netinfo.stdout_lines[1:] | default([])) }}"
+    apsara_node_ntp: "{{ (apsara_node_ntp | default([])) or (_abi_ntpinfo.stdout_lines | default([])) }}"
   when: (cloud_platform | default('public')) == 'apsara'
 
 - name: ABI — show the node network that will be baked into agent-config
   ansible.builtin.debug:
-    msg: "nic={{ apsara_node_nic | default('eth0') }} gateway={{ apsara_node_gateway }} dns={{ apsara_node_dns }}"
+    msg: "nic={{ apsara_node_nic | default('eth0') }} gateway={{ apsara_node_gateway }} dns={{ apsara_node_dns }} ntp={{ apsara_node_ntp | default([]) }}"
   when: (cloud_platform | default('public')) == 'apsara'
 
 - name: ABI — master IPs list (parallel to abi_master_macs, for apsara static nmstate)
