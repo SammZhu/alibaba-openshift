@@ -661,8 +661,9 @@ fi
 MR_TARBALL="$WORK_DIR/mirror-registry-${MR_VERSION}.tar.gz"
 if [[ ! -s "$MR_TARBALL" ]]; then
   # developers.redhat.com is the redirect target; anonymous works, no Bearer token
-  curl -fL --retry 5 --retry-delay 10 -o "$MR_TARBALL" \
+  curl -fL --retry 5 --retry-delay 10 -o "${MR_TARBALL}.part" \
     "https://developers.redhat.com/content-gateway/file/pub/openshift-v4/clients/mirror-registry/${MR_VERSION}/mirror-registry.tar.gz"
+  mv -f "${MR_TARBALL}.part" "$MR_TARBALL"
 fi
 ls -lh "$MR_TARBALL"
 
@@ -690,8 +691,15 @@ $OSS_CLI cp "$WORK_DIR/openshift-patch-version.txt" \
 # mirror.openshift.com only at ~20 KB/s on Apsara — pull it from internal OSS
 # instead.  Download here (fast on the build host) and upload version-tagged.
 OCM_TGZ="$WORK_DIR/oc-mirror-${OPENSHIFT_PATCH_VERSION}.tar.gz"
-[[ -f "$OCM_TGZ" ]] || curl -fsSL -o "$OCM_TGZ" \
-  "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OPENSHIFT_PATCH_VERSION}/oc-mirror.tar.gz"
+# Retry like the mirror-registry fetch above: mirror.openshift.com resets
+# connections mid-transfer often enough that a bare curl loses the whole run at
+# the very last step.  Download to a temp file and only then move it into place —
+# testing -f alone would treat a truncated leftover as done and upload it.
+if [[ ! -s "$OCM_TGZ" ]]; then
+  curl -fL --retry 5 --retry-delay 10 -o "${OCM_TGZ}.part" \
+    "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OPENSHIFT_PATCH_VERSION}/oc-mirror.tar.gz"
+  mv -f "${OCM_TGZ}.part" "$OCM_TGZ"
+fi
 $OSS_CLI cp "$OCM_TGZ" \
     "oss://${OSS_BUCKET}/${OSS_PREFIX}/oc-mirror-${OPENSHIFT_PATCH_VERSION}.tar.gz" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" --force
