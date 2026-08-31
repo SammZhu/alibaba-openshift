@@ -131,11 +131,18 @@
     mode: "0755"
   loop: "{{ ['absent', 'directory'] if not (_agent_build_container | default(false)) else ['directory'] }}"
 
-- name: ABI — create local install_dir/openshift
+# ALWAYS wipe openshift/ — everything in it is a per-run rendering product.
+# install_dir itself must survive on the container path (07 reads auth/ and
+# .openshift_install_state.json from it), but that also preserved stale manifests:
+# after CCM was disabled the new render correctly skipped it, yet the PREVIOUS
+# run's 01-alibaba-ccm.yaml was still sitting here and would have been baked into
+# the ISO anyway — the fix would have silently done nothing.
+- name: ABI — reset install_dir/openshift (rendered manifests, rebuilt every run)
   ansible.builtin.file:
     path: "{{ install_dir }}/openshift"
-    state: directory
+    state: "{{ item }}"
     mode: "0755"
+  loop: [absent, directory]
 
 # The nodes sit in the SAME VPC/subnet as the mirror ECS, so the mirror's own
 # default gateway + resolvers are exactly what the nodes need.  Read them off the
