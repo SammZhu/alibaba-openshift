@@ -13,6 +13,14 @@
   hosts: local
   environment: "{{ cloud_env | default({}) }}"
   gather_facts: false
+  vars:
+    # Jump host (public cloud) -> real ProxyCommand.  Direct reachability (apsara
+    # VPC peering / BYO, jump_host_ip empty) -> ProxyCommand=none, which ssh
+    # treats as "no proxy" — keeps every argv below structurally identical.
+    _pc_opt: >-
+      {{ ('ProxyCommand=ssh -i ' ~ ssh_priv_key_file ~
+          ' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@' ~ jump_host_ip)
+         if ((jump_host_ip | default('')) | length > 0) else 'ProxyCommand=none' }}
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
     - ansible.builtin.include_tasks: ../tasks/path_defaults.yml
@@ -30,7 +38,8 @@
           - mirror_private_ip is defined and mirror_private_ip | length > 0
           - mirror_init_user is defined and mirror_init_user | length > 0
           - mirror_init_password is defined and mirror_init_password | length > 0
-          - jump_host_ip is defined and jump_host_ip | length > 0
+          # apsara: operator reaches the mirror directly over the peering — no jump host.
+          - (jump_host_ip | default('') | length > 0) or (cloud_platform | default('public')) == 'apsara'
         fail_msg: |
           Missing mirror state in state.yml.  Run Phase 03 + 04 (with mirror_enabled=true)
           first.
@@ -49,7 +58,7 @@
           - -o
           - ConnectTimeout=10
           - -o
-          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
+          - "{{ _pc_opt }}"
           - "root@{{ mirror_private_ip }}"
           - "curl -ksf https://{{ mirror_private_ip }}:8443/health/instance"
       register: health_check
@@ -73,7 +82,7 @@
           - -o
           - UserKnownHostsFile=/dev/null
           - -o
-          - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
+          - "{{ _pc_opt }}"
           - "root@{{ mirror_private_ip }}"
           - >-
             TOKEN=$(curl -ks -u '{{ mirror_init_user }}:{{ mirror_init_password }}'
@@ -178,7 +187,7 @@
         _ssh_to_mirror: >-
           ssh -i {{ ssh_priv_key_file }}
           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-          -o "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
+          -o "{{ _pc_opt }}"
           root@{{ mirror_private_ip }}
       # block + always guarantees Quay is brought back up no matter where
       # the snapshot flow blows up.  Previously, `podman stop` hit a race
@@ -232,7 +241,7 @@
               - -o
               - ConnectTimeout=10
               - -o
-              - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
+              - "{{ _pc_opt }}"
               - "root@{{ mirror_private_ip }}"
               # P3-FIX.9: everything Quay needs to restore now lives on vdb
               # (/var/lib/quay-storage).  Verify the four pillars are present
@@ -426,7 +435,7 @@
         _ssh_to_mirror: >-
           ssh -i {{ ssh_priv_key_file }}
           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-          -o "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
+          -o "{{ _pc_opt }}"
           root@{{ mirror_private_ip }}
       block:
         - name: Wait until the data snapshot reaches Progress=100% in OSS (up to 30 min)
@@ -562,7 +571,7 @@
                   - -o
                   - ConnectTimeout=10
                   - -o
-                  - "ProxyCommand=ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}"
+                  - "{{ _pc_opt }}"
                   - "root@{{ mirror_private_ip }}"
                   # P3-FIX.9: vdb is a WHOLE-DISK XFS (cloud-init mkfs.xfs on
                   # /dev/vdb, no partition table) — mount /dev/vdc directly, not
