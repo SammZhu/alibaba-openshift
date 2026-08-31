@@ -201,15 +201,20 @@
 
           To find an in-stock alternative quickly:
 
-            for T in c7 c7e c6e c6 g7 g7a r7; do
-              for Z in a b c; do
-                S=$(aliyun ecs DescribeAvailableResource --RegionId {{ region }} \
-                  --DestinationResource InstanceType --InstanceType ecs.${T}.2xlarge \
-                  --ZoneId {{ region }}-${Z} --profile {{ aliyun_profile }} 2>/dev/null \
-                  | jq -r '.AvailableZones.AvailableZone[]?.AvailableResources.AvailableResource[]?.SupportedResources.SupportedResource[]?.Status' | head -1)
-                [ "$S" = "Available" ] && echo "✓ ecs.${T}.2xlarge zone-${Z}"
-              done
-            done
+            # Lists every type that actually HAS stock in your zone.  Note it
+            # filters on StatusCategory (real inventory), NOT Status — Status
+            # only says "sold in this region" and will point you at types ROS
+            # then rejects with ResourceNoStock.
+            {{ cloud_cli }} ecs DescribeAvailableResource --RegionId {{ region }} \
+              --ZoneId {{ zone }} --DestinationResource InstanceType \
+              --InstanceChargeType PostPaid --profile {{ aliyun_profile }} \
+              | jq -r '[.AvailableZones.AvailableZone[]?
+                        .AvailableResources.AvailableResource[]?
+                        .SupportedResources.SupportedResource[]?
+                        | select(.StatusCategory=="WithStock") | .Value] | sort | .[]'
+
+            # 8 vCPU types end in .2xlarge; the cNmM suffix is the vCPU:RAM ratio
+            # (c1m2 = 8c16g for the mirror, c1m4 = 8c32g for a control plane).
 
           Then edit group_vars/all.yml — change control_plane_type / zone(s)
           to a row that shows ✓.  Same-tier swaps (c7 → c6e) keep the same
