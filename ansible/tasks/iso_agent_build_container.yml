@@ -58,6 +58,19 @@
             ((mirror_init_user | default('mirror-admin')) + ':' + mirror_init_password) | b64encode }}"}}}
       no_log: true
 
+    # openshift-install shells out to `oc image extract` WITHOUT --registry-config,
+    # so it relies on the ambient registry auth.  Without it the ICSP redirect to
+    # the mirror can't authenticate and oc silently falls back to the public
+    # registry — which means every ISO build pulls machine-os-images (~1 GB of
+    # RHCOS) across the border instead of from the mirror in the same VPC, taking
+    # 8+ minutes instead of seconds.  Give the container a full auth file.
+    - name: "container-build: ambient registry auth for openshift-install's child oc"
+      ansible.builtin.copy:
+        dest: "{{ install_dir }}/auth.json"
+        content: "{{ _pull_secret_effective }}"
+        mode: "0600"
+      no_log: true
+
     # ICSP so `oc adm release extract` redirects the component pulls (the
     # ocp-v4.0-art-dev @sha256 images holding oc/openshift-install) from quay.io to
     # the mirror.  Without it, --from only locates the release image and the
@@ -184,6 +197,11 @@
             exit 1
           fi
           export PATH=/work/bin:$PATH
+          # Read by `oc` (and thus by the extracts openshift-install runs itself),
+          # so mirror-redirected pulls authenticate instead of falling back to the
+          # public registry.
+          export REGISTRY_AUTH_FILE=/install/auth.json
+          mkdir -p /root/.docker && cp -f /install/auth.json /root/.docker/config.json
           export XDG_CACHE_HOME=/install/.cache TMPDIR=/install/tmp
           mkdir -p "$XDG_CACHE_HOME" "$TMPDIR"
           cd /install
