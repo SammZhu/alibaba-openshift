@@ -95,23 +95,24 @@
          else lookup('password', '/dev/null length=20 chars=ascii_letters,digits') }}
   no_log: true
 
-# Also drop cloud.openshift.com on a mirrored (air-gapped) install: with that
-# entry present the Insights operator keeps trying to upload to
-# console.redhat.com, which is unreachable, so it reports
-# Available=False/Degraded=True forever — and `wait-for install-complete`, which
-# requires every ClusterOperator to be Available, waits for it until it times out.
-# Removing the credential is the documented way to disable Insights reporting.
-- name: ABI — augment pull secret with mirror auth (and disable Insights when mirrored)
+# insights_enabled=false drops cloud.openshift.com from the pull secret, which is
+# the documented way to turn Insights reporting off.  Set it only for a genuinely
+# air-gapped cluster: there, Insights can never reach console.redhat.com, sits at
+# Available=False/Degraded=True forever, and `wait-for install-complete` — which
+# requires every ClusterOperator to be Available — waits for it until it times
+# out.  Using a mirror is NOT by itself a reason to disable it: a mirror is often
+# just there to avoid slow cross-border pulls while egress still works fine.
+- name: ABI — augment pull secret with mirror auth (drop Insights cred if disabled)
   ansible.builtin.set_fact:
     _pull_secret_effective: >-
       {{ (_abi_pull_parsed
           | combine({'auths':
               (_abi_pull_parsed.auths
-                 | dict2items
-                 | rejectattr('key', 'equalto', 'cloud.openshift.com')
-                 | list | items2dict
-                 if (mirror_enabled | default(false) | bool)
-                 else _abi_pull_parsed.auths)
+                 if (insights_enabled | default(true) | bool)
+                 else _abi_pull_parsed.auths
+                        | dict2items
+                        | rejectattr('key', 'equalto', 'cloud.openshift.com')
+                        | list | items2dict)
               | combine({ (mirror_private_ip + ':8443'): {
                   'auth': ((mirror_init_user | default('mirror-admin')) + ':' + _mirror_init_password_resolved) | b64encode,
                   'email': 'mirror-registry@localhost'
@@ -119,6 +120,13 @@
           }))
          | to_json }}
   no_log: true
+
+- name: ABI — note that Insights reporting is disabled
+  ansible.builtin.debug:
+    msg: >-
+      insights_enabled=false — cloud.openshift.com removed from the pull secret,
+      so the Insights operator will not try to reach console.redhat.com.
+  when: not (insights_enabled | default(true) | bool)
 
 - name: ABI — slurp mirror CA cert
   ansible.builtin.slurp:

@@ -240,6 +240,14 @@ system_disk_category: cloud_essd
 # off there is no taint, no CCM: you lose ProviderID and LoadBalancer Services.
 # ccm_enabled: false
 
+# Insights reporting.  Keep true whenever the cluster has egress — a mirror is
+# usually just there to avoid slow cross-border pulls, not because the cluster is
+# cut off.  Set false ONLY for a truly air-gapped cluster: there Insights can
+# never reach console.redhat.com, stays Available=False/Degraded=True, and
+# `wait-for install-complete` (which needs every ClusterOperator Available) times
+# out.  false drops cloud.openshift.com from the pull secret.
+insights_enabled: true
+
 # ── mirror-build tuning (playbooks/mirror-build.yml) ─────────────────────────
 # oc-mirror defaults (4 images in parallel, 10m per-image timeout) assume a fast
 # link.  On a slow/high-latency one the parallel images split the bandwidth and
