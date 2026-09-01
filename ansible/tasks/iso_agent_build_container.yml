@@ -208,6 +208,7 @@
           # (~1 GB of RHCOS) from quay.io over the border while the identical
           # image sat in the mirror one VPC hop away.  registries.conf binds oc,
           # podman and skopeo alike, including child processes we don't control.
+          mkdir -p /etc/containers
           cat > /etc/containers/registries.conf <<REGCONF
           unqualified-search-registries = ["registry.access.redhat.com", "docker.io"]
 
