@@ -202,6 +202,29 @@
           # public registry.
           export REGISTRY_AUTH_FILE=/install/auth.json
           mkdir -p /root/.docker && cp -f /install/auth.json /root/.docker/config.json
+          # Redirect at the containers/image LAYER, not via oc's --icsp-file:
+          # openshift-install passes that flag itself, oc 4.20 deprecates it, and
+          # in practice it was ignored — every build pulled machine-os-images
+          # (~1 GB of RHCOS) from quay.io over the border while the identical
+          # image sat in the mirror one VPC hop away.  registries.conf binds oc,
+          # podman and skopeo alike, including child processes we don't control.
+          cat > /etc/containers/registries.conf <<REGCONF
+          unqualified-search-registries = ["registry.access.redhat.com", "docker.io"]
+
+          [[registry]]
+            prefix = "quay.io/openshift-release-dev/ocp-release"
+            location = "quay.io/openshift-release-dev/ocp-release"
+            [[registry.mirror]]
+              location = "{{ mirror_private_ip }}:8443/openshift/release-images"
+              insecure = true
+
+          [[registry]]
+            prefix = "quay.io/openshift-release-dev/ocp-v4.0-art-dev"
+            location = "quay.io/openshift-release-dev/ocp-v4.0-art-dev"
+            [[registry.mirror]]
+              location = "{{ mirror_private_ip }}:8443/openshift/release"
+              insecure = true
+          REGCONF
           export XDG_CACHE_HOME=/install/.cache TMPDIR=/install/tmp
           mkdir -p "$XDG_CACHE_HOME" "$TMPDIR"
           cd /install
