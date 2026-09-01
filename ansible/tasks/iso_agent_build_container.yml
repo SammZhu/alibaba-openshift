@@ -179,6 +179,34 @@
       delay: 10
       until: _cb_base_build.rc == 0
 
+    # openshift-install shells out to `oc image extract` with hardcoded quay.io
+    # references and its own --icsp-file, and oc does not honour that redirect
+    # (measured: --icsp-file 80s, --idms-file 61s, registries.conf ignored — all
+    # still hitting the CDN, and repeatedly hanging for hours on a ~1 GB pull).
+    # Since /work/bin/oc is OURS, stop asking oc to redirect and rewrite the
+    # reference before it ever sees it: same digest, mirror repository.
+    - name: "container-build: install an oc wrapper that rewrites release refs to the mirror"
+      ansible.builtin.copy:
+        dest: "{{ install_dir }}/bin/oc-mirror-wrapper"
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          # quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:X
+          #   -> {{ mirror_private_ip }}:8443/openshift/release@sha256:X
+          # quay.io/openshift-release-dev/ocp-release@sha256:X
+          #   -> {{ mirror_private_ip }}:8443/openshift/release-images@sha256:X
+          args=()
+          for a in "$@"; do
+            case "$a" in
+              quay.io/openshift-release-dev/ocp-v4.0-art-dev@*)
+                args+=("{{ mirror_private_ip }}:8443/openshift/release@${a#*@}") ;;
+              quay.io/openshift-release-dev/ocp-release@*)
+                args+=("{{ mirror_private_ip }}:8443/openshift/release-images@${a#*@}") ;;
+              *) args+=("$a") ;;
+            esac
+          done
+          exec /work/bin/oc.real "${args[@]}"
+
     - name: "container-build: write the in-container build script"
       ansible.builtin.copy:
         dest: "{{ install_dir }}/agent-build.sh"
@@ -196,7 +224,14 @@
             echo "ERROR: nmstatectl missing from {{ _cb_base_image }} — rebuild that image" >&2
             exit 1
           fi
-          export PATH=/work/bin:$PATH
+          # Activate the rewriting wrapper: openshift-install finds "oc" on PATH,
+          # which is the wrapper; it rewrites quay.io release refs to the mirror
+          # and execs the real binary.
+          cp -f /work/bin/oc /usr/local/bin/oc.real
+          cp -f /work/bin/oc-mirror-wrapper /usr/local/bin/oc
+          chmod 0755 /usr/local/bin/oc /usr/local/bin/oc.real
+          sed -i 's#exec /work/bin/oc.real#exec /usr/local/bin/oc.real#' /usr/local/bin/oc
+          export PATH=/usr/local/bin:/work/bin:$PATH
           # Read by `oc` (and thus by the extracts openshift-install runs itself),
           # so mirror-redirected pulls authenticate instead of falling back to the
           # public registry.
