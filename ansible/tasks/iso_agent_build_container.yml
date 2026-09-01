@@ -110,11 +110,11 @@
       register: _cb_extract
       changed_when: true
 
-    # The container needs nmstatectl to validate the static nmstate in
-    # agent-config.  UBI's own public repos (ubi-9-baseos/appstream) can install
-    # it in ~80s, so the important thing is simply NOT to break them — see the
-    # mount note below.  If the host happens to use RHUI (some clouds do), lend
-    # those repos too, since they are usually faster from inside the VPC.
+    # Repo plumbing for the one-time image build below.  UBI's own public repos
+    # (ubi-9-baseos/appstream) do the actual work; if the host uses RHUI, lend
+    # those too since they are usually faster from inside the VPC.  Never mount
+    # over /etc/yum.repos.d — that hides UBI's repos and leaves only the host's
+    # entitlement-requiring rhel-9-* ones, which fails outright.
     - name: "container-build: look for host RHUI config to lend the container"
       ansible.builtin.stat:
         path: /etc/pki/rhui
@@ -126,12 +126,45 @@
     # for a client certificate the container doesn't have and fails outright —
     # that is exactly how the first attempt broke.  The build script copies only
     # RHUI definitions across (if any); UBI's repos stay and do the actual work.
+    - name: "container-build: name of the prepared build image"
+      ansible.builtin.set_fact:
+        _cb_base_image: "{{ agent_build_image_prepared | default('localhost/agent-build-nmstate:latest') }}"
+
     - name: "container-build: repo mount args"
       ansible.builtin.set_fact:
         _cb_repo_mounts: >-
           {{ ['-v', '/etc/yum.repos.d:/host-repos:ro',
               '-v', '/etc/pki/rhui:/etc/pki/rhui:ro']
              if _cb_rhui.stat.exists else [] }}
+
+    # Bake nmstate into a local image ONCE instead of installing it on every build:
+    # the UBI repos live on cdn.redhat.com and from China that dnf takes anywhere
+    # from 80 seconds to "still going after 10 minutes".  Rebuilds then start
+    # instantly, and a flaky CDN can no longer stall an ISO build.
+    - name: "container-build: does the prepared build image exist?"
+      ansible.builtin.command: podman image exists {{ _cb_base_image }}
+      register: _cb_base_present
+      changed_when: false
+      failed_when: false
+
+    - name: "container-build: build it once (UBI9 + nmstate)"
+      when: _cb_base_present.rc != 0
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          podman build --network=host -t {{ _cb_base_image }} -f - . <<'CONTAINERFILE'
+          FROM {{ agent_build_image | default('registry.access.redhat.com/ubi9/ubi:latest') }}
+          RUN dnf install -y --setopt=timeout=60 --setopt=retries=3 nmstate \
+              && dnf clean all \
+              && nmstatectl --version
+          CONTAINERFILE
+        executable: /bin/bash
+      register: _cb_base_build
+      changed_when: true
+      # A slow CDN shouldn't fail instantly; give it room, but bounded.
+      retries: 2
+      delay: 10
+      until: _cb_base_build.rc == 0
 
     - name: "container-build: write the in-container build script"
       ansible.builtin.copy:
@@ -144,21 +177,11 @@
           cp /work/mirror-ca.crt /etc/pki/ca-trust/source/anchors/mirror-ca.crt
           update-ca-trust
           # A static-network agent-config needs nmstatectl to validate the nmstate
-          # YAML at ISO-build time.  UBI9 has no nmstate by default — install it from
-          # the UBI repos (http_proxy is passed in for the Squid egress).
+          # YAML at ISO-build time.  It is baked into the prepared build image, so
+          # this is only a guard against running with the wrong base image.
           if ! command -v nmstatectl >/dev/null 2>&1; then
-            # Add the host's RHUI repos (in-cloud, fast) alongside the image's own.
-            # UBI's public repos still work but reach cdn.redhat.com, which from
-            # China can take an hour — hence the timeout, so a slow/broken repo
-            # fails loudly instead of stalling the build with no output.
-            if [ -d /host-repos ]; then
-              grep -ls rhui /host-repos/*.repo 2>/dev/null | while read -r f; do
-                cp -f "$f" /etc/yum.repos.d/ 2>/dev/null || true
-              done
-              echo "repos available:"; dnf repolist 2>/dev/null | tail -n +2
-            fi
-            dnf install -y --setopt=timeout=30 --setopt=retries=2 nmstate \
-              || { echo "ERROR: could not install nmstate — check the container's dnf repos"; exit 1; }
+            echo "ERROR: nmstatectl missing from {{ _cb_base_image }} — rebuild that image" >&2
+            exit 1
           fi
           export PATH=/work/bin:$PATH
           export XDG_CACHE_HOME=/install/.cache TMPDIR=/install/tmp
@@ -180,7 +203,7 @@
                    '-v', output_dir ~ '/mirror-ca.crt:/work/mirror-ca.crt:ro']
                   + _cb_repo_mounts
                   + ['--entrypoint', '/bin/bash',
-                     agent_build_image | default('registry.access.redhat.com/ubi9/ubi:latest'),
+                     _cb_base_image,
                      '/install/agent-build.sh'] }}"
       register: _cb_build
       changed_when: true
