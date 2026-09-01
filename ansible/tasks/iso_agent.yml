@@ -180,12 +180,38 @@
   failed_when: false
   when: (cloud_platform | default('public')) == 'apsara'
 
+- name: ABI — remember what the mirror reported (for the mismatch check below)
+  ansible.builtin.set_fact:
+    _abi_disc_gateway: "{{ _abi_netinfo.stdout_lines[0] | default('') }}"
+    _abi_disc_dns: "{{ _abi_netinfo.stdout_lines[1:] | default([]) }}"
+    _abi_cfg_gateway: "{{ apsara_node_gateway | default('') }}"
+    _abi_cfg_dns: "{{ apsara_node_dns | default([]) }}"
+  when: (cloud_platform | default('public')) == 'apsara'
+
 - name: ABI — node gateway/DNS/NTP facts (explicit values win, else auto-discovered)
   ansible.builtin.set_fact:
-    apsara_node_gateway: "{{ (apsara_node_gateway | default('')) or (_abi_netinfo.stdout_lines[0] | default('')) }}"
-    apsara_node_dns: "{{ (apsara_node_dns | default([])) or (_abi_netinfo.stdout_lines[1:] | default([])) }}"
+    apsara_node_gateway: "{{ (apsara_node_gateway | default('')) or _abi_disc_gateway }}"
+    apsara_node_dns: "{{ (apsara_node_dns | default([])) or _abi_disc_dns }}"
     apsara_node_ntp: "{{ (apsara_node_ntp | default([])) or (_abi_ntpinfo.stdout_lines | default([])) }}"
   when: (cloud_platform | default('public')) == 'apsara'
+
+# A stale value here is nasty: routing still works if the gateway happens to match,
+# the cluster installs fine, and only egress DNS quietly breaks — which surfaces
+# much later as "insights Degraded" or images that won't pull.  That is exactly
+# what happened when apsara_node_dns was carried over from another deployment.
+- name: ABI — WARNING configured node network disagrees with the mirror
+  ansible.builtin.debug:
+    msg: |
+      ⚠ group_vars pins a node network that differs from what the mirror ECS reports.
+        gateway : configured={{ _abi_cfg_gateway | default('(unset)', true) }}  mirror={{ _abi_disc_gateway }}
+        dns     : configured={{ _abi_cfg_dns | default('(unset)', true) }}  mirror={{ _abi_disc_dns }}
+      The configured values win and get baked into the ISO.  If they came from a
+      different Apsara deployment, the nodes will not resolve anything outside the
+      VPC.  Unset apsara_node_gateway / apsara_node_dns to use the mirror's values.
+  when:
+    - (cloud_platform | default('public')) == 'apsara'
+    - (_abi_cfg_gateway | length > 0 and _abi_disc_gateway | length > 0 and _abi_cfg_gateway != _abi_disc_gateway)
+      or (_abi_cfg_dns | length > 0 and _abi_disc_dns | length > 0 and _abi_cfg_dns != _abi_disc_dns)
 
 - name: ABI — show the node network that will be baked into agent-config
   ansible.builtin.debug:
