@@ -593,6 +593,54 @@
          if (cloud_platform | default('public')) != 'apsara'
          else ((_abi_img_lookup_ap.stdout | from_json).Images.Image | default([]) | map(attribute='ImageId') | list | first | default('')) }}
 
+# Adoption above matches on IMAGE NAME alone, with no notion of freshness.  That
+# silently defeats a rebuild: the new ISO is pushed to OSS, ImportImage is skipped
+# because the previous round's image still holds the name, and the OSS object is
+# then deleted as "consumed" — so the cluster boots the PREVIOUS config while every
+# task reports success.  When the ISO was actually rebuilt this run, retire the
+# stale image so the name is free and ImportImage below runs.
+- name: ABI — was the ISO (re)built this run?
+  ansible.builtin.set_fact:
+    _abi_iso_rebuilt: "{{ _cb_build_iso | default(agent_iso_force_rebuild | default(false)) | bool }}"
+
+- name: ABI — WARN retiring the stale agent image so the rebuilt ISO is imported
+  ansible.builtin.debug:
+    msg: >-
+      Agent image {{ ecs_image_id }} already holds the name
+      openshift-{{ cluster_name }}-agent but the ISO was rebuilt this run —
+      deleting it so ImportImage picks up the new ISO. Without this the rebuild
+      would be discarded and the node would boot the previous configuration.
+  when:
+    - _abi_iso_rebuilt | bool
+    - ecs_image_id | default('') | length > 0
+
+- name: ABI — delete the stale agent image (mirror ECS / RAM role)
+  when:
+    - (cloud_platform | default('public')) != 'apsara'
+    - _abi_iso_rebuilt | bool
+    - ecs_image_id | default('') | length > 0
+  ansible.builtin.shell: |
+    {{ _ssh_root_mirror }} '{{ cloud_cli }} ecs DeleteImage --region {{ region }} --RegionId {{ region }} --ImageId {{ ecs_image_id }} --Force true --mode EcsRamRole --ram-role-name $(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/)'
+  changed_when: true
+
+- name: ABI — delete the stale agent image (apsara, local cloudcli)
+  when:
+    - (cloud_platform | default('public')) == 'apsara'
+    - _abi_iso_rebuilt | bool
+    - ecs_image_id | default('') | length > 0
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", ecs, DeleteImage, --RegionId, "{{ region }}",
+           --ImageId, "{{ ecs_image_id }}", --Force, "true",
+           --profile, "{{ aliyun_profile }}"]
+  changed_when: true
+
+- name: ABI — clear the adopted image id so ImportImage runs
+  ansible.builtin.set_fact:
+    ecs_image_id: ""
+  when:
+    - _abi_iso_rebuilt | bool
+    - ecs_image_id | default('') | length > 0
+
 - name: ABI — ImportImage the agent ISO (mirror ECS / RAM role) when needed
   when:
     - (cloud_platform | default('public')) != 'apsara'
