@@ -158,7 +158,11 @@ control_plane_count:  3
 control_plane_type:   ecs.g7.xlarge
 compute_count:        0       # 0 = compact (masters schedule workloads)
 compute_type:         ecs.g7.xlarge
+# Apsara (ste3/dyz7) has no cloud_essd — use cloud_pperf there.  apsara_ize.py
+# rewrites the ROS templates, but playbooks that hit the ECS API directly (05's
+# snapshot verification disk, the CAPA machine specs) read these vars instead.
 system_disk_category: cloud_essd
+# data_disk_category:  cloud_essd   # defaults to system_disk_category when unset
 system_disk_size:     120
 # Size (GB) of the /dev/vdb install target.  Must be >= 100 — OpenShift
 # rejects smaller install disks ("Disk is too small … 100 GB required").
@@ -224,13 +228,6 @@ apsara_node_nic:      ens3            # RHCOS NIC name on Apsara (Alibaba Linux 
 #   - 10.x.x.x
 # agent_build_image:   registry.access.redhat.com/ubi9/ubi:latest   # container path base
 # agent_bootstrap_oc:  oc     # host oc used only to extract version-matched clients
-
-# Disk categories.  Apsara's ste3/dyz7 don't offer cloud_essd (use cloud_pperf);
-# apsara_ize.py rewrites the ROS templates, but playbooks that call the ECS API
-# directly (05's verification disk, CAPA machine specs) read these instead.
-# data_disk_category defaults to system_disk_category when unset.
-system_disk_category: cloud_essd
-# data_disk_category:  cloud_essd
 
 # Alibaba Cloud Controller Manager.  Defaults to true on public cloud, false on
 # Apsara: the CCM builds endpoints as ecs-vpc.<region>.aliyuncs.com, which does
