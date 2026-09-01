@@ -102,7 +102,7 @@
       ansible.builtin.file:
         path: "{{ install_dir }}/bin/{{ item }}"
         state: absent
-      loop: [oc, openshift-install, kubectl]
+      loop: [oc, oc.real, openshift-install, kubectl]
 
     - name: "container-build: extract oc + openshift-install {{ openshift_version }} from mirror"
       ansible.builtin.command:
@@ -224,14 +224,15 @@
             echo "ERROR: nmstatectl missing from {{ _cb_base_image }} — rebuild that image" >&2
             exit 1
           fi
-          # Activate the rewriting wrapper: openshift-install finds "oc" on PATH,
-          # which is the wrapper; it rewrites quay.io release refs to the mirror
-          # and execs the real binary.
-          cp -f /work/bin/oc /usr/local/bin/oc.real
-          cp -f /work/bin/oc-mirror-wrapper /usr/local/bin/oc
-          chmod 0755 /usr/local/bin/oc /usr/local/bin/oc.real
-          sed -i 's#exec /work/bin/oc.real#exec /usr/local/bin/oc.real#' /usr/local/bin/oc
-          export PATH=/usr/local/bin:/work/bin:$PATH
+          # Activate the rewriting wrapper by taking over the path openshift-install
+          # actually resolves: move the real binary aside and stand the wrapper in
+          # its place.  Doing this at /work/bin/oc rather than earlier on PATH means
+          # it holds however the child is spawned — PATH order, an absolute path, or
+          # a lookup relative to the installer's own directory.
+          mv -f /work/bin/oc /work/bin/oc.real
+          cp -f /work/bin/oc-mirror-wrapper /work/bin/oc
+          chmod 0755 /work/bin/oc /work/bin/oc.real
+          export PATH=/work/bin:$PATH
           # Read by `oc` (and thus by the extracts openshift-install runs itself),
           # so mirror-redirected pulls authenticate instead of falling back to the
           # public registry.
