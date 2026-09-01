@@ -174,9 +174,16 @@
       register: _cs_poll
       retries: 60
       delay: 30
-      until: (_cs_poll.stdout | from_json).Status in ['CREATE_COMPLETE','UPDATE_COMPLETE']
-      failed_when: (_cs_poll.stdout | from_json).Status in
-                   ['CREATE_FAILED','ROLLBACK_FAILED','ROLLBACK_COMPLETE','DELETE_FAILED']
+      # Tolerate an empty/garbled response: the Apsara gateway occasionally
+      # returns nothing, and feeding that to from_json aborts the whole poll with
+      # "Expecting value: line 1 column 1" — which reads like the stack failed
+      # when it is actually still creating (seen with the stack already Running).
+      # Treat a non-JSON reply as "not ready yet" and keep polling.
+      until: (_cs_poll.stdout | default('') | trim | length > 0)
+             and ((_cs_poll.stdout | from_json).Status | default('') in ['CREATE_COMPLETE','UPDATE_COMPLETE'])
+      failed_when: (_cs_poll.stdout | default('') | trim | length > 0)
+                   and ((_cs_poll.stdout | from_json).Status | default('') in
+                        ['CREATE_FAILED','ROLLBACK_FAILED','ROLLBACK_COMPLETE','DELETE_FAILED'])
       changed_when: false
   rescue:
     # The stack reached a terminal-failure state (or timed out).  The per-resource
