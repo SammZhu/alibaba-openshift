@@ -19,6 +19,10 @@
 #   bi_goproxy     module proxy (proxy.golang.org is blocked here)
 # From state: mirror_private_ip, mirror_init_user, mirror_init_password.
 
+- name: "{{ bi_name }} — build context path"
+  ansible.builtin.set_fact:
+    _bi_ctx: "/tmp/image-build-{{ bi_mirror_repo | regex_replace('[^A-Za-z0-9]', '-') }}"
+
 - name: "{{ bi_name }} — the source repo must be present"
   ansible.builtin.stat:
     path: "{{ bi_repo }}/Makefile"
@@ -104,21 +108,39 @@
   changed_when: true
   no_log: true
 
+# Build from a context holding only the binary, NOT from the repo.  These repos
+# .dockerignore bin/ (their real image is built by a multi-stage Dockerfile that
+# compiles inside the builder), so a COPY from the repo context silently finds
+# nothing: "no items matching glob ... (1 filtered out using .dockerignore)".
+# A dedicated context sidesteps the ignore rules instead of trying to predict
+# them, and does not ship the whole checkout to the build either.
+- name: "{{ bi_name }} — staging directory for the build context"
+  ansible.builtin.file:
+    path: "{{ _bi_ctx }}"
+    state: directory
+    mode: "0755"
+
+- name: "{{ bi_name }} — stage the binary into the build context"
+  ansible.builtin.copy:
+    src: "{{ bi_repo }}/{{ bi_binary }}"
+    dest: "{{ _bi_ctx }}/manager"
+    mode: "0755"
+    remote_src: true
+
 - name: "{{ bi_name }} — Dockerfile layering the new binary onto the mirrored image"
   ansible.builtin.copy:
-    dest: "{{ bi_repo }}/Dockerfile.mirror-base"
+    dest: "{{ _bi_ctx }}/Dockerfile"
     mode: "0644"
     content: |
       FROM {{ mirror_private_ip }}:8443/{{ bi_mirror_repo }}:{{ bi_base_tag }}
-      COPY {{ bi_binary }} /manager
+      COPY manager /manager
       USER 65532:65532
       ENTRYPOINT ["/manager"]
 
 - name: "{{ bi_name }} — build the image"
   ansible.builtin.command:
-    chdir: "{{ bi_repo }}"
+    chdir: "{{ _bi_ctx }}"
     argv: [podman, build, --tls-verify=false,
-           -f, Dockerfile.mirror-base,
            -t, "{{ mirror_private_ip }}:8443/{{ bi_mirror_repo }}:{{ bi_build_tag }}",
            .]
   changed_when: true
