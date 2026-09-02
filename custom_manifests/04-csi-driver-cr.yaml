@@ -27,6 +27,29 @@ spec:
   # show up at rollout: the pods go Ready and the CR reports diskDriverReady,
   # then the first PVC fails on DNS.  Use the environment's own ECS endpoint.
   ecsEndpoint: "{{ cloud_env.ENDPOINT_ECS }}"
+  # The rest of what a private cloud needs, passed straight through to the driver
+  # (it reads all of these itself — see spec.extraEnv in the operator's API):
+  #   ALICLOUD_CLIENT_SCHEME  the gateway's certificate is signed by the
+  #     environment's own CA, so HTTPS fails verification inside the pods
+  #     ("x509: certificate signed by unknown authority") — talk HTTP, exactly
+  #     as apsara-rpc and the CAPA provider do.
+  #   NAS_ENDPOINT            without it the NAS driver resolves
+  #     nas.<region>.aliyuncs.com, which does not exist here.
+  #   ALIBABA_CLOUD_HTTP_HEADERS  tenancy headers, applied to every client.
+  extraEnv:
+    - name: ALICLOUD_CLIENT_SCHEME
+      value: "{{ csi_client_scheme | default('HTTP') }}"
+{% if (cloud_env.ENDPOINT_NAS | default('')) | length > 0 %}
+    - name: NAS_ENDPOINT
+      value: "{{ cloud_env.ENDPOINT_NAS }}"
+{% endif %}
+{% if (cloud_env.ORG_ID | default('')) | length > 0 %}
+    - name: ALIBABA_CLOUD_HTTP_HEADERS
+      value: |
+        x-acs-organizationid: {{ cloud_env.ORG_ID }}
+        x-acs-resourcegroupid: {{ cloud_env.RG_ID | default('') }}
+        x-acs-regionid: {{ region }}
+{% endif %}
 {% elif region is defined and region %}
   # VPC-internal ECS API endpoint. On air-gapped / no-public-egress clusters the
   # driver's default public endpoint (ecs.<region>.aliyuncs.com) times out and node
