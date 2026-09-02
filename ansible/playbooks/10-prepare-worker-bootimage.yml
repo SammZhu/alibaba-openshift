@@ -361,6 +361,24 @@
           failed_when: false
           when: not (skip_upload_until_gate | bool)
 
+        # Apsara refuses RAM role creation outright ("Request was denied due to
+        # isolation policy"), so this used to abort phase 10 there.  The role is
+        # not needed on that platform anyway: 06a imports the agent image over
+        # the same API with no service role at all.  The ImportImage failure that
+        # once looked like a missing role was really the OSS object having been
+        # uploaded by a different identity than the caller — fixed by uploading
+        # with the same AK/SK, not by granting a role.
+        - name: "10 — skip the ECS import service role (Apsara forbids RAM role creation)"
+          ansible.builtin.debug:
+            msg: >-
+              AliyunECSImageImportDefaultRole is absent and will not be created:
+              Apsara denies RAM role creation by isolation policy, and ImportImage
+              does not need it here (06a imports without one).
+          when:
+            - (cloud_platform | default('public')) == 'apsara'
+            - not (skip_upload_until_gate | bool)
+            - _import_role.rc != 0
+
         - name: Create AliyunECSImageImportDefaultRole when missing
           ansible.builtin.command:
             argv: ["{{ cloud_cli }}", ram, CreateRole, --RoleName, AliyunECSImageImportDefaultRole,
@@ -368,6 +386,7 @@
                    '{"Statement":[{"Action":"sts:AssumeRole","Effect":"Allow","Principal":{"Service":["ecs.aliyuncs.com"]}}],"Version":"1"}',
                    --profile, "{{ aliyun_profile }}"]
           when:
+            - (cloud_platform | default('public')) != 'apsara'
             - not (skip_upload_until_gate | bool)
             - _import_role.rc != 0
           changed_when: true
