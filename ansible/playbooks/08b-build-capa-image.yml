@@ -126,7 +126,12 @@
             built from {{ _cb_commit.stdout }}
             base   {{ capa_mirror_repo }}:{{ capa_base_tag }}
 
-          Next:
-            set  capa_image_tag: "{{ capa_build_tag }}"  in group_vars/all.yml
-            then ansible-playbook playbooks/08-deploy-post-install.yml
+          Next — pass the tag as an extra var:
+            ansible-playbook playbooks/08-deploy-post-install.yml \
+              -e capa_image_tag={{ capa_build_tag }}
+            ansible-playbook playbooks/12-capa-machinedeployment.yml
+
+          NOT via group_vars: capa_image_tag comes from vars/images.yml, which 08
+          loads with vars_files — and vars_files outranks group_vars, so a value
+          set there is silently ignored.  Only -e wins.
           08 re-resolves the digest, updates the IDMS and restarts the controller.
