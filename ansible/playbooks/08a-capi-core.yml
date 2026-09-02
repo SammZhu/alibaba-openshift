@@ -49,6 +49,19 @@
       - k8s.m.daocloud.io
     # A blocked registry burns ~3 min in skopeo's own retries, so probe with a
     # hard timeout before committing to a copy.
+    #
+    # NOTE the probe only proves the MANIFEST is served.  Manifests are a few KB
+    # and every mirror caches them, so all three sources answer instantly even
+    # when the blobs behind them crawl.  Measured from a China-side operator on
+    # the 38 MB layer: NJU ~20 KB/s, registry.k8s.io ~52 KB/s (its blobs are NOT
+    # blocked — only the manifest endpoint on *.pkg.dev is, which is why skopeo
+    # cannot use it at all), so this pull legitimately takes 15-30 min.
+    #
+    # Do NOT read the archive's size as progress: docker-archive writes a layer
+    # only once it is fully fetched, so the file sits unchanged for the whole of
+    # that last layer.  Two different mirrors stalling at the identical byte
+    # count is what CORRECT behaviour looks like here, not evidence of a hang —
+    # use /proc/<skopeo pid>/io read_bytes instead.
     capi_core_probe_timeout: 25
 
     # Last resort, only when no source at all is reachable: an archive produced
