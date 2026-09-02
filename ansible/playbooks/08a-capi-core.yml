@@ -20,7 +20,9 @@
   vars:
     _ssh_keepalive: "-o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes"
     _ssh_common_args: "-i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {{ _ssh_keepalive }}"
-    _ssh_proxy_args: "-o ProxyCommand='ssh {{ _ssh_common_args }} -W %h:%p root@{{ jump_host_ip }}'"
+    _ssh_proxy_args: >-
+      {{ ("-o ProxyCommand='ssh " ~ _ssh_common_args ~ " -W %h:%p root@" ~ jump_host_ip ~ "'")
+         if (jump_host_ip | default('') | length > 0) else '' }}
     _ssh_root_mirror: "ssh {{ _ssh_common_args }} {{ _ssh_proxy_args }} root@{{ mirror_private_ip }}"
     capi_core_upstream: registry.k8s.io/cluster-api/cluster-api-controller
     capi_core_tag: v1.12.7
@@ -28,14 +30,17 @@
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
 
-    - name: Assert jump host + mirror are known
+    - name: Resolve the deploy host (jump host, or the operator over peering)
+      ansible.builtin.include_tasks: ../tasks/deploy_host.yml
+
+    - name: Assert the mirror is known
       ansible.builtin.assert:
         that:
-          - jump_host_ip | default('') | length > 0
           - mirror_private_ip | default('') | length > 0
         fail_msg: >-
-          jump_host_ip / mirror_private_ip missing in state.yml — bring up the
-          mirror-stack (Phase 03) first; 08a deploys via the jump host + mirror.
+          mirror_private_ip missing in state.yml — bring up the mirror-stack
+          (Phase 03) first; 08a deploys via the mirror (through the jump host
+          when there is one, directly over the peering when there is not).
 
     - name: Remove any stale CAPI core tar (docker-archive can't be re-written)
       ansible.builtin.file:
@@ -88,7 +93,8 @@
     - name: Add the jump host to the inventory (carry the mirror IP)
       ansible.builtin.add_host:
         name: jumphost
-        ansible_host: "{{ jump_host_ip }}"
+        ansible_host: "{{ _dh_host }}"
+        ansible_connection: "{{ _dh_connection }}"
         ansible_user: root
         ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"

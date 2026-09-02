@@ -35,16 +35,18 @@
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
 
+    - name: Resolve the deploy host (jump host, or the operator over peering)
+      ansible.builtin.include_tasks: ../tasks/deploy_host.yml
+
     - name: Assert prerequisites in state
       ansible.builtin.assert:
         that:
-          - jump_host_ip | default('') | length > 0
           - worker_boot_image_id | default('') | length > 0
           - mirror_vpc_id | default('') | length > 0
           - mirror_private_vsw_1 | default('') | length > 0
           - mirror_zone_id | default('') | length > 0
           - api_lb_endpoint | default('') | length > 0
-        fail_msg: "Need worker_boot_image_id (Phase 10), jump_host_ip, mirror_vpc_id, mirror_private_vsw_1, mirror_zone_id, api_lb_endpoint."
+        fail_msg: "Need worker_boot_image_id (Phase 10), mirror_vpc_id, mirror_private_vsw_1, mirror_zone_id, api_lb_endpoint."
 
     - name: Discover a security group in the cluster VPC
       ansible.builtin.command:
@@ -217,7 +219,8 @@
     - name: Add the jump host (carry multi-AZ inputs)
       ansible.builtin.add_host:
         name: jumphost
-        ansible_host: "{{ jump_host_ip }}"
+        ansible_host: "{{ _dh_host }}"
+        ansible_connection: "{{ _dh_connection }}"
         ansible_user: root
         ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"

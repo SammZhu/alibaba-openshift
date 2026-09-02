@@ -1,0 +1,52 @@
+# deploy_host.yml — resolve WHERE the site-post phases (08+) run `oc`.
+#
+# Two topologies:
+#   - jump host: the operator has no route into the cluster VPC, so oc runs on an
+#     in-VPC jump host and the mirror is reached through a ProxyCommand.
+#   - VPC peering (apsara, mirror builds its own VPC): the operator is routed to
+#     both the cluster API and the mirror, and there is no jump host at all.
+#     07 already states this — "there is no jump host … 08+ run oc on the operator
+#     host" — but 08+ still asserted jump_host_ip and died before doing anything.
+#
+# The 08+ plays target an inventory host named "jumphost" and hardcode
+# /root/kubeconfig in a number of places.  Rather than thread a path through all
+# of them, make the operator itself BE that host when no jump host exists: local
+# connection, same kubeconfig location.  Every play body then works unchanged.
+#
+# Sets: _dh_via_jump, _dh_host, _dh_connection.  Playbooks build _ssh_proxy_args
+# from _dh_via_jump (empty = talk to the mirror directly over the peering).
+
+- name: deploy_host — is there a jump host?
+  ansible.builtin.set_fact:
+    _dh_via_jump: "{{ (jump_host_ip | default('') | length) > 0 }}"
+
+- name: deploy_host — resolve the deploy host
+  ansible.builtin.set_fact:
+    _dh_host: "{{ jump_host_ip if (_dh_via_jump | bool) else 'localhost' }}"
+    _dh_connection: "{{ 'smart' if (_dh_via_jump | bool) else 'local' }}"
+
+- name: deploy_host — assert the mirror is known
+  ansible.builtin.assert:
+    that:
+      - mirror_private_ip | default('') | length > 0
+    fail_msg: >-
+      mirror_private_ip missing in state.yml — bring up the mirror-stack
+      (Phase 03) first.
+
+- name: "deploy_host — no jump host: stage kubeconfig at /root/kubeconfig on the operator"
+  # 08+ hardcode /root/kubeconfig in places; with the operator acting as the
+  # deploy host that path has to exist there too.
+  ansible.builtin.copy:
+    src: "{{ output_dir }}/auth/kubeconfig"
+    dest: /root/kubeconfig
+    mode: "0600"
+    remote_src: true
+  delegate_to: localhost
+  when: not (_dh_via_jump | bool)
+
+- name: deploy_host — which host runs oc
+  ansible.builtin.debug:
+    msg: >-
+      site-post will run oc on
+      {{ 'jump host ' ~ jump_host_ip if (_dh_via_jump | bool)
+         else 'the operator host itself (no jump host — VPC peering)' }}.

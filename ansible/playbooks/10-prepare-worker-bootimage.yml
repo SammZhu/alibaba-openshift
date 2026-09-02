@@ -41,6 +41,9 @@
     # State + OSS endpoint + cloud prereqs are only needed for the upload/import
     # half — the CI bake (re-stamp only) runs cluster-less on the runner.
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: Resolve the deploy host (jump host, or the operator over peering)
+      ansible.builtin.include_tasks: ../tasks/deploy_host.yml
       when: not (skip_upload_until_gate | bool)
     - ansible.builtin.include_tasks: ../tasks/oss_endpoint.yml
       when: not (skip_upload_until_gate | bool)
@@ -48,9 +51,8 @@
     - name: Assert prerequisites in state
       ansible.builtin.assert:
         that:
-          - jump_host_ip | default('') | length > 0
           - oss_bucket | default('') | length > 0
-        fail_msg: "Need jump_host_ip + oss_bucket in state.yml (run 01-03 first)."
+        fail_msg: "Need oss_bucket in state.yml (run 01-03 first)."
       when: not (skip_upload_until_gate | bool)
 
     - name: Assert a qcow was supplied for the re-stamp-only bake
@@ -97,7 +99,8 @@
         - name: Add the jump host for oc delegation
           ansible.builtin.add_host:
             name: jumphost
-            ansible_host: "{{ jump_host_ip }}"
+            ansible_host: "{{ _dh_host }}"
+            ansible_connection: "{{ _dh_connection }}"
             ansible_user: root
             ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
             ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
