@@ -77,6 +77,13 @@ apsara_oss_endpoint: ""
 # (verify with skopeo first), e.g. registry.aliyuncs.com/google_containers, so
 # csi-provisioner/attacher/resizer/snapshotter are mirrored in for CSI storage.
 apsara_sig_storage_registry: ""
+# StorageClass parameters are immutable: changing system_disk_category updates the
+# CSI CR but cannot move an existing class onto the new category, so the cluster
+# keeps provisioning the old one while every task reports success.  08 detects
+# that drift and stops.  Set true to let it delete the drifted classes instead so
+# the operator recreates them (safe — a StorageClass holds no data, existing
+# volumes are untouched; PVCs already bound to it keep working).
+csi_storageclass_recreate: false
 # China-side operator only: registry.k8s.io fronts Google Artifact Registry
 # (*.pkg.dev) and is GFW-blocked, so 08a's CAPI core pull dies on i/o timeout.
 # 08a handles this on its own — it tries the upstream first, then the mirrors in

@@ -370,6 +370,58 @@
       register: csi_cr
       changed_when: "'unchanged' not in csi_cr.stdout"
 
+    - name: "08 — read the CR back (authoritative for the comparison below)"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", get, alibabacloudcsidriver,
+               cluster, -o, json]
+      register: csi_cr_readback
+      changed_when: false
+
+    # A StorageClass's parameters are IMMUTABLE, so the operator cannot move an
+    # existing class onto a new disk category — it leaves the old one in place and
+    # says nothing.  Changing system_disk_category therefore updated the CR, went
+    # green everywhere, and left the cluster provisioning the old category: the
+    # same "configured but not in effect" trap as the stale agent image and the
+    # leftover openshift/ manifests.  Compare and refuse to pass silently.
+    - name: "08 — read back the disk StorageClasses against the CR"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", get, storageclass, -o, json]
+      register: _sc_readback
+      changed_when: false
+
+    - name: "08 — find StorageClasses whose disk category no longer matches the CR"
+      ansible.builtin.set_fact:
+        _sc_drift: >-
+          {{ (_sc_readback.stdout | from_json).items
+             | selectattr('metadata.name', 'in', _csi_declared | map(attribute='name') | list)
+             | selectattr('parameters.type', 'defined')
+             | rejectattr('parameters.type', 'in', _csi_declared | map(attribute='type') | list)
+             | map(attribute='metadata.name') | list }}
+      vars:
+        _csi_declared: "{{ (csi_cr_readback.stdout | default('{}') | from_json).spec.disk.storageClasses | default([]) }}"
+
+    - name: "08 — recreate the drifted StorageClasses so the CR takes effect"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", delete, storageclass, "{{ item }}"]
+      loop: "{{ _sc_drift }}"
+      when:
+        - _sc_drift | length > 0
+        - csi_storageclass_recreate | default(false) | bool
+      changed_when: true
+
+    - name: "08 — StorageClass disk category does not match the CR"
+      ansible.builtin.assert:
+        that: (_sc_drift | default([]) | length) == 0
+        fail_msg: >-
+          {{ _sc_drift | join(', ') }} still carry the previous disk category.
+          StorageClass parameters are immutable, so the operator cannot update
+          them in place and the cluster would keep provisioning the old category
+          while every task here reports success.  Delete them (they hold no data
+          — existing volumes are untouched) and re-run, or set
+          csi_storageclass_recreate=true to have this play do it:
+          oc delete storageclass {{ _sc_drift | join(' ') }}
+      when: not (csi_storageclass_recreate | default(false) | bool)
+
     # ── NAS StorageClass (filesystem-mode dynamic provisioning) ───────────────
     # The CR sets nas.storageClasses=[] so the operator deploys the NAS driver but
     # creates no StorageClass — a provisionable NAS SC needs cluster-network params
