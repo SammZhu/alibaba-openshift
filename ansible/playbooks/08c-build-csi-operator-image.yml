@@ -1,0 +1,53 @@
+---
+# 08c — rebuild the CSI operator image on the operator host and push it to the
+# mirror.  Same reasoning and mechanics as 08b (see tasks/build_image_on_operator.yml).
+#
+# WHY: the CSI driver already supports private clouds through environment
+# variables (NAS_ENDPOINT, ALICLOUD_CLIENT_SCHEME, ALIBABA_CLOUD_HTTP_HEADERS),
+# but this operator only ever set ECS_ENDPOINT, so none of it was reachable —
+# disk provisioning failed TLS verification against the environment's own CA and
+# NAS resolved a public endpoint that does not exist.  spec.extraEnv passes them
+# through; that needs a rebuilt operator AND a re-applied CRD (08 does the CRD).
+#
+# Usage:
+#   ansible-playbook playbooks/08c-build-csi-operator-image.yml \
+#     -e csi_build_ref=apsara-extra-env
+#   then re-run 08 with -e csi_operator_image_tag=<the tag printed below>
+- name: Build the CSI operator image on the operator, push to the mirror
+  hosts: local
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../vars/images.yml"
+  vars:
+    csi_repo: "{{ playbook_dir }}/../../../alibaba-cloud-csi-operator"
+    csi_build_ref: ""
+    csi_base_tag: "{{ csi_operator_image_tag }}"
+    csi_build_tag: "{{ csi_operator_image_tag }}-apsara"
+    csi_mirror_repo: "{{ csi_operator_mirror_repo | default('samzhu/alibaba-cloud-csi-operator') }}"
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: "08c — build and push"
+      ansible.builtin.include_tasks: ../tasks/build_image_on_operator.yml
+      vars:
+        bi_name: 08c
+        bi_repo: "{{ csi_repo }}"
+        bi_ref: "{{ csi_build_ref }}"
+        # This project's `make build` runs manifests/generate/fmt/vet first and
+        # emits a host-arch, cgo-enabled bin/manager — neither of which suits a
+        # distroless base — so compile directly.
+        bi_build_argv: [go, build, -o, bin/manager, cmd/main.go]
+        bi_binary: bin/manager
+        bi_mirror_repo: "{{ csi_mirror_repo }}"
+        bi_base_tag: "{{ csi_base_tag }}"
+        bi_build_tag: "{{ csi_build_tag }}"
+
+    - name: "08c — next steps"
+      ansible.builtin.debug:
+        msg: |
+          Re-run 08 with the new tag (it also re-applies the CRD, which the
+          extraEnv field needs):
+            ansible-playbook playbooks/08-deploy-post-install.yml \
+              -e csi_operator_image_tag={{ csi_build_tag }}
+          then re-run the smoke:
+            ansible-playbook playbooks/13-csi-smoke.yml

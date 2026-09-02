@@ -1,0 +1,137 @@
+# build_image_on_operator.yml — rebuild a Go operator/controller image ON the
+# operator host and push it to the in-VPC mirror.
+#
+# WHY THIS SHAPE: from a China-side operator, upstream base images
+# (gcr.io/distroless/static and friends) are unreachable and so is a push to a
+# public registry.  These projects' Dockerfiles only copy one static binary, so
+# compile here and layer that binary onto the image ALREADY IN THE MIRROR: the
+# same runtime layer, no egress at all, pushed straight back to the mirror under
+# a new tag.
+#
+# Inputs:
+#   bi_name        short label used in task names and messages
+#   bi_repo        path to the source checkout on the operator host
+#   bi_ref         git ref to build ("" = build the working tree as-is)
+#   bi_binary      path (relative to bi_repo) that `make build` produces
+#   bi_mirror_repo repository path inside the mirror, e.g. samzhu/foo
+#   bi_base_tag    tag to layer onto (normally the currently deployed one)
+#   bi_build_tag   tag to produce
+#   bi_goproxy     module proxy (proxy.golang.org is blocked here)
+# From state: mirror_private_ip, mirror_init_user, mirror_init_password.
+
+- name: "{{ bi_name }} — the source repo must be present"
+  ansible.builtin.stat:
+    path: "{{ bi_repo }}/Makefile"
+  register: _bi_repo
+  failed_when: not _bi_repo.stat.exists
+
+# Fetch first.  Checking out a ref the clone already has silently builds
+# whatever it happened to hold — a stale clone once produced a "successful"
+# build of the previous commit, and that only surfaced later as the cluster
+# rejecting a fix which had never been in the image.
+- name: "{{ bi_name }} — fetch the requested ref"
+  ansible.builtin.command:
+    chdir: "{{ bi_repo }}"
+    argv: [git, fetch, origin, "{{ bi_ref }}"]
+  when: bi_ref | length > 0
+  changed_when: true
+
+- name: "{{ bi_name }} — check out exactly what the remote has"
+  ansible.builtin.command:
+    chdir: "{{ bi_repo }}"
+    argv: [git, checkout, --force, "-B", "{{ bi_ref }}", "origin/{{ bi_ref }}"]
+  when: bi_ref | length > 0
+  changed_when: true
+
+- name: "{{ bi_name }} — which commit is being built"
+  ansible.builtin.command:
+    chdir: "{{ bi_repo }}"
+    argv: [git, log, --oneline, -1]
+  register: _bi_commit
+  changed_when: false
+
+- name: "{{ bi_name }} — building"
+  ansible.builtin.debug:
+    msg: "building {{ _bi_commit.stdout }}"
+
+# The binary MUST be static (CGO_ENABLED=0) and linux/amd64: it is layered onto
+# a distroless base with no libc, so a dynamically linked build produces an image
+# that fails at exec with nothing useful in the logs.  Projects whose own `make
+# build` already guarantees that can use it (bi_build_argv); the default here
+# does not rely on it.
+#
+# GOPROXY must be the China mirror: proxy.golang.org is blocked, and a module
+# fetch that hangs looks exactly like a slow compile.
+- name: "{{ bi_name }} — compile (static, linux/amd64)"
+  ansible.builtin.command:
+    chdir: "{{ bi_repo }}"
+    argv: "{{ bi_build_argv | default(['make', 'build']) }}"
+  environment:
+    GOPROXY: "{{ bi_goproxy | default('https://goproxy.cn,direct') }}"
+    GOSUMDB: "off"
+    GOFLAGS: "-mod=mod"
+    CGO_ENABLED: "0"
+    GOOS: linux
+    GOARCH: amd64
+  changed_when: true
+
+- name: "{{ bi_name }} — the binary must be statically linked"
+  # A dynamically linked binary on a distroless base fails at exec with no
+  # useful message, so catch it here rather than in a CrashLoop.
+  ansible.builtin.command:
+    argv: [file, "{{ bi_repo }}/{{ bi_binary }}"]
+  register: _bi_file
+  changed_when: false
+  failed_when:
+    - _bi_file.rc == 0
+    - "'statically linked' not in _bi_file.stdout"
+    - "'static-pie' not in _bi_file.stdout"
+
+- name: "{{ bi_name }} — the binary must exist"
+  ansible.builtin.stat:
+    path: "{{ bi_repo }}/{{ bi_binary }}"
+  register: _bi_bin
+  failed_when: not _bi_bin.stat.exists
+
+# The mirror registry requires auth; without it the base-image pull fails with a
+# bare "unauthorized" that reads like a missing image.
+- name: "{{ bi_name }} — log podman in to the mirror registry"
+  ansible.builtin.command:
+    argv: [podman, login, --tls-verify=false,
+           "{{ mirror_private_ip }}:8443",
+           -u, "{{ mirror_init_user | default('mirror-admin') }}",
+           -p, "{{ mirror_init_password }}"]
+  changed_when: true
+  no_log: true
+
+- name: "{{ bi_name }} — Dockerfile layering the new binary onto the mirrored image"
+  ansible.builtin.copy:
+    dest: "{{ bi_repo }}/Dockerfile.mirror-base"
+    mode: "0644"
+    content: |
+      FROM {{ mirror_private_ip }}:8443/{{ bi_mirror_repo }}:{{ bi_base_tag }}
+      COPY {{ bi_binary }} /manager
+      USER 65532:65532
+      ENTRYPOINT ["/manager"]
+
+- name: "{{ bi_name }} — build the image"
+  ansible.builtin.command:
+    chdir: "{{ bi_repo }}"
+    argv: [podman, build, --tls-verify=false,
+           -f, Dockerfile.mirror-base,
+           -t, "{{ mirror_private_ip }}:8443/{{ bi_mirror_repo }}:{{ bi_build_tag }}",
+           .]
+  changed_when: true
+
+- name: "{{ bi_name }} — push it to the mirror"
+  ansible.builtin.command:
+    argv: [podman, push, --tls-verify=false,
+           "{{ mirror_private_ip }}:8443/{{ bi_mirror_repo }}:{{ bi_build_tag }}"]
+  changed_when: true
+
+- name: "{{ bi_name }} — built"
+  ansible.builtin.debug:
+    msg: |
+      ✓ {{ mirror_private_ip }}:8443/{{ bi_mirror_repo }}:{{ bi_build_tag }}
+        from {{ _bi_commit.stdout }}
+        base {{ bi_mirror_repo }}:{{ bi_base_tag }}

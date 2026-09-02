@@ -36,112 +36,22 @@
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
 
-    - name: "08b — the provider repo must be present"
-      ansible.builtin.stat:
-        path: "{{ capi_repo }}/Makefile"
-      register: _cb_repo
-      failed_when: not _cb_repo.stat.exists
+    - name: "08b — build and push"
+      ansible.builtin.include_tasks: ../tasks/build_image_on_operator.yml
+      vars:
+        bi_name: 08b
+        bi_repo: "{{ capi_repo }}"
+        bi_ref: "{{ capa_build_ref }}"
+        bi_binary: bin/manager-linux-amd64
+        bi_mirror_repo: "{{ capa_mirror_repo }}"
+        bi_base_tag: "{{ capa_base_tag }}"
+        bi_build_tag: "{{ capa_build_tag }}"
+        bi_goproxy: "{{ capa_build_goproxy }}"
 
-    # Fetch first.  Checking out a ref the clone already has silently builds
-    # whatever it happened to hold — a stale clone produced a "successful" build
-    # of the previous commit, and the failure only surfaced later as the cluster
-    # rejecting a fix that was never in the image.
-    - name: "08b — fetch the requested ref"
-      ansible.builtin.command:
-        chdir: "{{ capi_repo }}"
-        argv: [git, fetch, origin, "{{ capa_build_ref }}"]
-      when: capa_build_ref | length > 0
-      changed_when: true
-
-    - name: "08b — check out exactly what the remote has"
-      ansible.builtin.command:
-        chdir: "{{ capi_repo }}"
-        argv: [git, checkout, --force, "-B", "{{ capa_build_ref }}", "origin/{{ capa_build_ref }}"]
-      when: capa_build_ref | length > 0
-      changed_when: true
-
-    - name: "08b — which commit is being built"
-      ansible.builtin.command:
-        chdir: "{{ capi_repo }}"
-        argv: [git, log, --oneline, -1]
-      register: _cb_commit
-      changed_when: false
-
-    - name: "08b — building"
-      ansible.builtin.debug:
-        msg: "building {{ _cb_commit.stdout }}"
-
-    # CGO_ENABLED=0 static build, so the binary runs on whatever base we layer it
-    # onto.  GOPROXY must be the China mirror — proxy.golang.org is blocked, and
-    # a module fetch that hangs looks exactly like a slow build.
-    - name: "08b — compile the manager (static, linux/amd64)"
-      ansible.builtin.command:
-        chdir: "{{ capi_repo }}"
-        argv: [make, build]
-      environment:
-        GOPROXY: "{{ capa_build_goproxy }}"
-        GOSUMDB: "off"
-        GOFLAGS: "-mod=mod"
-      register: _cb_build
-      changed_when: true
-
-    - name: "08b — the binary must exist"
-      ansible.builtin.stat:
-        path: "{{ capi_repo }}/bin/manager-linux-amd64"
-      register: _cb_bin
-      failed_when: not _cb_bin.stat.exists
-
-    # Base = the image already serving in this cluster, pulled from the mirror.
-    # Upstream's Dockerfile uses gcr.io/distroless/static, which is unreachable
-    # here; reusing the mirrored image keeps the exact same runtime layer and
-    # costs no egress at all.
-    # The mirror registry requires auth; without it the base-image pull fails with
-    # a bare "unauthorized" that reads like a missing image.
-    - name: "08b — log podman in to the mirror registry"
-      ansible.builtin.command:
-        argv: [podman, login, --tls-verify=false,
-               "{{ mirror_private_ip }}:8443",
-               -u, "{{ mirror_init_user | default('mirror-admin') }}",
-               -p, "{{ mirror_init_password }}"]
-      register: _cb_login
-      changed_when: true
-      no_log: true
-
-    - name: "08b — Dockerfile layering the new binary onto the mirrored image"
-      ansible.builtin.copy:
-        dest: "{{ capi_repo }}/Dockerfile.mirror-base"
-        mode: "0644"
-        content: |
-          FROM {{ mirror_private_ip }}:8443/{{ capa_mirror_repo }}:{{ capa_base_tag }}
-          COPY bin/manager-linux-amd64 /manager
-          USER 65532:65532
-          ENTRYPOINT ["/manager"]
-
-    - name: "08b — build the image"
-      ansible.builtin.command:
-        chdir: "{{ capi_repo }}"
-        argv: [podman, build, --tls-verify=false,
-               -f, Dockerfile.mirror-base,
-               -t, "{{ mirror_private_ip }}:8443/{{ capa_mirror_repo }}:{{ capa_build_tag }}",
-               .]
-      register: _cb_image
-      changed_when: true
-
-    - name: "08b — push it to the mirror"
-      ansible.builtin.command:
-        argv: [podman, push, --tls-verify=false,
-               "{{ mirror_private_ip }}:8443/{{ capa_mirror_repo }}:{{ capa_build_tag }}"]
-      register: _cb_push
-      changed_when: true
-
-    - name: "08b — done"
+    - name: "08b — next steps"
       ansible.builtin.debug:
         msg: |
-          ✓ {{ mirror_private_ip }}:8443/{{ capa_mirror_repo }}:{{ capa_build_tag }}
-            built from {{ _cb_commit.stdout }}
-            base   {{ capa_mirror_repo }}:{{ capa_base_tag }}
-
-          Next — pass the tag as an extra var:
+          Apply the new tag as an extra var:
             ansible-playbook playbooks/08-deploy-post-install.yml \
               -e capa_image_tag={{ capa_build_tag }}
             ansible-playbook playbooks/12-capa-machinedeployment.yml
@@ -149,4 +59,3 @@
           NOT via group_vars: capa_image_tag comes from vars/images.yml, which 08
           loads with vars_files — and vars_files outranks group_vars, so a value
           set there is silently ignored.  Only -e wins.
-          08 re-resolves the digest, updates the IDMS and restarts the controller.
