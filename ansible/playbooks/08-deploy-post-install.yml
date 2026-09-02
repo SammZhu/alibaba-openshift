@@ -392,13 +392,16 @@
     - name: "08 — find StorageClasses whose disk category no longer matches the CR"
       ansible.builtin.set_fact:
         _sc_drift: >-
-          {{ (_sc_readback.stdout | from_json).items
+          {{ (_sc_readback.stdout | from_json)['items']
              | selectattr('metadata.name', 'in', _csi_declared | map(attribute='name') | list)
              | selectattr('parameters.type', 'defined')
              | rejectattr('parameters.type', 'in', _csi_declared | map(attribute='type') | list)
              | map(attribute='metadata.name') | list }}
       vars:
-        _csi_declared: "{{ (csi_cr_readback.stdout | default('{}') | from_json).spec.disk.storageClasses | default([]) }}"
+        # ['items'] above, not .items — on a dict that resolves to the builtin
+        # method.  Same reason spec/disk are safe here but a key called "items",
+        # "keys" or "values" never is.
+        _csi_declared: "{{ ((csi_cr_readback.stdout | default('{}') | from_json).spec | default({})).disk.storageClasses | default([]) }}"
 
     - name: "08 — recreate the drifted StorageClasses so the CR takes effect"
       ansible.builtin.command:
