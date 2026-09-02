@@ -12,8 +12,22 @@ kind: AlibabaCloudCSIDriver
 metadata:
   name: cluster
   namespace: kube-system
+{# Disk categories are platform-specific: Apsara has no cloud_essd (it uses
+   cloud_pperf), and a StorageClass naming a category the platform does not
+   offer fails only when a PVC is actually provisioned.  The StorageClass NAMES
+   are deliberately left alone — 13-csi-smoke and existing PVCs reference them,
+   so only the category underneath follows the platform. #}
+{% set _csi_type = csi_disk_type | default(system_disk_category | default('cloud_essd')) %}
+{% set _csi_type_cheap = csi_disk_type_cheap | default('cloud_efficiency' if (cloud_platform | default('public')) != 'apsara' else _csi_type) %}
 spec:
-{% if region is defined and region %}
+{% if (cloud_platform | default('public')) == 'apsara' %}
+  # Apsara has no ecs-vpc.<region>.aliyuncs.com — that is the public-cloud layout,
+  # and assuming it is exactly what deadlocks the CCM here (see all.yml.example).
+  # The driver only calls ECS on provision/attach, so a wrong endpoint does NOT
+  # show up at rollout: the pods go Ready and the CR reports diskDriverReady,
+  # then the first PVC fails on DNS.  Use the environment's own ECS endpoint.
+  ecsEndpoint: "{{ cloud_env.ENDPOINT_ECS }}"
+{% elif region is defined and region %}
   # VPC-internal ECS API endpoint. On air-gapped / no-public-egress clusters the
   # driver's default public endpoint (ecs.<region>.aliyuncs.com) times out and node
   # registration fails (NodeGetInfo -> DescribeDisks i/o timeout). The VPC endpoint
@@ -29,7 +43,7 @@ spec:
       # Cluster-wide default StorageClass (first entry + defaultStorageClass: true).
       # Filesystem mode for general container workloads (RWO + Filesystem).
       - name: alicloud-disk-essd
-        type: cloud_essd
+        type: {{ _csi_type }}
         reclaimPolicy: Delete
         allowVolumeExpansion: true
         volumeMode: Filesystem
@@ -37,14 +51,14 @@ spec:
       # access (best VM I/O, no double filesystem layer). Marked virtDefault so OKV
       # DataVolumes land here by default.
       - name: alicloud-disk-essd-block
-        type: cloud_essd
+        type: {{ _csi_type }}
         reclaimPolicy: Delete
         allowVolumeExpansion: true
         volumeMode: Block
         virtDefault: true
       # Cheaper general-purpose class (cloud_efficiency), Filesystem.
       - name: alicloud-disk-efficiency
-        type: cloud_efficiency
+        type: {{ _csi_type_cheap }}
         reclaimPolicy: Delete
         allowVolumeExpansion: true
         volumeMode: Filesystem
