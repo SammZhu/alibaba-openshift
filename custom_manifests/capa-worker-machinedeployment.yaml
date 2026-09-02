@@ -98,7 +98,10 @@ spec:
       regionID: {{ region }}
       securityGroupIDs: ["{{ sg }}"]
       ramRoleName: {{ ram_role }}
-      systemDisk: {category: cloud_essd, size: 40}
+      # Not hardcoded: Apsara has no cloud_essd and RunInstances refuses the
+      # order outright ("resource type [[cloud_essd]] not exists in <zone>").
+      # Follows system_disk_category, the same knob the ROS stacks use.
+      systemDisk: {category: {{ worker_system_disk_category | default(system_disk_category | default('cloud_essd')) }}, size: {{ worker_system_disk_size | default(40) }}}
       # IMDSv2 (httpTokens=required, the controller default) makes the Alibaba
       # metadata service reject RHCOS Ignition's tokenless GET of
       # http://100.100.100.200/latest/user-data with 403 Forbidden — the worker's
