@@ -120,6 +120,39 @@
       when: _op_proxy | length > 0
       changed_when: true
 
+    # ── 4b. companion repos ──────────────────────────────────────────────────
+    # 08 renders the CAPA deployment set from a SIBLING checkout next to this
+    # repo (openshift-capi-alicloud), and 13 does the same for the CSI operator.
+    # A bare-machine operator only has THIS repo, so those phases used to die
+    # deep in site-post — and quietly, because `oc kustomize | sed` returns
+    # sed's status, which is 0 on empty input.  Clone them here instead.
+    - name: "operator: clone the companion repos alongside this one"
+      ansible.builtin.git:
+        repo: "{{ item }}"
+        dest: "{{ (_op_repo ~ '/..') | realpath }}/{{ item | basename | regex_replace('\\.git$', '') }}"
+        version: "{{ operator_companion_repos_version | default('HEAD') }}"
+        update: "{{ operator_companion_repos_update | default(false) | bool }}"
+      loop: "{{ operator_companion_repos | default(_op_companion_default) }}"
+      vars:
+        _op_companion_default:
+          - https://github.com/SammZhu/openshift-capi-alicloud.git
+          - https://github.com/SammZhu/alibaba-cloud-csi-operator.git
+      register: _op_companions
+      # A companion repo missing is not fatal for the phases that do not use it,
+      # so report clearly rather than blocking the whole operator prep.
+      failed_when: false
+
+    - name: "operator: WARN a companion repo could not be cloned"
+      ansible.builtin.debug:
+        msg: >-
+          Could not clone {{ item.item }} ({{ item.msg | default('see above') }}).
+          Phases that render from it (08 for CAPA, 13 for CSI) will fail until it
+          is present next to this repo.
+      loop: "{{ _op_companions.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.failed | default(false)
+
     # ── 5. Apsara Go tools ───────────────────────────────────────────────────
     # apsara-oss is built STATIC (CGO_ENABLED=0): phase 04 pushes this same binary
     # to the mirror ECS, which runs a different OS/glibc.

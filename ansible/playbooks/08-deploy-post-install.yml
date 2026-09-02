@@ -231,12 +231,28 @@
       # on air-gapped clusters, see the digest-pin block above).
       # Rendered on the operator host (delegate_to: local) from the controller's
       # repo checkout; only the apply below touches the cluster (on the jump host).
-      ansible.builtin.shell: >
-        oc kustomize '{{ capi_repo }}/config/default'
-        | sed 's|image: quay.io/samzhu/openshift-capi-alicloud:.*|image: {{ capi_provider_img }}|'
+      # pipefail is essential: without it the pipeline's status comes from sed,
+      # which happily returns 0 on empty input.  A missing capi_repo then renders
+      # to an empty string, the task reports success, and the failure only
+      # surfaces several tasks later as oc's opaque "no objects passed to apply".
+      ansible.builtin.shell: |
+        set -o pipefail
+        oc kustomize '{{ capi_repo }}/config/default' \
+          | sed 's|image: quay.io/samzhu/openshift-capi-alicloud:.*|image: {{ capi_provider_img }}|'
+      args:
+        executable: /bin/bash
       delegate_to: local
       register: capa_rendered
       changed_when: false
+
+    - name: "08 — the CAPA render must not be empty"
+      ansible.builtin.assert:
+        that: (capa_rendered.stdout | default('') | trim | length) > 0
+        fail_msg: >-
+          Rendering CAPA from {{ capi_repo }}/config/default produced nothing.
+          That repo is a SIBLING checkout of this one — run 00a-prepare-operator
+          (it clones the companion repos), or clone it next to this repo:
+          git clone https://github.com/SammZhu/openshift-capi-alicloud.git
 
     - name: Apply CAPA deployment set (CRDs + RBAC + controller + webhooks)
       # Server-side apply so the service-ca-injected webhook caBundle is not
