@@ -39,6 +39,17 @@
     capi_core_pull_src: "{{ ((capi_core_registry | default('')) or 'registry.k8s.io/cluster-api') ~ '/cluster-api-controller' }}"
     capi_core_tag: v1.12.7
     capi_core_mirror_repo: cluster-api/cluster-api-controller
+    # Escape hatch when the operator cannot reach registry.k8s.io at all (GFW,
+    # no usable proxy, no China mirror carrying the tag): pull the image on a
+    # machine that CAN reach it and hand over the archive —
+    #   podman pull --platform linux/amd64 <upstream>:<tag>
+    #   podman save --format docker-archive -o capi-core-<tag>.tar <upstream>:<tag>
+    # then point this at the file on the operator.  Set -> the pull is skipped
+    # and the file is used as-is (and NOT deleted, so it survives across runs).
+    # This keeps the upstream-signed image instead of trusting a third-party
+    # mirror's rebuild.
+    capi_core_prestaged_tar: ""
+    _capi_core_tar: "{{ (capi_core_prestaged_tar | default('')) or ('/tmp/capi-core-' ~ capi_core_tag ~ '.tar') }}"
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
 
@@ -54,11 +65,27 @@
           (Phase 03) first; 08a deploys via the mirror (through the jump host
           when there is one, directly over the peering when there is not).
 
+    - name: "08a — using a pre-staged CAPI core archive (no cross-border pull)"
+      ansible.builtin.debug:
+        msg: "Using {{ _capi_core_tar }} as-is; registry.k8s.io is not contacted."
+      when: (capi_core_prestaged_tar | default('') | length) > 0
+
+    - name: "08a — the pre-staged archive must actually be there"
+      ansible.builtin.stat:
+        path: "{{ _capi_core_tar }}"
+      delegate_to: localhost
+      register: _core_tar_stat
+      when: (capi_core_prestaged_tar | default('') | length) > 0
+      failed_when:
+        - (capi_core_prestaged_tar | default('') | length) > 0
+        - not (_core_tar_stat.stat.exists | default(false))
+
     - name: Remove any stale CAPI core tar (docker-archive can't be re-written)
       ansible.builtin.file:
-        path: "/tmp/capi-core-{{ capi_core_tag }}.tar"
+        path: "{{ _capi_core_tar }}"
         state: absent
       delegate_to: localhost
+      when: (capi_core_prestaged_tar | default('') | length) == 0
 
     - name: Pull the CAPI core image into a docker-archive (operator has egress)
       ansible.builtin.command:
@@ -68,8 +95,9 @@
           - --src-tls-verify=true
           - --retry-times=5
           - "docker://{{ capi_core_pull_src }}:{{ capi_core_tag }}"
-          - "docker-archive:/tmp/capi-core-{{ capi_core_tag }}.tar:{{ capi_core_upstream }}:{{ capi_core_tag }}"
+          - "docker-archive:{{ _capi_core_tar }}:{{ capi_core_upstream }}:{{ capi_core_tag }}"
       delegate_to: localhost
+      when: (capi_core_prestaged_tar | default('') | length) == 0
       # Scoped to THIS task on purpose.  Exporting a proxy process-wide poisons
       # the cloud API calls (a public proxy cannot resolve private-cloud
       # endpoints — that is the APSARA_PROXY / Squid ERR_DNS_FAIL trap).
@@ -86,7 +114,7 @@
     - name: Stage the CAPI core tar onto the mirror ECS via OSS (not scp)
       ansible.builtin.include_tasks: ../tasks/ship_via_oss.yml
       vars:
-        ship_local: "/tmp/capi-core-{{ capi_core_tag }}.tar"
+        ship_local: "{{ _capi_core_tar }}"
         ship_remote: "/tmp/capi-core-{{ capi_core_tag }}.tar"
         ship_object: "capi-core-{{ cluster_name }}-{{ capi_core_tag }}.tar"
 
