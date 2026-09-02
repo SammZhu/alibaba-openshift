@@ -42,10 +42,21 @@
       register: _cb_repo
       failed_when: not _cb_repo.stat.exists
 
-    - name: "08b — check out the requested ref"
+    # Fetch first.  Checking out a ref the clone already has silently builds
+    # whatever it happened to hold — a stale clone produced a "successful" build
+    # of the previous commit, and the failure only surfaced later as the cluster
+    # rejecting a fix that was never in the image.
+    - name: "08b — fetch the requested ref"
       ansible.builtin.command:
         chdir: "{{ capi_repo }}"
-        argv: [git, checkout, "{{ capa_build_ref }}"]
+        argv: [git, fetch, origin, "{{ capa_build_ref }}"]
+      when: capa_build_ref | length > 0
+      changed_when: true
+
+    - name: "08b — check out exactly what the remote has"
+      ansible.builtin.command:
+        chdir: "{{ capi_repo }}"
+        argv: [git, checkout, --force, "-B", "{{ capa_build_ref }}", "origin/{{ capa_build_ref }}"]
       when: capa_build_ref | length > 0
       changed_when: true
 
@@ -55,6 +66,10 @@
         argv: [git, log, --oneline, -1]
       register: _cb_commit
       changed_when: false
+
+    - name: "08b — building"
+      ansible.builtin.debug:
+        msg: "building {{ _cb_commit.stdout }}"
 
     # CGO_ENABLED=0 static build, so the binary runs on whatever base we layer it
     # onto.  GOPROXY must be the China mirror — proxy.golang.org is blocked, and
