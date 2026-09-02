@@ -140,16 +140,46 @@
         - _capa_ns.rc != 0
         - "'AlreadyExists' not in (_capa_ns.stderr | default(''))"
 
+    # Apsara: the SDK derives ecs.<region>.aliyuncs.com, which does not exist
+    # there, so the controller could not create a single instance ("no such
+    # host").  The provider reads these to override endpoint, scheme and the
+    # tenancy headers; unset on public cloud, where the derived endpoints are
+    # correct and the secret carries only the credentials as before.
+    - name: "08 — Apsara environment for the CAPA controller"
+      ansible.builtin.set_fact:
+        _capa_apsara_env: >-
+          {{ {
+               'ALIBABA_CLOUD_SCHEME': 'HTTP',
+               'ALIBABA_CLOUD_ENDPOINT_ECS': cloud_env.ENDPOINT_ECS | default(''),
+               'ALIBABA_CLOUD_ENDPOINT_VPC': cloud_env.ENDPOINT_VPC | default(''),
+               'ALIBABA_CLOUD_ORGANIZATION_ID': cloud_env.ORG_ID | default(''),
+               'ALIBABA_CLOUD_RESOURCE_GROUP_ID': cloud_env.RG_ID | default(''),
+               'ALIBABA_CLOUD_CALLER_SDK_SOURCE': cloud_env.CALLER_SDK_SOURCE | default('capi-alicloud'),
+             } | dict2items | rejectattr('value', 'equalto', '') | list | items2dict
+             if (cloud_platform | default('public')) == 'apsara' else {} }}
+
     - name: Create/update alibaba-creds secret for the CAPA controller (envFrom)
       ansible.builtin.shell: |
         oc --kubeconfig {{ kubeconfig_file }} create secret generic alibaba-creds \
           -n capa-system \
           --from-literal=ALIBABA_CLOUD_ACCESS_KEY_ID='{{ capa_ak }}' \
           --from-literal=ALIBABA_CLOUD_ACCESS_KEY_SECRET='{{ capa_sk }}' \
-          --dry-run=client -o yaml | oc --kubeconfig {{ kubeconfig_file }} apply -f -
+          {% for k, v in (_capa_apsara_env | dictsort) %}--from-literal={{ k }}='{{ v }}' \
+          {% endfor %}--dry-run=client -o yaml | oc --kubeconfig {{ kubeconfig_file }} apply -f -
       register: _capa_secret
       changed_when: "'configured' in _capa_secret.stdout or 'created' in _capa_secret.stdout"
       no_log: true
+
+    # envFrom is read at pod start, so an updated secret changes nothing until
+    # the controller restarts — exactly the kind of "configured but not in
+    # effect" gap this run kept hitting.
+    - name: "08 — restart the CAPA controller so the new environment is picked up"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, capa-system,
+               rollout, restart, deployment/capa-controller-manager]
+      when: (_capa_apsara_env | default({}) | length) > 0
+      changed_when: true
+      failed_when: false
 
     # Air-gap: the install-config emits only an ImageDigestMirrorSet
     # (imageDigestSources), which redirects pulls BY DIGEST. But our CAPA and CSI
