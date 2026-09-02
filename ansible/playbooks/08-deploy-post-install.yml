@@ -389,41 +389,82 @@
       register: _sc_readback
       changed_when: false
 
-    - name: "08 — find StorageClasses whose disk category no longer matches the CR"
+    # What the CR declares.  ['items'] / explicit keys throughout — on a dict,
+    # .items resolves to the builtin method, which is how this check first died.
+    - name: "08 — what the CR declares vs what the cluster has"
+      ansible.builtin.set_fact:
+        _sc_decl_names: "{{ _decl | map(attribute='name') | list }}"
+        _sc_decl_types: "{{ _decl | map(attribute='type') | list }}"
+        _sc_live_names: "{{ _live | map(attribute='metadata.name') | list }}"
+      vars:
+        _decl: "{{ ((csi_cr_readback.stdout | default('{}') | from_json).spec | default({})).disk.storageClasses | default([]) }}"
+        _live: "{{ (_sc_readback.stdout | from_json)['items'] | selectattr('parameters.type', 'defined') | list }}"
+
+    # Two ways the cluster can disagree with the CR, both silent:
+    #   drifted — the class exists with the previous disk category.  Parameters
+    #     are IMMUTABLE, so the operator cannot update it in place; it leaves the
+    #     old one and says nothing.
+    #   missing — declared but absent (e.g. deleted to fix drift).  The operator
+    #     creates classes only while reconciling the CR, and deleting one does
+    #     not trigger that, so it simply stays gone.
+    # Checking only the first is what let an empty result read as "all fine"
+    # while in fact all three classes had vanished.
+    - name: "08 — find drifted and missing disk StorageClasses"
       ansible.builtin.set_fact:
         _sc_drift: >-
           {{ (_sc_readback.stdout | from_json)['items']
-             | selectattr('metadata.name', 'in', _csi_declared | map(attribute='name') | list)
              | selectattr('parameters.type', 'defined')
-             | rejectattr('parameters.type', 'in', _csi_declared | map(attribute='type') | list)
+             | selectattr('metadata.name', 'in', _sc_decl_names)
+             | rejectattr('parameters.type', 'in', _sc_decl_types)
              | map(attribute='metadata.name') | list }}
-      vars:
-        # ['items'] above, not .items — on a dict that resolves to the builtin
-        # method.  Same reason spec/disk are safe here but a key called "items",
-        # "keys" or "values" never is.
-        _csi_declared: "{{ ((csi_cr_readback.stdout | default('{}') | from_json).spec | default({})).disk.storageClasses | default([]) }}"
+        _sc_missing: "{{ _sc_decl_names | reject('in', _sc_live_names) | list }}"
 
-    - name: "08 — recreate the drifted StorageClasses so the CR takes effect"
-      ansible.builtin.command:
-        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", delete, storageclass, "{{ item }}"]
-      loop: "{{ _sc_drift }}"
-      when:
-        - _sc_drift | length > 0
-        - csi_storageclass_recreate | default(false) | bool
-      changed_when: true
+    - name: "08 — reconcile the disk StorageClasses with the CR"
+      when: (_sc_drift | length > 0) or (_sc_missing | length > 0)
+      block:
+        - name: "08 — the disk StorageClasses do not match the CR"
+          ansible.builtin.assert:
+            that: false
+            fail_msg: >-
+              {% if _sc_drift | length %}{{ _sc_drift | join(', ') }} still carry the
+              previous disk category (parameters are immutable, so the operator
+              cannot update them in place).{% endif %}
+              {% if _sc_missing | length %}{{ _sc_missing | join(', ') }} are declared
+              in the CR but absent from the cluster.{% endif %}
+              The cluster would keep provisioning the old category, or nothing at
+              all, while every task here reports success.  Re-run with
+              csi_storageclass_recreate=true to delete the drifted classes and
+              nudge the operator into recreating them.
+          when: not (csi_storageclass_recreate | default(false) | bool)
 
-    - name: "08 — StorageClass disk category does not match the CR"
-      ansible.builtin.assert:
-        that: (_sc_drift | default([]) | length) == 0
-        fail_msg: >-
-          {{ _sc_drift | join(', ') }} still carry the previous disk category.
-          StorageClass parameters are immutable, so the operator cannot update
-          them in place and the cluster would keep provisioning the old category
-          while every task here reports success.  Delete them (they hold no data
-          — existing volumes are untouched) and re-run, or set
-          csi_storageclass_recreate=true to have this play do it:
-          oc delete storageclass {{ _sc_drift | join(' ') }}
-      when: not (csi_storageclass_recreate | default(false) | bool)
+        - name: "08 — delete the drifted StorageClasses (they hold no data)"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", delete, storageclass, "{{ item }}"]
+          loop: "{{ _sc_drift }}"
+          changed_when: true
+
+        # Deleting a StorageClass does not make the operator notice: it reconciles
+        # on CR changes, so the classes stay gone until something touches the CR.
+        - name: "08 — nudge the CSI operator into reconciling"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", annotate,
+                   alibabacloudcsidriver, cluster, --overwrite,
+                   "csi.alibabacloud.com/reconciled-by-ansible={{ lookup('pipe', 'date -u +%FT%TZ') }}"]
+          changed_when: true
+
+        - name: "08 — wait for every declared StorageClass to exist with the CR's category"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", get, storageclass, -o, json]
+          register: _sc_recheck
+          changed_when: false
+          retries: 30
+          delay: 5
+          until: >-
+            {{ ((_sc_recheck.stdout | default('{}') | from_json)['items'] | default([]))
+               | selectattr('parameters.type', 'defined')
+               | selectattr('metadata.name', 'in', _sc_decl_names)
+               | selectattr('parameters.type', 'in', _sc_decl_types)
+               | list | length == (_sc_decl_names | length) }}
 
     # ── NAS StorageClass (filesystem-mode dynamic provisioning) ───────────────
     # The CR sets nas.storageClasses=[] so the operator deploys the NAS driver but
