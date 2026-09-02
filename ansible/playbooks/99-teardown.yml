@@ -133,18 +133,26 @@
     # This must run BEFORE the worker-ECS delete / DeleteStack below (those kill the
     # CSI controller + nodes). Best-effort + bounded: PVCs still mounted by running
     # pods stay Terminating (pvc-protection) and are left to the aliyun NAS sweep +
-    # DeleteStack backstop in the mirror-stack block. Needs the jump host (the
-    # operator box cannot reach the private cluster API); skipped when the jump host
-    # IP is unknown or the cluster API is already gone.
+    # DeleteStack backstop in the mirror-stack block.  Needs a host that can reach
+    # the private cluster API: the jump host, or — on the peering topology — the
+    # operator itself.  Gating this on jump_host_ip alone silently skipped the
+    # whole reclaim on Apsara, leaving volumes orphaned while teardown reported
+    # success.  Still skipped when the cluster API is already gone.
+    - name: Resolve the deploy host for the reclaim (jump host, or the operator)
+      ansible.builtin.include_tasks: ../tasks/deploy_host.yml
+      vars:
+        deploy_host_require_mirror: false
+      when: teardown_target in ['cluster', 'both']
+
     - name: PVC-delete-first reclaim (primary path; backstop = NAS API sweep below)
       when:
         - teardown_target in ['cluster', 'both']
-        - jump_host_ip | default('') | length > 0
       block:
-        - name: Add the jump host for oc access
+        - name: Add the deploy host for oc access
           ansible.builtin.add_host:
             name: jumphost
-            ansible_host: "{{ jump_host_ip }}"
+            ansible_host: "{{ _dh_host }}"
+            ansible_connection: "{{ _dh_connection }}"
             ansible_user: root
             ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
             ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"

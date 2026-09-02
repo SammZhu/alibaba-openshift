@@ -35,17 +35,21 @@
   tasks:
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
 
+    - name: Resolve the deploy host (jump host, or the operator over peering)
+      ansible.builtin.include_tasks: ../tasks/deploy_host.yml
+
     - name: Assert the jump host IP is known
       ansible.builtin.assert:
-        that: jump_host_ip | default('') | length > 0
+        that: mirror_private_ip | default('') | length > 0
         fail_msg: >-
-          jump_host_ip is not in state.yml — run site-post (or Phase 08) first;
+          mirror_private_ip is not in state.yml — run site-post (or Phase 08) first;
           Phase 13 smokes the cluster via the jump host.
 
     - name: Add the jump host to the inventory
       ansible.builtin.add_host:
         name: jumphost
-        ansible_host: "{{ jump_host_ip }}"
+        ansible_host: "{{ _dh_host }}"
+        ansible_connection: "{{ _dh_connection }}"
         ansible_user: root
         ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
         ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"

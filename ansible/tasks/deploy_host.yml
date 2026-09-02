@@ -32,6 +32,14 @@
     fail_msg: >-
       mirror_private_ip missing in state.yml — bring up the mirror-stack
       (Phase 03) first.
+  when: deploy_host_require_mirror | default(true) | bool
+
+- name: deploy_host — is the cluster kubeconfig still there?
+  # Teardown runs this too, by which point the cluster may already be gone.
+  ansible.builtin.stat:
+    path: "{{ output_dir }}/auth/kubeconfig"
+  delegate_to: localhost
+  register: _dh_kubeconfig_src
 
 - name: "deploy_host — no jump host: stage kubeconfig at /root/kubeconfig on the operator"
   # 08+ hardcode /root/kubeconfig in places; with the operator acting as the
@@ -42,7 +50,9 @@
     mode: "0600"
     remote_src: true
   delegate_to: localhost
-  when: not (_dh_via_jump | bool)
+  when:
+    - not (_dh_via_jump | bool)
+    - _dh_kubeconfig_src.stat.exists
 
 - name: deploy_host — which host runs oc
   ansible.builtin.debug:
