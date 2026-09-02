@@ -147,6 +147,14 @@
           capi_core_prestaged_tar at an archive produced elsewhere.
       when: (capi_core_prestaged_tar | default('') | length) == 0
 
+    - name: "08a — image source used"
+      ansible.builtin.debug:
+        msg: >-
+          CAPI core will be pulled from {{ _capi_core_ref }}
+          {{ '(upstream)' if _capi_core_ref.startswith('registry.k8s.io')
+             else '(mirror — content-addressed, digest pinned to upstream)' }}
+      when: (capi_core_prestaged_tar | default('') | length) == 0
+
     - name: "08a — pull the CAPI core image into a docker-archive"
       ansible.builtin.command:
         argv:
@@ -164,14 +172,6 @@
       changed_when: true
       when: (capi_core_prestaged_tar | default('') | length) == 0
       environment: *capi_pull_env
-
-    - name: "08a — image source used"
-      ansible.builtin.debug:
-        msg: >-
-          CAPI core pulled from {{ _capi_core_ref }}
-          {{ '(upstream)' if _capi_core_ref.startswith('registry.k8s.io')
-             else '(mirror — content-addressed, digest pinned to upstream)' }}
-      when: (capi_core_prestaged_tar | default('') | length) == 0
 
     - name: Stage the CAPI core tar onto the mirror ECS via OSS (not scp)
       ansible.builtin.include_tasks: ../tasks/ship_via_oss.yml
