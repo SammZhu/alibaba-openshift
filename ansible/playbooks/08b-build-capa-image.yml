@@ -1,0 +1,110 @@
+---
+# 08b — rebuild the CAPA provider image on the operator and push it to the mirror.
+#
+# WHY THIS EXISTS: the provider's SDK derives ecs.<region>.aliyuncs.com, which
+# does not exist on Apsara, so the controller cannot create a single instance.
+# The fix is in the provider (endpoint/scheme/tenancy-header overrides driven by
+# the environment), which means a rebuilt image — and neither the upstream base
+# image nor a public registry is reachable from a China-side operator.
+#
+# So: compile on the operator, and layer the binary onto the CAPA image ALREADY
+# IN THE MIRROR.  Nothing crosses the border — the base layer is in the same VPC
+# — and the result is pushed straight back to the mirror under a new tag.
+#
+# Usage:
+#   ansible-playbook playbooks/08b-build-capa-image.yml \
+#     -e capa_build_ref=apsara-endpoint-support -e capa_build_tag=v0.1.0-apsara1
+#   then set capa_image_tag to that tag and re-run 08.
+- name: Build the CAPA provider image on the operator, push to the mirror
+  hosts: local
+  gather_facts: false
+  vars:
+    capi_repo: "{{ playbook_dir }}/../../../openshift-capi-alicloud"
+    capa_build_ref: ""                 # empty = build the working tree as-is
+    capa_build_tag: "{{ capa_image_tag | default('latest') }}-apsara"
+    capa_mirror_repo: samzhu/openshift-capi-alicloud
+    capa_build_goproxy: "https://goproxy.cn,direct"
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: "08b — the provider repo must be present"
+      ansible.builtin.stat:
+        path: "{{ capi_repo }}/Makefile"
+      register: _cb_repo
+      failed_when: not _cb_repo.stat.exists
+
+    - name: "08b — check out the requested ref"
+      ansible.builtin.command:
+        chdir: "{{ capi_repo }}"
+        argv: [git, checkout, "{{ capa_build_ref }}"]
+      when: capa_build_ref | length > 0
+      changed_when: true
+
+    - name: "08b — which commit is being built"
+      ansible.builtin.command:
+        chdir: "{{ capi_repo }}"
+        argv: [git, log, --oneline, -1]
+      register: _cb_commit
+      changed_when: false
+
+    # CGO_ENABLED=0 static build, so the binary runs on whatever base we layer it
+    # onto.  GOPROXY must be the China mirror — proxy.golang.org is blocked, and
+    # a module fetch that hangs looks exactly like a slow build.
+    - name: "08b — compile the manager (static, linux/amd64)"
+      ansible.builtin.command:
+        chdir: "{{ capi_repo }}"
+        argv: [make, build]
+      environment:
+        GOPROXY: "{{ capa_build_goproxy }}"
+        GOSUMDB: "off"
+        GOFLAGS: "-mod=mod"
+      register: _cb_build
+      changed_when: true
+
+    - name: "08b — the binary must exist"
+      ansible.builtin.stat:
+        path: "{{ capi_repo }}/bin/manager-linux-amd64"
+      register: _cb_bin
+      failed_when: not _cb_bin.stat.exists
+
+    # Base = the image already serving in this cluster, pulled from the mirror.
+    # Upstream's Dockerfile uses gcr.io/distroless/static, which is unreachable
+    # here; reusing the mirrored image keeps the exact same runtime layer and
+    # costs no egress at all.
+    - name: "08b — Dockerfile layering the new binary onto the mirrored image"
+      ansible.builtin.copy:
+        dest: "{{ capi_repo }}/Dockerfile.mirror-base"
+        mode: "0644"
+        content: |
+          FROM {{ mirror_private_ip }}:8443/{{ capa_mirror_repo }}:{{ capa_image_tag | default('latest') }}
+          COPY bin/manager-linux-amd64 /manager
+          USER 65532:65532
+          ENTRYPOINT ["/manager"]
+
+    - name: "08b — build the image"
+      ansible.builtin.command:
+        chdir: "{{ capi_repo }}"
+        argv: [podman, build, --tls-verify=false,
+               -f, Dockerfile.mirror-base,
+               -t, "{{ mirror_private_ip }}:8443/{{ capa_mirror_repo }}:{{ capa_build_tag }}",
+               .]
+      register: _cb_image
+      changed_when: true
+
+    - name: "08b — push it to the mirror"
+      ansible.builtin.command:
+        argv: [podman, push, --tls-verify=false,
+               "{{ mirror_private_ip }}:8443/{{ capa_mirror_repo }}:{{ capa_build_tag }}"]
+      register: _cb_push
+      changed_when: true
+
+    - name: "08b — done"
+      ansible.builtin.debug:
+        msg: |
+          ✓ {{ mirror_private_ip }}:8443/{{ capa_mirror_repo }}:{{ capa_build_tag }}
+            built from {{ _cb_commit.stdout }}
+
+          Next:
+            set  capa_image_tag: "{{ capa_build_tag }}"  in group_vars/all.yml
+            then ansible-playbook playbooks/08-deploy-post-install.yml
+          08 re-resolves the digest, updates the IDMS and restarts the controller.
