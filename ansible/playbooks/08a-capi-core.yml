@@ -25,6 +25,18 @@
          if (jump_host_ip | default('') | length > 0) else '' }}
     _ssh_root_mirror: "ssh {{ _ssh_common_args }} {{ _ssh_proxy_args }} root@{{ mirror_private_ip }}"
     capi_core_upstream: registry.k8s.io/cluster-api/cluster-api-controller
+    # Where the BYTES are pulled from.  registry.k8s.io fronts Google Artifact
+    # Registry (*.pkg.dev); from a China-side operator every region resolves to
+    # the same blocked address and the pull dies on i/o timeout — the comment
+    # above assumes an operator OUTSIDE the GFW, which is not true on Apsara.
+    # Two escapes, both optional and both off by default:
+    #   capi_core_registry — a China-reachable registry+namespace carrying the
+    #     exact tag (verify with skopeo first), same convention as
+    #     apsara_sig_storage_registry in 04.
+    #   image_pull_proxy — tunnel to the official source instead.
+    # The CLUSTER-side reference stays registry.k8s.io either way (IDMS maps it
+    # to the mirror), so only the source of the bytes changes.
+    capi_core_pull_src: "{{ ((capi_core_registry | default('')) or 'registry.k8s.io/cluster-api') ~ '/cluster-api-controller' }}"
     capi_core_tag: v1.12.7
     capi_core_mirror_repo: cluster-api/cluster-api-controller
   tasks:
@@ -55,9 +67,16 @@
           - copy
           - --src-tls-verify=true
           - --retry-times=5
-          - "docker://{{ capi_core_upstream }}:{{ capi_core_tag }}"
+          - "docker://{{ capi_core_pull_src }}:{{ capi_core_tag }}"
           - "docker-archive:/tmp/capi-core-{{ capi_core_tag }}.tar:{{ capi_core_upstream }}:{{ capi_core_tag }}"
       delegate_to: localhost
+      # Scoped to THIS task on purpose.  Exporting a proxy process-wide poisons
+      # the cloud API calls (a public proxy cannot resolve private-cloud
+      # endpoints — that is the APSARA_PROXY / Squid ERR_DNS_FAIL trap).
+      environment:
+        https_proxy: "{{ image_pull_proxy | default('') }}"
+        http_proxy: "{{ image_pull_proxy | default('') }}"
+        no_proxy: "{{ image_pull_no_proxy | default('localhost,127.0.0.1,' ~ (mirror_private_ip | default(''))) }}"
       register: _core_pull
       retries: 3
       delay: 20

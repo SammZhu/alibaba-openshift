@@ -77,6 +77,17 @@ apsara_oss_endpoint: ""
 # (verify with skopeo first), e.g. registry.aliyuncs.com/google_containers, so
 # csi-provisioner/attacher/resizer/snapshotter are mirrored in for CSI storage.
 apsara_sig_storage_registry: ""
+# China-side operator only: registry.k8s.io fronts Google Artifact Registry
+# (*.pkg.dev) and is GFW-blocked, so 08a's CAPI core pull dies on i/o timeout.
+# Either name a reachable registry+namespace carrying the exact tag (verify with
+# skopeo first; note a third-party mirror is a supply-chain decision — the digest
+# is not the upstream-signed one), or tunnel to the official source with
+# image_pull_proxy.  Both empty -> pull straight from registry.k8s.io.
+capi_core_registry: ""              # e.g. registry.aliyuncs.com/google_containers
+# Proxy used ONLY for cross-border image pulls (scoped per task, never exported
+# process-wide — a public proxy cannot resolve private-cloud API endpoints, which
+# is how APSARA_PROXY once hijacked every cloud call into Squid ERR_DNS_FAIL).
+image_pull_proxy: ""                # e.g. http://1.2.3.4:50002
 # apsara only: mirror ECS package-repo mirror.  The image's default dnf host
 # (mirrors.cloud.aliyuncs.com) is unreachable from a private-cloud VPC, so the
 # mirror ECS cloud-init can't install podman.  Point at a reachable mirror; the IP
