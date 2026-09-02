@@ -73,6 +73,13 @@ def main():
                  f"(add it to PRODUCTS in {sys.argv[0]})")
     name, version = PRODUCTS[key]
 
+    # An Apsara deployment can carry a different API version than the public
+    # cloud for the same product, and the gateway answers a wrong one with a bare
+    # "InvalidVersion" — reachable endpoint, right product, unusable call.  Allow
+    # VERSION_<PRODUCT> to override without editing this table, which is what
+    # makes it practical to find the version a new environment actually serves.
+    version = os.environ.get(f"VERSION_{key.upper()}", version)
+
     # Translate aliyun-CLI auth/global flags into what apsara-rpc consumes:
     #   --profile <name>            dropped (apsara-rpc auths via env)
     #   --region <r>                dropped (apsara-rpc uses REGION env / --RegionId)
