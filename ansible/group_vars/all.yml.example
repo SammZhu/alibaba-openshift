@@ -176,6 +176,9 @@ control_plane_count:  3
 control_plane_type:   ecs.g7.xlarge
 compute_count:        0       # 0 = compact (masters schedule workloads)
 compute_type:         ecs.g7.xlarge
+# Worker type for the CAPA MachineDeployment (phase 12).  Falls back to
+# compute_type when unset.  Apsara has none of the public-cloud g7 shapes — use
+# what the environment actually offers, e.g. ecs.g7x-k25-c1m2.2xlarge.
 # Apsara (ste3/dyz7) has no cloud_essd — use cloud_pperf there.  apsara_ize.py
 # rewrites the ROS templates, but playbooks that hit the ECS API directly (05's
 # snapshot verification disk, the CAPA machine specs) read these vars instead.

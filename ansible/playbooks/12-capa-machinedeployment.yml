@@ -25,7 +25,13 @@
   environment: "{{ cloud_env | default({}) }}"
   gather_facts: false
   vars:
-    worker_instance_type: "ecs.g7.xlarge"
+    # Resolved, not hardcoded: a play var beats group_vars, so pinning a
+    # public-cloud type here made worker_instance_type in all.yml silently
+    # ineffective — the run kept asking for ecs.g7.xlarge, which does not exist
+    # on Apsara.  Order: -e / group_vars worker_instance_type, then compute_type,
+    # then the public-cloud default.  (A play var cannot reference its own name,
+    # hence the separate _worker_type.)
+    _worker_type: "{{ worker_instance_type | default(compute_type | default('ecs.g7.xlarge')) }}"
     # Number of AZs to spread workers across (one MachineDeployment per AZ, each
     # with replicas_per_zone). Persist a different value in group_vars (worker_zone_count)
     # to size the cluster — default 2 keeps a lean 2-AZ footprint (master + 2 workers)
@@ -86,7 +92,7 @@
     - name: Query zones that offer the worker instance type
       ansible.builtin.command:
         argv: ["{{ cloud_cli }}", ecs, DescribeAvailableResource, --RegionId, "{{ region }}",
-               --DestinationResource, Zone, --InstanceType, "{{ worker_instance_type }}",
+               --DestinationResource, Zone, --InstanceType, "{{ _worker_type }}",
                --profile, "{{ aliyun_profile }}"]
       register: _avail_q
       changed_when: false
@@ -113,7 +119,7 @@
       ansible.builtin.assert:
         that: _target_zones | length > 0
         fail_msg: >-
-          No zone in {{ region }} has stock of {{ worker_instance_type }}
+          No zone in {{ region }} has stock of {{ _worker_type }}
           (zones seen: {{ _all_zone_ids }}; with-stock: {{ _type_zones }}).
           Choose a different worker_instance_type.
 
@@ -227,7 +233,7 @@
         groups: deploy
         md_region: "{{ region }}"
         md_boot_image: "{{ worker_boot_image_id }}"
-        md_instance_type: "{{ worker_instance_type }}"
+        md_instance_type: "{{ _worker_type }}"
         md_sg: "{{ (_sg_q.stdout | from_json).SecurityGroups.SecurityGroup[0].SecurityGroupId }}"
         md_ram_role: "{{ mirror_node_ram_role }}"
         md_cp_host: "{{ api_lb_endpoint }}"
