@@ -115,7 +115,14 @@ spec:
   # vpc/vSwitch/zone (state.yml). See docs/csi-driver-design.md §5.5.3 gap 2 — the
   # operator-native version (CR carries the network) is tracked separately.
   nas:
-    enabled: true
+    # Not every Apsara deployment ships NAS.  dyz7 does not: every candidate
+    # endpoint fails DNS, so the driver would come up healthy and then fail the
+    # first PVC on `lookup nas.<region>.aliyuncs.com: no such host`.  Deploying a
+    # driver that cannot work just adds a permanently red check, so gate it on
+    # the environment actually having the service.  (Public cloud always does.)
+    enabled: {{ 'false' if ((cloud_platform | default('public')) == 'apsara'
+                            and (cloud_env.ENDPOINT_NAS | default('')) | length == 0)
+                else 'true' }}
     storageClasses: []
     storageProfile:
       patch: true
