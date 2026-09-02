@@ -37,6 +37,10 @@ PRODUCTS = {
     "pvtz": ("Pvtz", "2018-01-01"),
     "clouddns": ("CloudDns", "2021-06-24"),  # Apsara PrivateZone lives here (POP)
     "slb": ("Slb", "2014-05-15"),
+    # NAS has no <svc>.<domain> host on some Apsara deployments; where it exists
+    # at all it answers on the shared POP/ASCM gateway, routed by Product — the
+    # same shape as CloudDns above.  Point ENDPOINT_NAS at that gateway.
+    "nas": ("Nas", "2017-06-26"),
     "nlb": ("Nlb", "2022-04-30"),
 }
 
