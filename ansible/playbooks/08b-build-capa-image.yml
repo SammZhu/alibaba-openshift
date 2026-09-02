@@ -13,15 +13,24 @@
 #
 # Usage:
 #   ansible-playbook playbooks/08b-build-capa-image.yml \
-#     -e capa_build_ref=apsara-endpoint-support -e capa_build_tag=v0.1.0-apsara1
+#     -e capa_build_ref=apsara-endpoint-support
+#   The tag defaults to <capa_image_tag>-apsara (vars/images.yml), and the base
+#   layer is the currently deployed <capa_image_tag>.
 #   then set capa_image_tag to that tag and re-run 08.
 - name: Build the CAPA provider image on the operator, push to the mirror
   hosts: local
   gather_facts: false
+  # capa_image_tag lives here — without it the base resolved to :latest, which
+  # the mirror does not carry.
+  vars_files:
+    - "{{ playbook_dir }}/../vars/images.yml"
   vars:
     capi_repo: "{{ playbook_dir }}/../../../openshift-capi-alicloud"
     capa_build_ref: ""                 # empty = build the working tree as-is
-    capa_build_tag: "{{ capa_image_tag | default('latest') }}-apsara"
+    # Layer onto the image currently deployed, not onto a previous rebuild —
+    # otherwise repeated runs stack apsara layers on top of each other.
+    capa_base_tag: "{{ capa_image_tag }}"
+    capa_build_tag: "{{ capa_image_tag }}-apsara"
     capa_mirror_repo: samzhu/openshift-capi-alicloud
     capa_build_goproxy: "https://goproxy.cn,direct"
   tasks:
@@ -71,12 +80,24 @@
     # Upstream's Dockerfile uses gcr.io/distroless/static, which is unreachable
     # here; reusing the mirrored image keeps the exact same runtime layer and
     # costs no egress at all.
+    # The mirror registry requires auth; without it the base-image pull fails with
+    # a bare "unauthorized" that reads like a missing image.
+    - name: "08b — log podman in to the mirror registry"
+      ansible.builtin.command:
+        argv: [podman, login, --tls-verify=false,
+               "{{ mirror_private_ip }}:8443",
+               -u, "{{ mirror_init_user | default('mirror-admin') }}",
+               -p, "{{ mirror_init_password }}"]
+      register: _cb_login
+      changed_when: true
+      no_log: true
+
     - name: "08b — Dockerfile layering the new binary onto the mirrored image"
       ansible.builtin.copy:
         dest: "{{ capi_repo }}/Dockerfile.mirror-base"
         mode: "0644"
         content: |
-          FROM {{ mirror_private_ip }}:8443/{{ capa_mirror_repo }}:{{ capa_image_tag | default('latest') }}
+          FROM {{ mirror_private_ip }}:8443/{{ capa_mirror_repo }}:{{ capa_base_tag }}
           COPY bin/manager-linux-amd64 /manager
           USER 65532:65532
           ENTRYPOINT ["/manager"]
@@ -103,6 +124,7 @@
         msg: |
           ✓ {{ mirror_private_ip }}:8443/{{ capa_mirror_repo }}:{{ capa_build_tag }}
             built from {{ _cb_commit.stdout }}
+            base   {{ capa_mirror_repo }}:{{ capa_base_tag }}
 
           Next:
             set  capa_image_tag: "{{ capa_build_tag }}"  in group_vars/all.yml
