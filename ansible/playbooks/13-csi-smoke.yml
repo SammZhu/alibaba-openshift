@@ -83,6 +83,10 @@
     # Pending — so NAS is reported but does NOT fail the play. Toggle off entirely
     # with -e csi_smoke_nas=false. Shorter timeout since a stuck PVC won't bind.
     csi_smoke_nas: true
+    # Set true to keep the smoke namespace even on success (for debugging).  A
+    # required failure keeps it regardless — see "keep the namespace" below.
+    csi_smoke_keep_ns: false
+    _csi_keep_ns: "{{ csi_smoke_keep_ns | default(false) | bool }}"
     nas_wait_timeout: 120s
   tasks:
     - block:
@@ -354,6 +358,14 @@
               [nas-rwx]    RWX shared across two Pods ............ {{ 'PASS' if r_nas_rwx | default(false) else ('SKIP' if not (csi_smoke_nas | default(true) | bool) else 'FAIL') }}   (soft)
               ==================================
 
+        - name: "13 — keep the namespace when a required test failed"
+          ansible.builtin.set_fact:
+            _csi_keep_ns: >-
+              {{ (csi_smoke_keep_ns | default(false) | bool)
+                 or not (r_disk_fs | default(false))
+                 or not (r_disk_block | default(false))
+                 or not (r_snapshot | default(false)) }}
+
         - name: "[nas-rwx] note when NAS soft-check failed"
           ansible.builtin.debug:
             msg: >
@@ -378,8 +390,23 @@
             success_msg: "Required CSI storage tests PASSED (disk-fs, disk-block, snapshot).{{ ' NAS RWX also PASSED.' if r_nas_rwx | default(false) else ' NAS RWX is a soft check (see note).' }}"
 
       always:
+        # Keep the evidence when something failed.  Cleaning up unconditionally
+        # deleted the namespace the failure message tells you to inspect, so the
+        # only way to see why a test failed was to reproduce it by hand.
+        - name: "cleanup — keeping the namespace for triage (a required test failed)"
+          ansible.builtin.debug:
+            msg: >-
+              {{ ns }} left in place. Inspect with:
+                oc -n {{ ns }} get pvc,pod,volumesnapshot
+                oc -n {{ ns }} describe pvc
+                oc -n kube-system logs deploy/csi-disk-controller --all-containers --tail=100
+              Delete it when done:  oc delete namespace {{ ns }}
+          when: _csi_keep_ns
+
         - name: cleanup — delete the smoke namespace (waits for PV/finalizer release)
           ansible.builtin.command:
             argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", delete, namespace, "{{ ns }}", --ignore-not-found, "--wait=true", "--timeout=300s"]
           changed_when: true
           failed_when: false
+          when: not _csi_keep_ns
+
