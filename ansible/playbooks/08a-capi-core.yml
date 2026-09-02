@@ -25,29 +25,38 @@
          if (jump_host_ip | default('') | length > 0) else '' }}
     _ssh_root_mirror: "ssh {{ _ssh_common_args }} {{ _ssh_proxy_args }} root@{{ mirror_private_ip }}"
     capi_core_upstream: registry.k8s.io/cluster-api/cluster-api-controller
-    # Where the BYTES are pulled from.  registry.k8s.io fronts Google Artifact
-    # Registry (*.pkg.dev); from a China-side operator every region resolves to
-    # the same blocked address and the pull dies on i/o timeout — the comment
-    # above assumes an operator OUTSIDE the GFW, which is not true on Apsara.
-    # Two escapes, both optional and both off by default:
-    #   capi_core_registry — a China-reachable registry+namespace carrying the
-    #     exact tag (verify with skopeo first), same convention as
-    #     apsara_sig_storage_registry in 04.
-    #   image_pull_proxy — tunnel to the official source instead.
-    # The CLUSTER-side reference stays registry.k8s.io either way (IDMS maps it
-    # to the mirror), so only the source of the bytes changes.
-    capi_core_pull_src: "{{ ((capi_core_registry | default('')) or 'registry.k8s.io/cluster-api') ~ '/cluster-api-controller' }}"
     capi_core_tag: v1.12.7
     capi_core_mirror_repo: cluster-api/cluster-api-controller
-    # Escape hatch when the operator cannot reach registry.k8s.io at all (GFW,
-    # no usable proxy, no China mirror carrying the tag): pull the image on a
-    # machine that CAN reach it and hand over the archive —
+
+    # ── Where the bytes come from ────────────────────────────────────────────
+    # The header comment above assumes the operator sits OUTSIDE the GFW and
+    # only the in-VPC jump host does not.  That is false on Apsara, where the
+    # operator is a China-side ECS: registry.k8s.io fronts Google Artifact
+    # Registry (*.pkg.dev), every region resolves to one blocked address, and
+    # the pull dies on i/o timeout after all five skopeo retries.
+    #
+    # So try several sources in order and take the first reachable one.  The
+    # pull is pinned to the upstream linux/amd64 manifest digest, which makes it
+    # CONTENT-ADDRESSED: bytes that do not hash to this digest cannot be
+    # assembled into it, so a mirror is unable to serve anything but the
+    # upstream image and needs no trust of its own.  Bump this together with
+    # capi_core_tag — registry.k8s.io/v2/<repo>/manifests/<tag> with
+    # Accept: …manifest.list.v2+json, then .manifests[] where
+    # platform == linux/amd64.
+    capi_core_digest: "sha256:db3349d3a5823739586d6bac6de22a70011b9cb4a5443e4b8805bc67f7ba49f2"
+    capi_core_fallback_registries:
+      - k8s.mirror.nju.edu.cn
+      - k8s.m.daocloud.io
+    # A blocked registry burns ~3 min in skopeo's own retries, so probe with a
+    # hard timeout before committing to a copy.
+    capi_core_probe_timeout: 25
+
+    # Last resort, only when no source at all is reachable: an archive produced
+    # on a machine that has egress —
     #   podman pull --platform linux/amd64 <upstream>:<tag>
     #   podman save --format docker-archive -o capi-core-<tag>.tar <upstream>:<tag>
-    # then point this at the file on the operator.  Set -> the pull is skipped
-    # and the file is used as-is (and NOT deleted, so it survives across runs).
-    # This keeps the upstream-signed image instead of trusting a third-party
-    # mirror's rebuild.
+    # Set -> the pull is skipped entirely and the file is used as-is (and not
+    # deleted, so it survives across runs).
     capi_core_prestaged_tar: ""
     _capi_core_tar: "{{ (capi_core_prestaged_tar | default('')) or ('/tmp/capi-core-' ~ capi_core_tag ~ '.tar') }}"
   tasks:
@@ -87,29 +96,82 @@
       delegate_to: localhost
       when: (capi_core_prestaged_tar | default('') | length) == 0
 
-    - name: Pull the CAPI core image into a docker-archive (operator has egress)
+    - name: "08a — candidate sources for the CAPI core image (first reachable wins)"
+      ansible.builtin.set_fact:
+        _capi_core_refs: >-
+          {{ ([capi_core_upstream ~ '@' ~ capi_core_digest]
+              + (capi_core_fallback_registries | default([])
+                 | product(['/cluster-api/cluster-api-controller@' ~ capi_core_digest])
+                 | map('join') | list))
+             if (capi_core_digest | default('') | length) > 0
+             else [capi_core_upstream ~ ':' ~ capi_core_tag] }}
+      when: (capi_core_prestaged_tar | default('') | length) == 0
+
+    # Probe cheaply and with a hard timeout before committing to a copy: a
+    # blocked registry costs ~3 min of skopeo's own retries before it gives up,
+    # so walking the list with the real copy would take longer than the build.
+    - name: "08a — probe each source for reachability"
+      ansible.builtin.command:
+        argv: [timeout, "{{ capi_core_probe_timeout }}", skopeo, inspect,
+               --retry-times=0, --raw, "docker://{{ item }}"]
+      delegate_to: localhost
+      loop: "{{ _capi_core_refs }}"
+      register: _core_probe
+      failed_when: false
+      changed_when: false
+      when: (capi_core_prestaged_tar | default('') | length) == 0
+      environment: &capi_pull_env
+        # Scoped to these tasks on purpose.  Exporting a proxy process-wide
+        # poisons the cloud API calls (a public proxy cannot resolve
+        # private-cloud endpoints — the APSARA_PROXY / Squid ERR_DNS_FAIL trap).
+        https_proxy: "{{ image_pull_proxy | default('') }}"
+        http_proxy: "{{ image_pull_proxy | default('') }}"
+        no_proxy: "{{ image_pull_no_proxy | default('localhost,127.0.0.1,' ~ (mirror_private_ip | default(''))) }}"
+
+    - name: "08a — pick the first reachable source"
+      ansible.builtin.set_fact:
+        _capi_core_ref: "{{ (_core_probe.results | default([])
+                             | selectattr('rc', 'defined')
+                             | selectattr('rc', 'equalto', 0)
+                             | map(attribute='item') | list | first | default('')) }}"
+      when: (capi_core_prestaged_tar | default('') | length) == 0
+
+    - name: "08a — no source for the CAPI core image is reachable"
+      ansible.builtin.assert:
+        that: (_capi_core_ref | default('') | length) > 0
+        fail_msg: >-
+          None of {{ _capi_core_refs | join(', ') }} could be reached.
+          registry.k8s.io is GFW-blocked from a China-side operator; add a
+          reachable mirror to capi_core_fallback_registries, set image_pull_proxy
+          to a proxy this host can actually reach, or as a last resort point
+          capi_core_prestaged_tar at an archive produced elsewhere.
+      when: (capi_core_prestaged_tar | default('') | length) == 0
+
+    - name: "08a — pull the CAPI core image into a docker-archive"
       ansible.builtin.command:
         argv:
           - skopeo
           - copy
           - --src-tls-verify=true
           - --retry-times=5
-          - "docker://{{ capi_core_pull_src }}:{{ capi_core_tag }}"
+          - "docker://{{ _capi_core_ref }}"
           - "docker-archive:{{ _capi_core_tar }}:{{ capi_core_upstream }}:{{ capi_core_tag }}"
       delegate_to: localhost
-      when: (capi_core_prestaged_tar | default('') | length) == 0
-      # Scoped to THIS task on purpose.  Exporting a proxy process-wide poisons
-      # the cloud API calls (a public proxy cannot resolve private-cloud
-      # endpoints — that is the APSARA_PROXY / Squid ERR_DNS_FAIL trap).
-      environment:
-        https_proxy: "{{ image_pull_proxy | default('') }}"
-        http_proxy: "{{ image_pull_proxy | default('') }}"
-        no_proxy: "{{ image_pull_no_proxy | default('localhost,127.0.0.1,' ~ (mirror_private_ip | default(''))) }}"
       register: _core_pull
       retries: 3
       delay: 20
       until: _core_pull.rc == 0
       changed_when: true
+      when: (capi_core_prestaged_tar | default('') | length) == 0
+      environment: *capi_pull_env
+
+    - name: "08a — image source used"
+      ansible.builtin.debug:
+        msg: >-
+          CAPI core pulled from {{ _capi_core_ref }}
+          {{ '(upstream)' if _capi_core_ref.startswith('registry.k8s.io')
+             else '(mirror — content-addressed, digest pinned to upstream)' }}
+      when: (capi_core_prestaged_tar | default('') | length) == 0
 
     - name: Stage the CAPI core tar onto the mirror ECS via OSS (not scp)
       ansible.builtin.include_tasks: ../tasks/ship_via_oss.yml
