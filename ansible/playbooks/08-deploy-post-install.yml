@@ -531,13 +531,13 @@
       ansible.builtin.debug:
         msg: |
           ✓ CAPI provider, CSI operator, CSI driver CR all applied
-            (driven from operator → executed on jump host {{ ansible_host }}).
+            (driven from operator → executed on {{ 'jump host ' ~ ansible_host if (_dh_via_jump | default(false) | bool) else 'the operator host' }}).
 
           {% if oadp_enabled | default(false) | bool %}✓ OADP operator applied{% if oadp_oss_access_key_id | default('') | length > 0 %} + cloud-credentials + DataProtectionApplication (OSS backup → {{ oadp_oss_bucket }}){% else %} (subscription only — set oadp_oss_access_key_id to finish){% endif %}
           {% endif %}
-          Verify on the jump host:
-            ssh root@{{ ansible_host }}
-            oc --kubeconfig=/root/kubeconfig get pods -n capa-system
+          Verify{{ ' on the jump host' if (_dh_via_jump | default(false) | bool) else '' }}:
+          {% if _dh_via_jump | default(false) | bool %}  ssh root@{{ ansible_host }}
+          {% endif %}  oc --kubeconfig=/root/kubeconfig get pods -n capa-system
             oc --kubeconfig=/root/kubeconfig get pods -n alibaba-cloud-csi-operator-system
             oc --kubeconfig=/root/kubeconfig get alibabacloudcsidriver cluster -o yaml
             oc --kubeconfig=/root/kubeconfig get storageclass | grep alicloud
