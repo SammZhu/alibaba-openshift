@@ -39,6 +39,21 @@ spec:
   extraEnv:
     - name: ALICLOUD_CLIENT_SCHEME
       value: "{{ csi_client_scheme | default('HTTP') }}"
+{% if csi_static_credentials | default(true) %}
+    # Move the driver off the node RAM role's STS token: with it, Apsara's
+    # DescribeSnapshots returns nothing, the waiter reads that as "gone" and the
+    # driver dereferences nil and dies.  The identical call with a static key
+    # returns the snapshot, and env AK/SK outranks the RAM role in the provider
+    # chain.  Set csi_static_credentials=false to go back to the instance role.
+    - name: ALIBABA_CLOUD_ACCESS_KEY_ID
+      secretKeyRef:
+        name: "{{ csi_credentials_secret | default('alibaba-csi-creds') }}"
+        key: access_key_id
+    - name: ALIBABA_CLOUD_ACCESS_KEY_SECRET
+      secretKeyRef:
+        name: "{{ csi_credentials_secret | default('alibaba-csi-creds') }}"
+        key: access_key_secret
+{% endif %}
 {% if (cloud_env.ENDPOINT_NAS | default('')) | length > 0 %}
     - name: NAS_ENDPOINT
       value: "{{ cloud_env.ENDPOINT_NAS }}"

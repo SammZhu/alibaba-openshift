@@ -496,6 +496,29 @@
                | selectattr('parameters.type', 'in', _sc_decl_types)
                | list | length == (_sc_decl_names | length) }}
 
+    # The CSI driver otherwise authenticates with the node RAM role's STS token,
+    # and on Apsara its DescribeSnapshots then comes back empty — which the
+    # driver's waiter reads as "snapshot gone" and turns into a nil dereference
+    # that takes the whole driver down.  The same call with a static AccessKey
+    # returns the snapshot correctly, and the provider chain puts env AK/SK ahead
+    # of the RAM role, so pointing the driver at a key moves it off the token.
+    #
+    # In a Secret rather than the CR: extraEnv accepts secretKeyRef precisely so
+    # credentials do not sit in plain text in a cluster-scoped object.
+    - name: "08 — credentials Secret for the CSI driver (apsara)"
+      ansible.builtin.shell: |
+        oc --kubeconfig {{ kubeconfig_file }} create secret generic alibaba-csi-creds \
+          -n kube-system \
+          --from-literal=access_key_id='{{ capa_ak }}' \
+          --from-literal=access_key_secret='{{ capa_sk }}' \
+          --dry-run=client -o yaml | oc --kubeconfig {{ kubeconfig_file }} apply -f -
+      args:
+        executable: /bin/bash
+      register: _csi_creds
+      changed_when: "'configured' in _csi_creds.stdout or 'created' in _csi_creds.stdout"
+      no_log: true
+      when: (cloud_platform | default('public')) == 'apsara'
+
     # ── NAS StorageClass (filesystem-mode dynamic provisioning) ───────────────
     # The CR sets nas.storageClasses=[] so the operator deploys the NAS driver but
     # creates no StorageClass — a provisionable NAS SC needs cluster-network params
