@@ -6,11 +6,16 @@
 # finalizers forever, and `oc delete namespace` then hangs until it times out and
 # reports something that has nothing to do with the real problem.
 #
-# SAFETY: only snapshots with readyToUse != true are released.  A false value
-# means the cloud never created anything, so dropping the finalizer leaks
-# nothing.  A READY snapshot is left alone — force-deleting that would orphan a
-# real snapshot in the cloud, which is precisely the kind of debris teardown
-# exists to avoid.
+# SAFETY: only snapshots with readyToUse != true are released, and a READY one is
+# never touched — force-deleting that would orphan a real cloud snapshot.
+#
+# But do NOT read "unready" as "nothing exists in the cloud".  On Apsara the
+# opposite is typical: the driver creates the snapshot successfully and then
+# crashes reading the response back, so the Kubernetes object stays unready while
+# a finished snapshot sits in the cloud.  Three such orphans accumulated before
+# this was understood.  Releasing the finalizer here is still right — the object
+# is unusable either way — but it does not free the cloud resource, so the
+# warning below says to go and look.
 #
 # Inputs: rss_ns (namespace), kubeconfig_file.
 
@@ -44,9 +49,12 @@
       ansible.builtin.debug:
         msg: >-
           {{ _rss_stuck | map(attribute='metadata.name') | join(', ') }} never
-          became ready, so their finalizers are being dropped to let {{ rss_ns }}
-          delete.  Nothing exists in the cloud for an unready snapshot, so this
-          leaks nothing — ready snapshots are deliberately left alone.
+          became ready; dropping their finalizers so {{ rss_ns }} can delete.
+          An unready object does NOT mean the cloud is clean — the snapshot may
+          well have completed there before the driver failed reading it back.
+          Check for orphans and remove them by hand: DescribeSnapshots, then
+          delete only the snapshot-<uuid> entries. SnapshotForImage-* back your
+          custom images and cluster1-mirror-data backs the mirror disk.
 
     - name: "release-snapshots — drop the VolumeSnapshot finalizers"
       ansible.builtin.command:
