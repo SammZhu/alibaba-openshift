@@ -106,12 +106,54 @@
           changed_when: false
           failed_when: false
 
+        # Falling back to the default in-cluster registry address is not safe
+        # here: kubelet does the pulling, on the NODE, using the node's resolver
+        # — which on a private cloud is the environment's DNS and cannot resolve
+        # *.svc at all.  The pull then fails with "lookup
+        # image-registry.openshift-image-registry.svc ... no such host" while the
+        # volume underneath is perfectly fine, so the smoke blames storage for a
+        # test-harness problem.  Fall back to an image the node is demonstrably
+        # able to pull: one it is already running.
+        - name: "13 — fall back to an image the node already runs"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, kube-system, get,
+                   deploy, csi-disk-controller, -o,
+                   "jsonpath={.spec.template.spec.containers[0].image}"]
+          register: _running_img
+          changed_when: false
+          failed_when: false
+          when: _cli_img.rc != 0 or (_cli_img.stdout | default('') | trim) | length == 0
+
         - name: Use the release cli image when it resolved
           ansible.builtin.set_fact:
             csi_smoke_image: "{{ _cli_img.stdout | trim }}"
           when:
             - _cli_img.rc == 0
             - (_cli_img.stdout | default('') | trim) | length > 0
+
+        - name: "13 — use a running image instead"
+          ansible.builtin.set_fact:
+            csi_smoke_image: "{{ _running_img.stdout | trim }}"
+          when:
+            - _running_img is not skipped
+            - _running_img.rc | default(1) == 0
+            - (_running_img.stdout | default('') | trim) | length > 0
+
+        - name: "13 — which test image, and why"
+          ansible.builtin.debug:
+            msg: >-
+              test image: {{ csi_smoke_image }}
+              {{ '(release payload)' if (_cli_img.rc == 0 and (_cli_img.stdout | trim) | length > 0)
+                 else '(release info failed — using an image the cluster already runs)' }}
+
+        - name: "13 — no node-pullable test image could be determined"
+          ansible.builtin.assert:
+            that: "'image-registry.openshift-image-registry.svc' not in csi_smoke_image"
+            fail_msg: >-
+              Falling back to the in-cluster registry ({{ csi_smoke_image }}), which
+              the node cannot resolve — the Pods would fail to pull and the smoke
+              would report a storage failure that is not one.  Pass a reachable
+              image with -e csi_smoke_image=<ref>.
 
         # ── namespace ──────────────────────────────────────────────────────
         # A previous failure deliberately leaves this namespace behind for triage,
