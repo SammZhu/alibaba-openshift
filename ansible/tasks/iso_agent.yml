@@ -623,6 +623,33 @@
     {{ _ssh_root_mirror }} '{{ cloud_cli }} ecs DeleteImage --region {{ region }} --RegionId {{ region }} --ImageId {{ ecs_image_id }} --Force true --mode EcsRamRole --ram-role-name $(curl -s http://100.100.100.200/latest/meta-data/ram/security-credentials/)'
   changed_when: true
 
+# DeleteImage does NOT cascade to the snapshot backing the image — teardown
+# says so explicitly and does the cascade itself, but this path did not, so
+# every ISO rebuild left a SnapshotForImage-* snapshot behind with no image to
+# account for it.  One such orphan survived a full cluster teardown before this
+# was noticed.  Read the mapping BEFORE deleting the image; afterwards it is
+# gone and the snapshot is unattributable.
+- name: ABI — read the stale image's backing snapshots (before deleting it)
+  when:
+    - (cloud_platform | default('public')) == 'apsara'
+    - _abi_iso_rebuilt | bool
+    - ecs_image_id | default('') | length > 0
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", ecs, DescribeImages, --RegionId, "{{ region }}",
+           --ImageId, "{{ ecs_image_id }}", --profile, "{{ aliyun_profile }}"]
+  register: _abi_stale_img
+  changed_when: false
+  failed_when: false
+
+- name: ABI — extract those snapshot ids
+  ansible.builtin.set_fact:
+    _abi_stale_snaps: >-
+      {{ (((_abi_stale_img.stdout | default('{}') | from_json).Images | default({})).Image
+          | default([]) | first | default({})).DiskDeviceMappings | default({})
+         | dict2items | map(attribute='value') | flatten
+         | selectattr('SnapshotId', 'defined') | map(attribute='SnapshotId') | list }}
+  when: _abi_stale_img is not skipped and (_abi_stale_img.rc | default(1)) == 0
+
 - name: ABI — delete the stale agent image (apsara, local cloudcli)
   when:
     - (cloud_platform | default('public')) == 'apsara'
@@ -633,6 +660,20 @@
            --ImageId, "{{ ecs_image_id }}", --Force, "true",
            --profile, "{{ aliyun_profile }}"]
   changed_when: true
+
+- name: ABI — cascade-delete the stale image's snapshots (aliyun does not)
+  when:
+    - (cloud_platform | default('public')) == 'apsara'
+    - _abi_iso_rebuilt | bool
+    - (_abi_stale_snaps | default([]) | length) > 0
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", ecs, DeleteSnapshot, --RegionId, "{{ region }}",
+           --SnapshotId, "{{ item }}", --profile, "{{ aliyun_profile }}"]
+  loop: "{{ _abi_stale_snaps | default([]) }}"
+  loop_control:
+    label: "{{ item }} (backed the retired agent image)"
+  changed_when: true
+  failed_when: false
 
 - name: ABI — clear the adopted image id so ImportImage runs
   ansible.builtin.set_fact:
