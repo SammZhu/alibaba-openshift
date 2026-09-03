@@ -114,6 +114,18 @@
             - (_cli_img.stdout | default('') | trim) | length > 0
 
         # ── namespace ──────────────────────────────────────────────────────
+        # A previous failure deliberately leaves this namespace behind for triage,
+        # so start by removing it: reusing those objects means the run reports on
+        # PVCs and Pods from an earlier attempt — which is exactly what happened
+        # once the provisioning fix landed (the old PVCs bound fine, while the
+        # old Pods were still stuck on an image pull, and the smoke "failed" on
+        # stale evidence).  Keep the wait: PV finalizers hold the namespace.
+        - name: Remove any smoke namespace left over from a previous run
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", delete, namespace, "{{ ns }}",
+                   --ignore-not-found, "--wait=true", "--timeout=300s"]
+          changed_when: true
+
         - name: Create smoke namespace
           ansible.builtin.command:
             argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", create, namespace, "{{ ns }}"]
