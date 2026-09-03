@@ -162,6 +162,13 @@
         # once the provisioning fix landed (the old PVCs bound fine, while the
         # old Pods were still stuck on an image pull, and the smoke "failed" on
         # stale evidence).  Keep the wait: PV finalizers hold the namespace.
+        # An unready snapshot's finalizers otherwise hold the namespace until the
+        # delete times out, reporting a failure unrelated to what is being tested.
+        - name: Release snapshots that would block the namespace delete
+          ansible.builtin.include_tasks: ../tasks/release_stuck_snapshots.yml
+          vars:
+            rss_ns: "{{ ns }}"
+
         - name: Remove any smoke namespace left over from a previous run
           ansible.builtin.command:
             argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", delete, namespace, "{{ ns }}",
@@ -456,6 +463,12 @@
                 oc -n kube-system logs deploy/csi-disk-controller --all-containers --tail=100
               Delete it when done:  oc delete namespace {{ ns }}
           when: _csi_keep_ns
+
+        - name: cleanup — release snapshots that would block the delete
+          ansible.builtin.include_tasks: ../tasks/release_stuck_snapshots.yml
+          vars:
+            rss_ns: "{{ ns }}"
+          when: not _csi_keep_ns
 
         - name: cleanup — delete the smoke namespace (waits for PV/finalizer release)
           ansible.builtin.command:

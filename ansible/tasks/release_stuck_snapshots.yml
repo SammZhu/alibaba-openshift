@@ -1,0 +1,73 @@
+# release_stuck_snapshots.yml — let a namespace actually delete.
+#
+# A VolumeSnapshot carries finalizers that the snapshot controller only clears
+# once it has settled with the driver.  A snapshot that never became ready — the
+# CSI driver could not reach the cloud API when it was taken, say — holds those
+# finalizers forever, and `oc delete namespace` then hangs until it times out and
+# reports something that has nothing to do with the real problem.
+#
+# SAFETY: only snapshots with readyToUse != true are released.  A false value
+# means the cloud never created anything, so dropping the finalizer leaks
+# nothing.  A READY snapshot is left alone — force-deleting that would orphan a
+# real snapshot in the cloud, which is precisely the kind of debris teardown
+# exists to avoid.
+#
+# Inputs: rss_ns (namespace), kubeconfig_file.
+
+- name: "release-snapshots — list snapshots in {{ rss_ns }}"
+  ansible.builtin.command:
+    argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ rss_ns }}", get,
+           volumesnapshot, -o, json]
+  register: _rss_list
+  changed_when: false
+  failed_when: false
+
+- name: "release-snapshots — pick the ones that never became ready"
+  ansible.builtin.set_fact:
+    _rss_stuck: >-
+      {{ ((_rss_list.stdout | default('{}') | from_json)['items'] | default([]))
+         | rejectattr('status.readyToUse', 'defined') | list
+         + ((_rss_list.stdout | default('{}') | from_json)['items'] | default([]))
+           | selectattr('status.readyToUse', 'defined')
+           | rejectattr('status.readyToUse', 'equalto', true) | list }}
+  when: _rss_list.rc | default(1) == 0
+
+- name: "release-snapshots — nothing stuck"
+  ansible.builtin.debug:
+    msg: "No unready snapshots holding {{ rss_ns }}."
+  when: (_rss_stuck | default([]) | length) == 0
+
+- name: "release-snapshots — release the unready ones"
+  when: (_rss_stuck | default([]) | length) > 0
+  block:
+    - name: "release-snapshots — WARN which snapshots are being released"
+      ansible.builtin.debug:
+        msg: >-
+          {{ _rss_stuck | map(attribute='metadata.name') | join(', ') }} never
+          became ready, so their finalizers are being dropped to let {{ rss_ns }}
+          delete.  Nothing exists in the cloud for an unready snapshot, so this
+          leaks nothing — ready snapshots are deliberately left alone.
+
+    - name: "release-snapshots — drop the VolumeSnapshot finalizers"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ rss_ns }}", patch,
+               volumesnapshot, "{{ item.metadata.name }}", --type=merge,
+               -p, '{"metadata":{"finalizers":null}}']
+      loop: "{{ _rss_stuck }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      changed_when: true
+      failed_when: false
+
+    # The content object is cluster-scoped, so it outlives the namespace and
+    # keeps the snapshot from going away on its own.
+    - name: "release-snapshots — drop the VolumeSnapshotContent finalizers"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", patch,
+               volumesnapshotcontent, "{{ item }}", --type=merge,
+               -p, '{"metadata":{"finalizers":null}}']
+      loop: >-
+        {{ _rss_stuck | map(attribute='status.boundVolumeSnapshotContentName')
+           | select('defined') | select('string') | list }}
+      changed_when: true
+      failed_when: false
