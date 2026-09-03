@@ -225,7 +225,15 @@ Conditions:
   HasZone3: !Equals [!Ref EnableZone3, "true"]
   # BYO-VPC: create the network only when no existing VPC was supplied.
   CreateNetwork: !Equals [!Ref ExistingVpcId, ""]
-  CreateNetworkZone3: !And [!Condition CreateNetwork, !Condition HasZone3]
+  # Spelled out rather than !And [!Condition A, !Condition B]: Aliyun ROS cannot
+  # parse the !Condition short form at all — "could not determine a constructor
+  # for the tag '!Condition'" — and rejects the whole template, so the public
+  # cloud could not create this stack.  Apsara never showed it because that path
+  # feeds ROS a template already rewritten by apsara_ize.py, which consumes the
+  # short tags; the public path submits this YAML verbatim.
+  CreateNetworkZone3: !And
+    - !Equals [!Ref ExistingVpcId, ""]
+    - !Equals [!Ref EnableZone3, "true"]
 
 Resources:
   # ── Networking ───────────────────────────────────────────────────────────────
