@@ -72,7 +72,12 @@
       when: (cloud_platform | default('public')) == 'apsara'
 
     - name: Preflight — free disk at the build dir (needs ~60 GB)
-      ansible.builtin.shell: "df -BG --output=avail {{ repo_root }} | tail -1 | tr -dc '0-9'"
+      # pipefail: without it the status comes from tr, which succeeds on empty
+      # input — a failing df would report 0 GB free and the preflight would
+      # "fail" for the wrong reason, or worse, parse as plenty of space.
+      ansible.builtin.shell: |
+        set -o pipefail
+        df -BG --output=avail {{ repo_root }} | tail -1 | tr -dc '0-9'
       args:
         executable: /bin/bash
       register: _mb_disk

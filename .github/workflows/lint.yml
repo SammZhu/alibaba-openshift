@@ -52,6 +52,9 @@ jobs:
         run: |
           bash -n scripts/bootimage-gate.sh
 
+      - name: Install PyYAML (for the ROS tag lint)
+        run: pip install PyYAML
+
       - name: ROS template tag lint
         # !Condition is not supported by Aliyun ROS at all — it rejects the whole
         # template — and !Not parses but always evaluates false.  Both look

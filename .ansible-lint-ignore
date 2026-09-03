@@ -44,3 +44,18 @@ ansible/tasks/refresh_tag_mapping.yml risky-shell-pipe
 ansible/tasks/run_cli.yml command-instead-of-shell
 ansible/tasks/ship_via_oss.yml risky-shell-pipe
 ansible/tasks/update_stack.yml no-changed-when
+
+# Added 2026-09-03 with the Apsara work.  Same categories the baseline above
+# already covers — remote-over-SSH shell, and configuration a module cannot do.
+#
+# 00a: `git config --global` sets client configuration, which the git module
+# does not touch (it manages repositories); community.general.git_config would
+# work but this repo deliberately ships no collections.
+ansible/playbooks/00a-prepare-operator.yml command-instead-of-module
+# The mkdir/tar payloads run on the mirror ECS THROUGH `{{ _ssh_root_mirror }}`,
+# so they are one local shell invocation, not an Ansible-managed host: `command`
+# cannot carry the embedded quoting, and unarchive cannot stream over ssh.
+# (The pipefail findings on these were real and have been fixed.)
+ansible/tasks/iso_agent_build_container.yml command-instead-of-shell
+ansible/tasks/iso_agent_build_container.yml command-instead-of-module
+

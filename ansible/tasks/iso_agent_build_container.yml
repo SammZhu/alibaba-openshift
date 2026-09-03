@@ -288,16 +288,25 @@
         {{ _ssh_root_mirror }} 'mkdir -p {{ _m_install_dir }}/boot-artifacts'
       changed_when: true
 
+    # pipefail: the status otherwise comes from the remote tar, so a local tar
+    # that failed (missing ISO, no disk) would still report success and the
+    # mirror would quietly receive nothing.
     - name: "container-build: push agent ISO to the mirror ECS (tar over ssh)"
-      ansible.builtin.shell: >-
-        tar -C {{ install_dir }} -czf - agent.x86_64.iso
-        | {{ _ssh_root_mirror }} 'tar -C {{ _m_install_dir }} -xzf -'
+      ansible.builtin.shell: |
+        set -o pipefail
+        tar -C {{ install_dir }} -czf - agent.x86_64.iso \
+          | {{ _ssh_root_mirror }} 'tar -C {{ _m_install_dir }} -xzf -'
+      args:
+        executable: /bin/bash
       changed_when: true
 
     - name: "container-build: push boot-artifacts (rootfs) to the mirror ECS"
-      ansible.builtin.shell: >-
-        tar -C {{ install_dir }} -czf - boot-artifacts
-        | {{ _ssh_root_mirror }} 'tar -C {{ _m_install_dir }} -xzf -'
+      ansible.builtin.shell: |
+        set -o pipefail
+        tar -C {{ install_dir }} -czf - boot-artifacts \
+          | {{ _ssh_root_mirror }} 'tar -C {{ _m_install_dir }} -xzf -'
+      args:
+        executable: /bin/bash
       changed_when: true
 
 - name: "container-build: agent ISO ready on the mirror ECS"
