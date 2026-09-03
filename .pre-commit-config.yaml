@@ -10,6 +10,13 @@
 repos:
   - repo: local
     hooks:
+      - id: ros-template-tags
+        name: ROS templates — no !Condition / !Not (Aliyun ROS rejects or mis-evaluates them)
+        entry: scripts/lint-ros-tags.py
+        language: system
+        files: ^ros-templates/.*\.yaml$
+        pass_filenames: false
+        args: [ros-templates/]
       - id: ansible-shell-quote-balance
         name: ansible.builtin.shell heredoc — single-quote balance
         entry: scripts/lint-ansible-quotes.py

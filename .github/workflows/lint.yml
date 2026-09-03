@@ -4,12 +4,18 @@ name: lint
 # from contributors who haven't run `pre-commit install`, web-UI edits,
 # and bypassed hooks (--no-verify).
 #
-# Currently only runs scripts/lint-ansible-quotes.py.  Add yamllint /
-# ansible-lint / shellcheck steps here as they become needed.
+# Runs the quote-balance lint, the boot-image gate unit test, a bash syntax
+# check, and ansible-lint.  Add yamllint / shellcheck steps here as needed.
 
 on:
+  # Every branch, not just main.  These checks only ever ran on main and on PRs
+  # into it, so a long-lived feature branch accumulated 136 commits without CI
+  # seeing any of them — and the one real regression in that batch (a template
+  # construct the cloud's own parser rejects) was found by hand, late, on the
+  # live cloud.  Linting a branch costs a couple of GitHub-hosted minutes;
+  # finding out at merge time costs a lot more.
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
     branches: [main]
   workflow_dispatch: {}
@@ -45,6 +51,15 @@ jobs:
       - name: Bash syntax check (boot-image scripts)
         run: |
           bash -n scripts/bootimage-gate.sh
+
+      - name: ROS template tag lint
+        # !Condition is not supported by Aliyun ROS at all — it rejects the whole
+        # template — and !Not parses but always evaluates false.  Both look
+        # correct locally and fail only when the cloud parses the template, so a
+        # !Condition survived review, syntax checks and weeks of use on Apsara
+        # (whose path rewrites the template first) before PreviewStack caught it.
+        run: |
+          python3 scripts/lint-ros-tags.py ros-templates/
   
   ansible-lint:
     # Regression gate for shell/correctness hygiene. Config in .ansible-lint
