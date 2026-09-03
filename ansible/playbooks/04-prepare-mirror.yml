@@ -94,24 +94,35 @@
     # ── Step 1: wait for ECS bootstrap signal ────────────────────────────────
     # Cloud-init wrote /var/lib/mirror-bootstrap-ready when the host is
     # SSH-able + has the data disk mounted + has aliyun CLI installed.
-    - name: Wait for mirror ECS bootstrap-ready signal (up to 10 min)
+    # 10 minutes was not enough on a private cloud: cloud-init has to dnf-install
+    # podman before Quay can start, and the package mirror there served repo
+    # metadata at ~92 kB/s — 7.5 minutes for the metadata alone, before a single
+    # package.  The host was fine and still working; the wait simply ran out.
+    # Budget for a slow link and let it be raised further per environment.
+    - name: Wait for mirror ECS bootstrap-ready signal
       ansible.builtin.shell: |
         {{ _ssh_root_mirror }} -o ConnectTimeout=5 test -f /var/lib/mirror-bootstrap-ready
       register: bootstrap_check
       changed_when: false
       failed_when: false
-      retries: 30
+      retries: "{{ mirror_bootstrap_retries | default(90) }}"
       delay: 20
       until: bootstrap_check.rc == 0
 
     - name: Fail if mirror ECS not bootstrap-ready
       ansible.builtin.fail:
         msg: |
-          Mirror ECS at {{ mirror_private_ip }} is not SSH-reachable or did not
-          finish minimal cloud-init within 10 min.
+          Mirror ECS at {{ mirror_private_ip }} is not SSH-reachable, or minimal
+          cloud-init did not finish within
+          {{ ((mirror_bootstrap_retries | default(90) | int) * 20 / 60) | round(0, 'floor') | int }} min.
+
+          Look before assuming it is broken: cloud-init installs podman over the
+          package mirror, which on a slow link can take far longer than the wait.
+          `cloud-init status` still saying "running" means it is alive, and the
+          answer is a bigger mirror_bootstrap_retries, not a fix.
           Debug:
-            ssh -J root@{{ jump_host_ip }} root@{{ mirror_private_ip }} \
-              cat /var/log/mirror-bootstrap.log
+            {{ _ssh_root_mirror }} \
+              'cloud-init status; tail -40 /var/log/mirror-bootstrap.log'
       when: bootstrap_check.rc | default(0) != 0
 
     # ── Step 1b (apsara): put the OSS client on the mirror ECS ───────────────

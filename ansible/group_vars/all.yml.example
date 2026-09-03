@@ -102,6 +102,12 @@ image_pull_proxy: ""                # e.g. http://1.2.3.4:50002
 # Alibaba Cloud Linux 3 image (aliyun_3_x86_64_20G_alibase_*) whose repo carries
 # podman.  (Confirm the CDN IP with: curl -o/dev/null -w'%{remote_ip}' https://<host>/ )
 apsara_pkg_repo_mirror_host: ""     # e.g. mirrors.aliyun.com
+# How long phase 04 waits for the mirror ECS to finish minimal cloud-init
+# (retries x 20s; default 90 = 30 min).  Cloud-init has to dnf-install podman
+# before Quay can start, and a private cloud's package mirror can be very slow —
+# one served repo metadata at ~92 kB/s, spending 7.5 minutes on metadata alone.
+# The old 10-minute budget failed there on a host that was working fine.
+mirror_bootstrap_retries: 90
 apsara_pkg_repo_mirror_ip:   ""     # e.g. 117.161.66.75  (public CDN IP for the host)
 # Computed OSS endpoints used across the OSS call sites.  Public cloud keeps the
 # deliberate internal(free)/public split; Apsara collapses both to its single
