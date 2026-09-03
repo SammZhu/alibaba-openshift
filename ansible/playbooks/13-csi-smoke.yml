@@ -83,6 +83,18 @@
     # Pending — so NAS is reported but does NOT fail the play. Toggle off entirely
     # with -e csi_smoke_nas=false. Shorter timeout since a stuck PVC won't bind.
     csi_smoke_nas: true
+    # Snapshots are a required check by default.  Set false only where the
+    # platform genuinely cannot do them — on Apsara the driver creates the
+    # snapshot in the cloud and then crashes reading the response back
+    # (DescribeSnapshots returns SourceDiskSize as a number where the SDK's
+    # ecs.Snapshot declares a string, so the response does not unmarshal, the
+    # waiter treats the snapshot as absent and CreateSnapshot dereferences nil).
+    # That takes the whole driver down with every sidecar, and each retry leaves
+    # another orphan snapshot in the cloud, so running the check there costs
+    # something and proves nothing.  Deliberately NOT auto-disabled on apsara:
+    # this is an upstream defect, and it should start failing again the moment
+    # it is fixed.
+    csi_smoke_snapshot: true
     # Set true to keep the smoke namespace even on success (for debugging).  A
     # required failure keeps it regardless — see "keep the namespace" below.
     csi_smoke_keep_ns: false
@@ -293,6 +305,7 @@
                 source: { persistentVolumeClaimName: disk-fs }
           changed_when: true
 
+          when: csi_smoke_snapshot | default(true) | bool
         - name: "[snapshot] wait readyToUse=true"
           ansible.builtin.command:
             argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ ns }}", wait, "--for=jsonpath={.status.readyToUse}=true", volumesnapshot/disk-fs-snap, "--timeout={{ wait_timeout }}"]
@@ -300,6 +313,7 @@
           changed_when: false
           failed_when: false
 
+          when: csi_smoke_snapshot | default(true) | bool
         - name: "[snapshot] restore PVC from snapshot + reader Pod"
           ansible.builtin.command:
             argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
@@ -333,6 +347,7 @@
           changed_when: true
           when: _snap_wait.rc == 0
 
+          when: csi_smoke_snapshot | default(true) | bool
         - name: "[snapshot] wait restore reader Ready"
           ansible.builtin.command:
             argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ ns }}", wait, --for=condition=Ready, pod/disk-fs-restore-reader, "--timeout={{ wait_timeout }}"]
@@ -341,6 +356,7 @@
           failed_when: false
           when: _snap_wait.rc == 0
 
+          when: csi_smoke_snapshot | default(true) | bool
         - name: "[snapshot] verify the pre-snapshot file survived"
           ansible.builtin.command:
             argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ ns }}", exec, disk-fs-restore-reader, --, cat, /data/hello.txt]
@@ -349,11 +365,13 @@
           failed_when: false
           when: _snap_wait.rc == 0
 
+          when: csi_smoke_snapshot | default(true) | bool
         - name: "[snapshot] record result"
           ansible.builtin.set_fact:
             r_snapshot: "{{ (_snap_wait.rc == 0) and (_restore_wait.rc | default(1) == 0) and ('csi-smoke-disk-fs' in (_restore_cat.stdout | default(''))) }}"
 
         # ── [nas-rwx] RWX PVC shared across two Pods ───────────────────────
+          when: csi_smoke_snapshot | default(true) | bool
         - name: "[nas-rwx] apply RWX PVC + writer + reader Pods"
           when: csi_smoke_nas | default(true) | bool
           ansible.builtin.command:
@@ -424,7 +442,7 @@
               ===== CSI storage live smoke =====
               [disk-fs]    RWO Filesystem PVC + write/read ....... {{ 'PASS' if r_disk_fs | default(false) else 'FAIL' }}   (required)
               [disk-block] Block volumeMode raw device ........... {{ 'PASS' if r_disk_block | default(false) else 'FAIL' }}   (required)
-              [snapshot]   VolumeSnapshot → restore → data kept .. {{ 'PASS' if r_snapshot | default(false) else 'FAIL' }}   (required)
+              [snapshot]   VolumeSnapshot → restore → data kept .. {{ 'PASS' if r_snapshot | default(false) else ('SKIP' if not (csi_smoke_snapshot | default(true) | bool) else 'FAIL') }}   {{ '(required)' if (csi_smoke_snapshot | default(true) | bool) else '(disabled — known upstream defect)' }}
               [nas-rwx]    RWX shared across two Pods ............ {{ 'PASS' if r_nas_rwx | default(false) else ('SKIP' if not (csi_smoke_nas | default(true) | bool) else 'FAIL') }}   (soft)
               ==================================
 
@@ -434,7 +452,7 @@
               {{ (csi_smoke_keep_ns | default(false) | bool)
                  or not (r_disk_fs | default(false))
                  or not (r_disk_block | default(false))
-                 or not (r_snapshot | default(false)) }}
+                 or ((csi_smoke_snapshot | default(true) | bool) and not (r_snapshot | default(false))) }}
 
         - name: "[nas-rwx] note when NAS soft-check failed"
           ansible.builtin.debug:
@@ -455,9 +473,9 @@
             that:
               - r_disk_fs | default(false)
               - r_disk_block | default(false)
-              - r_snapshot | default(false)
+              - (r_snapshot | default(false)) or not (csi_smoke_snapshot | default(true) | bool)
             fail_msg: "A required CSI storage test FAILED — see the report and `oc -n {{ ns }} get pvc,pod,volumesnapshot`."
-            success_msg: "Required CSI storage tests PASSED (disk-fs, disk-block, snapshot).{{ ' NAS RWX also PASSED.' if r_nas_rwx | default(false) else ' NAS RWX is a soft check (see note).' }}"
+            success_msg: "Required CSI storage tests PASSED (disk-fs, disk-block{{ ', snapshot' if (csi_smoke_snapshot | default(true) | bool) else '; snapshot disabled' }}).{{ ' NAS RWX also PASSED.' if r_nas_rwx | default(false) else ' NAS RWX is a soft check (see note).' }}"
 
       always:
         # Keep the evidence when something failed.  Cleaning up unconditionally
