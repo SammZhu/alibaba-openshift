@@ -4,6 +4,24 @@
 # - `jumphost` is populated dynamically by Phase 03 (via add_host) and used by
 #   Phase 05 plus the app-layer cleanup in Phase 99. No need to edit by hand.
 all:
+  # Public-cloud defaults for the platform-dispatch variables the Apsara work
+  # introduced.  They live in all.yml.example too, but an existing deployment
+  # has its OWN group_vars/all.yml — copied before those keys existed — and does
+  # not gain them on upgrade.  Without a default, phase 03 dies immediately with
+  # "'cloud_cli' is undefined" on a cloud that never needed the variable.
+  #
+  # Deliberately here rather than in a vars_files: inventory group vars are the
+  # LOWEST precedence of the two, so group_vars/all.yml still wins and an Apsara
+  # deployment overrides these as it always did.  A vars_files would outrank the
+  # user's own configuration — the trap that made worker_instance_type look
+  # settable while only -e could change it.
+  vars:
+    cloud_platform: public
+    cloud_cli: aliyun
+    oss_cli: "aliyun oss"
+    oss_cli_argv: "{{ oss_cli.split() }}"
+    cloud_env: {}
+
   hosts:
     local:
       ansible_connection: local
