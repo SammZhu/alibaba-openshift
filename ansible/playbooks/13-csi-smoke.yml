@@ -190,11 +190,38 @@
           vars:
             rss_ns: "{{ ns }}"
 
+        # Deleting the namespace means deleting its PVCs, which means detaching
+        # and deleting real cloud disks — slower here than on the public cloud,
+        # and slower still when the driver has restarted and the calls are being
+        # retried.  A blocking delete with a fixed timeout reported failure while
+        # the namespace was in fact still going away, and did go away moments
+        # later.  Issue the delete, then wait for it to actually be gone.
         - name: Remove any smoke namespace left over from a previous run
           ansible.builtin.command:
             argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", delete, namespace, "{{ ns }}",
-                   --ignore-not-found, "--wait=true", "--timeout=300s"]
+                   --ignore-not-found, "--wait=false"]
           changed_when: true
+
+        - name: Wait for the old smoke namespace to go
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", get, namespace, "{{ ns }}",
+                   -o, "jsonpath={.status.phase}"]
+          register: _ns_gone
+          changed_when: false
+          failed_when: false
+          retries: "{{ csi_smoke_ns_delete_retries | default(60) }}"
+          delay: 10
+          until: _ns_gone.rc != 0
+
+        - name: "13 — the old smoke namespace will not go away"
+          ansible.builtin.assert:
+            that: _ns_gone.rc != 0
+            fail_msg: >-
+              {{ ns }} is still {{ _ns_gone.stdout | default('present') }} after
+              waiting.  Something in it still holds a finalizer — check
+              `oc -n {{ ns }} get pvc,pod,volumesnapshot` and the CSI controller
+              logs, since a crashed driver stops volumes being detached and
+              deleted.
 
         - name: Create smoke namespace
           ansible.builtin.command:
