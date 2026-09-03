@@ -84,6 +84,12 @@ apsara_sig_storage_registry: ""
 # the operator recreates them (safe — a StorageClass holds no data, existing
 # volumes are untouched; PVCs already bound to it keep working).
 csi_storageclass_recreate: false
+# How long 08 waits for the CSI operator to reconcile the StorageClasses into
+# existence before judging them (retries x 10s; default 30 = 5 min).  On a fresh
+# install they do not exist for the first few seconds, and a drift check that
+# does not wait fails a perfectly good install — the classes appear, correct,
+# moments later.
+csi_storageclass_settle_retries: 30
 # China-side operator only: registry.k8s.io fronts Google Artifact Registry
 # (*.pkg.dev) and is GFW-blocked, so 08a's CAPI core pull dies on i/o timeout.
 # 08a handles this on its own — it tries the upstream first, then the mirrors in

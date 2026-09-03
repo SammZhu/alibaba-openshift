@@ -413,6 +413,29 @@
     # green everywhere, and left the cluster provisioning the old category: the
     # same "configured but not in effect" trap as the stale agent image and the
     # leftover openshift/ manifests.  Compare and refuse to pass silently.
+    # Wait before judging.  On a fresh install the CR has only just been applied
+    # and the operator has not reconciled the StorageClasses into existence yet —
+    # "absent" then means "not created YET", not "configured but not in effect".
+    # Without this the check races the operator and fails an install that is
+    # perfectly fine: the classes appeared, with the right category, seconds
+    # later.  A check meant to catch silent no-ops must not invent loud ones.
+    - name: "08 — wait for the operator to reconcile the disk StorageClasses"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", get, storageclass, -o, json]
+      register: _sc_settle
+      changed_when: false
+      retries: "{{ csi_storageclass_settle_retries | default(30) }}"
+      delay: 10
+      until: >-
+        {{ ((_sc_settle.stdout | default('{}') | from_json)['items'] | default([]))
+           | selectattr('metadata.name', 'in', _decl_names) | list | length
+           == (_decl_names | length) }}
+      failed_when: false
+      vars:
+        _decl_names: >-
+          {{ (((csi_cr_readback.stdout | default('{}') | from_json).spec | default({})).disk.storageClasses
+              | default([])) | map(attribute='name') | list }}
+
     - name: "08 — read back the disk StorageClasses against the CR"
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", get, storageclass, -o, json]
