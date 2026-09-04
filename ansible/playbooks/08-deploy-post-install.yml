@@ -426,10 +426,13 @@
       changed_when: false
       retries: "{{ csi_storageclass_settle_retries | default(30) }}"
       delay: 10
+      # No {{ }} here: a conditional is already an expression.  Wrapped, Ansible
+      # warns and evaluates the rendered *string* — which is how a check like
+      # this quietly becomes always-true and stops guarding anything.
       until: >-
-        {{ ((_sc_settle.stdout | default('{}') | from_json)['items'] | default([]))
-           | selectattr('metadata.name', 'in', _decl_names) | list | length
-           == (_decl_names | length) }}
+        ((_sc_settle.stdout | default('{}') | from_json)['items'] | default([]))
+        | selectattr('metadata.name', 'in', _decl_names) | list | length
+        == (_decl_names | length)
       failed_when: false
       vars:
         _decl_names: >-
@@ -574,6 +577,10 @@
       register: nas_sc
       changed_when: "'unchanged' not in nas_sc.stdout"
       when:
+        # Gate on the service existing before the network params: without this
+        # the class was created on dyz7, where there is no NAS at all, and the
+        # only symptom was 13's RWX check failing with a misleading reason.
+        - nas_available | default(true) | bool
         - nas_vpc_id | default('') | length > 0
         - nas_vsw_id | default('') | length > 0
         - nas_zone_id | default('') | length > 0

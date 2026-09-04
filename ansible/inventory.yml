@@ -22,6 +22,20 @@ all:
     oss_cli_argv: "{{ oss_cli.split() }}"
     cloud_env: {}
 
+    # Does this environment ship NAS at all?  Public cloud always does; an
+    # Apsara deployment only does when an endpoint was discovered for it (dyz7
+    # does not — every candidate hostname fails DNS).  Evaluated lazily, so it
+    # picks up whatever cloud_platform/cloud_env end up as.
+    #
+    # One judgement, three consumers: the CSI CR (deploy the driver at all),
+    # 08 (create the NAS StorageClass), 13 (run the RWX check).  Written out
+    # three times it drifted — 08 kept creating a StorageClass for a service
+    # that does not exist, and 13 then reported a soft FAIL whose explanation
+    # sent the reader looking for missing network IDs.
+    nas_available: >-
+      {{ not ((cloud_platform | default('public')) == 'apsara'
+              and (cloud_env.ENDPOINT_NAS | default('')) | length == 0) }}
+
   hosts:
     local:
       ansible_connection: local

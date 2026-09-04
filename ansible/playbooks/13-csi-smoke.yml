@@ -80,20 +80,31 @@
     # needs a pre-existing `server` (mount-target). Dynamic filesystem-mode
     # provisioning needs volumeAs=filesystem + vpcId/vSwitchId/zoneId/regionId,
     # which the operator does not set yet. Until that lands, the NAS PVC will stay
-    # Pending — so NAS is reported but does NOT fail the play. Toggle off entirely
-    # with -e csi_smoke_nas=false. Shorter timeout since a stuck PVC won't bind.
-    csi_smoke_nas: true
-    # Snapshots are a required check by default.  Set false only where the
-    # platform genuinely cannot do them — on Apsara the driver creates the
-    # snapshot in the cloud and then crashes reading the response back
-    # (DescribeSnapshots returns SourceDiskSize as a number where the SDK's
-    # ecs.Snapshot declares a string, so the response does not unmarshal, the
-    # waiter treats the snapshot as absent and CreateSnapshot dereferences nil).
-    # That takes the whole driver down with every sidecar, and each retry leaves
-    # another orphan snapshot in the cloud, so running the check there costs
-    # something and proves nothing.  Deliberately NOT auto-disabled on apsara:
-    # this is an upstream defect, and it should start failing again the moment
-    # it is fixed.
+    # Pending — so NAS is reported but does NOT fail the play. Toggle explicitly
+    # with -e csi_smoke_nas=. Shorter timeout since a stuck PVC won't bind.
+    #
+    # Defaults to whether the environment ships NAS at all (see nas_available in
+    # inventory.yml).  Where it does not, this is a SKIP rather than a FAIL: a
+    # red check for an absent service teaches the reader to ignore red checks.
+    # Unlike the snapshot flag below, nothing here is deferred — there is no fix
+    # that would make NAS appear on a cloud that does not sell it.
+    csi_smoke_nas: "{{ nas_available | default(true) | bool }}"
+    # Snapshots are a required check, on every platform.  They PASS on Apsara as
+    # of 2026-09-04, once the driver is given static AK/SK instead of the node
+    # RAM role's STS token (csi_static_credentials — the operator carries them
+    # via extraEnv/secretKeyRef).  Before that, DescribeSnapshots came back
+    # HTTP 200 with an empty result set and an empty RequestId, the waiter read
+    # that as "absent", and CreateSnapshot dereferenced the nil — taking the
+    # whole driver down with every sidecar and orphaning a snapshot per retry.
+    #
+    # The nil dereference upstream (waitstatus/batched.go got() returning
+    # (nil, nil), controllerserver.go CreateSnapshot not checking) is NOT fixed —
+    # it is merely no longer reached.  A credentials change is enough to bring it
+    # back, so leave this check required: it is what noticed the problem.
+    #
+    # An earlier comment here blamed SourceDiskSize (a number where the SDK
+    # declares a string).  That was disproven — the SDK's jsoniter fuzzy decoder
+    # converts it and the response unmarshals cleanly.  Not restated as fact.
     csi_smoke_snapshot: true
     # Set true to keep the smoke namespace even on success (for debugging).  A
     # required failure keeps it regardless — see "keep the namespace" below.
@@ -484,13 +495,15 @@
         - name: "[nas-rwx] note when NAS soft-check failed"
           ansible.builtin.debug:
             msg: >
-              NAS soft-check did not pass. 08-deploy-post-install should have applied
-              a filesystem-mode NAS StorageClass ({{ nas_sc }}) from the cluster
+              NAS soft-check did not pass, and this environment DOES have NAS
+              (nas_available is true — an environment without it skips the check
+              instead of failing it). 08-deploy-post-install should have applied a
+              filesystem-mode NAS StorageClass ({{ nas_sc }}) from the cluster
               vpc/vSwitch/zone. Check: `oc get sc {{ nas_sc }} -o yaml` (does it have
               volumeAs=filesystem + vpcId/vSwitchId/zoneId?), then
               `oc -n {{ ns }} describe pvc nas-rwx` and the csi-nas-controller logs
               in kube-system. If the SC is missing, state.yml lacked the network IDs
-              when 08 ran (the apply task is gated on them).
+              when 08 ran (the apply task is gated on them too).
           when:
             - csi_smoke_nas | default(true) | bool
             - not (r_nas_rwx | default(false))

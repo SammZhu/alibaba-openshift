@@ -135,9 +135,7 @@ spec:
     # first PVC on `lookup nas.<region>.aliyuncs.com: no such host`.  Deploying a
     # driver that cannot work just adds a permanently red check, so gate it on
     # the environment actually having the service.  (Public cloud always does.)
-    enabled: {{ 'false' if ((cloud_platform | default('public')) == 'apsara'
-                            and (cloud_env.ENDPOINT_NAS | default('')) | length == 0)
-                else 'true' }}
+    enabled: {{ 'true' if nas_available | default(true) | bool else 'false' }}
     storageClasses: []
     storageProfile:
       patch: true

@@ -273,6 +273,45 @@ ansible-playbook playbooks/03-create-mirror-stack.yml     # validated: builds mi
 # ... 06 / 07 ...
 ```
 
+### 4b. Day-2 (site-post) — 08b/08c are a PREREQUISITE, not a wrap-up
+
+On Apsara the order is **08a → 08 → 10 → 08b → 08c → 08 (again, with the
+`-apsara` tags) → 12 → 13**:
+
+```sh
+# CAPA provider image with the Apsara endpoint support
+ansible-playbook playbooks/08b-build-capa-image.yml -e capa_build_ref=apsara-endpoint-support
+# CSI operator image with extraEnv/secretKeyRef support
+ansible-playbook playbooks/08c-build-csi-operator-image.yml -e csi_build_ref=apsara-extra-env
+
+# re-apply with the tags just built — CRDs are re-rendered here, so this is
+# not optional: swapping only the image leaves the old CRDs in place
+ansible-playbook playbooks/08-deploy-post-install.yml \
+  -e capa_image_tag=v0.1.24-apsara -e csi_operator_image_tag=v0.1.13-apsara
+
+ansible-playbook playbooks/12-capa-machinedeployment.yml
+ansible-playbook playbooks/13-csi-smoke.yml
+```
+
+**Why the order matters.** The Apsara fixes for both providers live in images
+that are built *on the operator, into the mirror* — they do not come from
+upstream. A freshly built mirror does not have them. Run 12 without 08b and the
+CAPA controller is still the upstream image, still resolving
+`ecs.<region>.aliyuncs.com`, and no worker is ever created; run 13 without 08c
+and the CSI driver cannot be given static credentials, so snapshots fail. Both
+failures look like provider bugs rather than a missing build step — check the
+running image before believing either.
+
+`capa_image_tag` / `csi_operator_image_tag` come from `vars/images.yml`, which
+08 loads via `vars_files`. **`vars_files` outranks `group_vars`**, so setting
+them there is silently ignored — only `-e` wins.
+
+08b/08c fetch their source from GitHub. Where that is blocked, they retry and
+then stop rather than build whatever commit happens to be checked out; pass
+`-e 08b_allow_offline=true` (or `08c_`) only after confirming the local checkout
+is the commit you want. Each play prints the commit it built — that print is the
+only evidence the fix is actually in the image.
+
 Teardown of the persistent (mirror) stack needs RAM delete permissions the
 sub-user may lack — see the teardown note in `QUICKSTART.md`.
 
