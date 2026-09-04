@@ -91,6 +91,14 @@ rules:
   - apiGroups: [""]
     resources: [services]
     verbs: [get, list, watch, patch, update]
+  # v2.x watches Pods when resolving load balancer backends.  Without this the
+  # controller logs "pods is forbidden ... at the cluster scope" every reflector
+  # resync — once a minute, forever — and never finishes reconciling a Service,
+  # which in turn leaves the load-balancer-cleanup finalizer on it and wedges
+  # the namespace in Terminating when it is deleted.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
   - apiGroups: [""]
     resources: [services/status]
     verbs: [patch, update]
