@@ -217,7 +217,17 @@ spec:
           # editing the manifest.  The IDMS rule rewrites the registry host to
           # the mirror but not the tag, so the tag asked for here must exist
           # there — which is what 08d pushes.
+          # By digest when one is known (08d records it in state.yml), because a
+          # tag pull is redirected only by an ImageTagMirrorSet, which needs a
+          # running cluster — and this image has to be pullable during bootstrap
+          # or the uninitialized taint never lifts and the install deadlocks.
+          # The install-config's ImageDigestMirrorSet already maps this exact
+          # source to the mirror, so a digest reference resolves from the start.
+{% if (ccm_image_digest | default('')) | length > 0 %}
+          image: registry-cn-hangzhou.ack.aliyuncs.com/acs/cloud-controller-manager@{{ ccm_image_digest }}
+{% else %}
           image: registry-cn-hangzhou.ack.aliyuncs.com/acs/cloud-controller-manager:{{ ccm_image_tag | default('v2.14.0') }}
+{% endif %}
           imagePullPolicy: IfNotPresent
           # v2.x of the Alibaba CCM has its own minimal flag set — quite
           # different from the generic kube-controller-manager / out-of-tree

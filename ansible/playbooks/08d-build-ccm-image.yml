@@ -61,6 +61,14 @@
         # would trade a working deployment for a permission error.
         bi_image_user: ""
 
+    # Persist it so 07 can render the manifest with a digest reference long
+    # before there is a cluster to ask.
+    - name: "08d — record the digest in state"
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        new_state:
+          ccm_image_digest: "{{ bi_digest }}"
+
     - name: "08d — next steps"
       ansible.builtin.debug:
         msg: |

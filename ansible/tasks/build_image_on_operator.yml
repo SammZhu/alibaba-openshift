@@ -210,9 +210,26 @@
            "{{ mirror_private_ip }}:8443/{{ bi_mirror_repo }}:{{ bi_build_tag }}"]
   changed_when: true
 
+# Resolve the digest from the mirror we just pushed to.  A tag reference is
+# only redirected by an ImageTagMirrorSet, which needs a running cluster with
+# MCO — useless for an image that has to be pullable during bootstrap.  A digest
+# reference is redirected by the install-config's ImageDigestMirrorSet, which
+# exists before the first node boots.
+- name: "{{ bi_name }} — resolve the pushed image digest"
+  ansible.builtin.command:
+    argv: [skopeo, inspect, --tls-verify=false,
+           "docker://{{ mirror_private_ip }}:8443/{{ bi_mirror_repo }}:{{ bi_build_tag }}"]
+  register: _bi_inspect
+  changed_when: false
+
+- name: "{{ bi_name }} — capture the digest"
+  ansible.builtin.set_fact:
+    bi_digest: "{{ (_bi_inspect.stdout | from_json).Digest }}"
+
 - name: "{{ bi_name }} — built"
   ansible.builtin.debug:
     msg: |
       ✓ {{ mirror_private_ip }}:8443/{{ bi_mirror_repo }}:{{ bi_build_tag }}
         from {{ _bi_commit.stdout }}
         base {{ bi_mirror_repo }}:{{ bi_base_tag }}
+        digest {{ bi_digest }}
