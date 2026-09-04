@@ -40,7 +40,18 @@ export RG_ID=${RG_ID:-$(get RG_ID)}
 : "${AK:?could not read capa_ak from $AV}"
 
 echo "region=$REGION  slb=$SLB_ENDPOINT  org=${ORG_ID:0:8}…  ak=${AK:0:6}…"
+
+# The SDK version is a variable because the answer depends on it: the CCM
+# v2.14.0 binary embeds alibaba-cloud-sdk-go v1.63.99, and a response that one
+# version cannot unmarshal another may handle fine.  Read the CCM's own version
+# out of its binary with `go version -m /path/to/cloud-controller-manager`, then
+# probe with THAT — testing a different version answers a different question.
+SDK_VERSION=${SDK_VERSION:-v1.63.99}
+echo "sdk      = $SDK_VERSION"
 export GOFLAGS=${GOFLAGS:--mod=mod}
 export GOPROXY=${GOPROXY:-https://goproxy.cn,direct}
+go get "github.com/aliyun/alibaba-cloud-sdk-go@${SDK_VERSION}" >/dev/null 2>&1
 go mod tidy >/dev/null
+echo "resolved = $(go list -m github.com/aliyun/alibaba-cloud-sdk-go)"
+echo
 go build -o ccmprobe . && ./ccmprobe

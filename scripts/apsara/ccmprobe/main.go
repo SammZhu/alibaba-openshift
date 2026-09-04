@@ -136,7 +136,15 @@ func main() {
 	fmt.Println()
 	describe("WITHOUT headers", false)
 
-	fmt.Println("\nreading: both OK -> CCM works on config alone (env vars only).")
-	fmt.Println("         only 'with headers' OK -> CCM needs a forked client, as CAPA did.")
-	fmt.Println("         both fail -> endpoint/credentials wrong; fix that before reading anything into it.")
+	fmt.Println("\nreading — compare the two runs, and read the raw body, not just the error:")
+	fmt.Println("  both OK                     -> CCM works on configuration alone (env vars only).")
+	fmt.Println("  only 'with headers' OK      -> tenancy headers are mandatory; CCM needs a forked")
+	fmt.Println("                                 client carrying the RoundTripper, as CAPA does.")
+	fmt.Println("  both show JsonUnmarshalError with a 200 body")
+	fmt.Println("                              -> the CALL is fine and the headers are NOT needed;")
+	fmt.Println("                                 the SDK's structs disagree with what this gateway")
+	fmt.Println("                                 returns.  A client-side parse failure, not a")
+	fmt.Println("                                 rejection — re-probe with the SDK version the CCM")
+	fmt.Println("                                 actually embeds before concluding anything.")
+	fmt.Println("  both fail with no body      -> endpoint or credentials wrong; fix that first.")
 }
