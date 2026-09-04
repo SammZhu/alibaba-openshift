@@ -44,6 +44,12 @@
         capa_ak: "{{ _ak }}"
         capa_sk: "{{ _sk }}"
         mirror_private_ip: "{{ mirror_private_ip | default('') }}"
+        # The cloud.conf ConfigMap is rendered in play two and needs the
+        # cluster's network identifiers, which only exist in state.yml on the
+        # operator.
+        mirror_vpc_id: "{{ mirror_vpc_id | default('') }}"
+        mirror_zone_id: "{{ mirror_zone_id | default('') }}"
+        mirror_private_vsw_1: "{{ mirror_private_vsw_1 | default('') }}"
       no_log: true
 
     # An empty group means the next play matches nothing and Ansible skips it
@@ -156,6 +162,20 @@
         executable: /bin/bash
       register: _ccm_apply
       changed_when: "'unchanged' not in _ccm_apply.stdout"
+
+    # The CCM mounts cloud.conf from this ConfigMap and will not start without
+    # it — the pod sits in ContainerCreating on "configmap not found", which
+    # reads like a scheduling problem rather than a missing object.  It is
+    # normally baked into the ISO alongside the Deployment, so the retrofit path
+    # has to bring it too.
+    - name: "08e — cloud.conf ConfigMap"
+      ansible.builtin.shell:
+        cmd: "oc --kubeconfig {{ kubeconfig_file }} apply -f -"
+        stdin: "{{ lookup('template', playbook_dir + '/../templates/alibaba-ccm-config.yaml.j2') }}"
+      args:
+        executable: /bin/bash
+      register: _ccm_cfg
+      changed_when: "'unchanged' not in _ccm_cfg.stdout"
 
     - name: "08e — credentials Secret"
       ansible.builtin.include_tasks: ../tasks/ccm_credentials_secret.yml
