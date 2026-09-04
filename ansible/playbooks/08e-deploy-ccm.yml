@@ -68,6 +68,10 @@
     ccm_scale_up: false
     kubeconfig_file: /root/kubeconfig
     _ccm_ns: alibaba-cloud-controller-manager
+    # The Deployment and the ServiceAccount have different names in the
+    # manifest (alibaba-cloud-controller-manager vs cloud-controller-manager);
+    # naming it once here stops the wrong one being used by habit.
+    _ccm_deploy: alibaba-cloud-controller-manager
   tasks:
     - name: "08e — running on the deploy host"
       ansible.builtin.debug:
@@ -165,7 +169,7 @@
     - name: "08e — read the env back off the Deployment"
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ _ccm_ns }}",
-               get, deploy, cloud-controller-manager,
+               get, deploy, "{{ _ccm_deploy }}",
                -o, 'jsonpath={.spec.template.spec.containers[0].image}{"\n"}{range .spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}']
       register: _ccm_env
       changed_when: false
@@ -188,24 +192,24 @@
             ansible-playbook playbooks/08e-deploy-ccm.yml \
               -e ccm_image_tag={{ ccm_image_tag }} -e ccm_scale_up=true
           Watch, in another shell:
-            oc -n {{ _ccm_ns }} logs -f deploy/cloud-controller-manager
+            oc -n {{ _ccm_ns }} logs -f deploy/{{ _ccm_deploy }}
             oc get nodes -w
           Roll back at any point:
-            oc -n {{ _ccm_ns }} scale deploy/cloud-controller-manager --replicas=0
+            oc -n {{ _ccm_ns }} scale deploy/{{ _ccm_deploy }} --replicas=0
       when: not (ccm_scale_up | bool)
 
     # ── scale-up path ────────────────────────────────────────────────────────
     - name: "08e — scale to 1"
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ _ccm_ns }}",
-               scale, deploy/cloud-controller-manager, --replicas=1]
+               scale, "deploy/{{ _ccm_deploy }}", --replicas=1]
       changed_when: true
       when: ccm_scale_up | bool
 
     - name: "08e — wait for it to become Available"
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ _ccm_ns }}",
-               wait, --for=condition=Available, deploy/cloud-controller-manager,
+               wait, --for=condition=Available, "deploy/{{ _ccm_deploy }}",
                --timeout=180s]
       register: _ccm_avail
       changed_when: false
@@ -230,7 +234,7 @@
           | length == 0
         fail_msg: |
           NODES WENT MISSING after the CCM started.  Scale it back to 0 now:
-            oc -n {{ _ccm_ns }} scale deploy/cloud-controller-manager --replicas=0
+            oc -n {{ _ccm_ns }} scale deploy/{{ _ccm_deploy }} --replicas=0
           Before: {{ _ccm_nodes_before.stdout_lines | join(' | ') }}
           After:  {{ _ccm_nodes_after.stdout_lines | join(' | ') }}
           The backup this play took is /root/nodes-before-ccm-*.yaml.
