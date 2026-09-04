@@ -35,7 +35,21 @@
   ansible.builtin.stat:
     path: "{{ bi_repo }}/Makefile"
   register: _bi_repo
-  failed_when: not _bi_repo.stat.exists
+
+# Say which path was looked at.  The bare stat failure reports only
+# "exists: false", which leaves the reader to re-derive bi_repo from
+# playbook_dir by hand before they can even tell whether the repo is missing or
+# the path is wrong.
+- name: "{{ bi_name }} — where the source repo was expected"
+  ansible.builtin.assert:
+    that: _bi_repo.stat.exists
+    fail_msg: >-
+      No {{ bi_repo }}/Makefile — {{ bi_name }} expects the source checkout at
+      {{ bi_repo | realpath }} (a sibling of the alibaba-openshift checkout).
+      Clone it there, or point {{ bi_name }} elsewhere with bi_repo. 00a clones
+      the companion repos; a repo added after 00a last ran will not be there.
+    success_msg: "{{ bi_repo }}"
+    quiet: true
 
 # Fetch first.  Checking out a ref the clone already has silently builds
 # whatever it happened to hold — a stale clone once produced a "successful"
