@@ -1,0 +1,82 @@
+---
+# 08d — rebuild the Alibaba cloud-controller-manager on the operator host and
+# push it to the mirror.  Same mechanics as 08b/08c
+# (see tasks/build_image_on_operator.yml).
+#
+# WHY: the CCM reaches SLB through aliyun/alibaba-cloud-sdk-go, and on Apsara
+# that gateway serves LoadBalancer.Tags as a bare array where the SDK declares
+# the documented {"Tag": [...]} object.  DescribeLoadBalancers returns HTTP 200
+# with a complete, correct body and the client throws it away
+# ("readObjectStart: expect { or n, but found [").  One tagged load balancer
+# anywhere in the region breaks the call for the whole region, so the service
+# controller can never list and no LoadBalancer Service reconciles.
+#
+# The fix is one UnmarshalJSON in a fork of the SDK, pulled in by a replace
+# directive in the CCM fork.  Nothing in the CCM's own code changes.  Measured
+# before it was started: an offline shape comparison of a captured response body
+# (scripts/apsara/ccmprobe shapecheck) put the damage at exactly one field.
+#
+# What this does NOT fix, and is worth knowing before deploying:
+#   - Only DescribeLoadBalancers has been checked.  Other calls the CCM makes
+#     (DescribeLoadBalancerAttribute, DescribeVServerGroups, ECS/VPC lookups)
+#     may have their own shape drift.  ccmprobe's shapecheck makes each one
+#     cheap to measure — do that rather than guessing.
+#   - The endpoint / scheme / credential wiring is separate and lives in
+#     custom_manifests/01-alibaba-ccm.yaml.j2, gated on cloud_platform.
+#
+# Usage:
+#   ansible-playbook playbooks/08d-build-ccm-image.yml -e ccm_build_ref=apsara-response-shapes
+#   then deploy with -e ccm_image_tag=<the tag printed below>
+- name: Build the Alibaba CCM image on the operator, push to the mirror
+  hosts: local
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../vars/images.yml"
+  vars:
+    ccm_repo: "{{ playbook_dir }}/../../../cloud-provider-alibaba-cloud"
+    ccm_build_ref: ""
+    ccm_base_tag: "{{ ccm_image_tag }}"
+    ccm_build_tag: "{{ ccm_image_tag }}-apsara"
+    ccm_mirror_repo: "{{ ccm_image_mirror_repo | default('acs/cloud-controller-manager') }}"
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: "08d — build and push"
+      ansible.builtin.include_tasks: ../tasks/build_image_on_operator.yml
+      vars:
+        bi_name: 08d
+        bi_repo: "{{ ccm_repo }}"
+        bi_ref: "{{ ccm_build_ref }}"
+        # cmd/manager, not the repo root: cmd/ also holds a `health` helper.
+        bi_build_argv: [go, build, -o, bin/cloud-controller-manager, ./cmd/manager]
+        bi_binary: bin/cloud-controller-manager
+        bi_mirror_repo: "{{ ccm_mirror_repo }}"
+        bi_base_tag: "{{ ccm_base_tag }}"
+        bi_build_tag: "{{ ccm_build_tag }}"
+        # The manifest runs /cloud-controller-manager, and a pod's `command`
+        # replaces ENTRYPOINT rather than searching, so the path must match.
+        bi_image_path: /cloud-controller-manager
+        # Inherit the base image's user: this pod mounts /etc/kubernetes from
+        # the host and reads the cloud config, so forcing an unprivileged uid
+        # would trade a working deployment for a permission error.
+        bi_image_user: ""
+
+    - name: "08d — next steps"
+      ansible.builtin.debug:
+        msg: |
+          Built {{ ccm_build_tag }}.  The CCM is NOT deployed by this play.
+
+          It is applied from custom_manifests/01-alibaba-ccm.yaml.j2, which is
+          rendered into the agent ISO at install time — so on an existing
+          cluster it has to be rendered and applied by hand:
+
+            ansible-playbook playbooks/07-install-cluster.yml --tags render
+            oc apply -f <output_dir>/rendered/01-alibaba-ccm.yaml
+
+          Deploy it at replicas=0 first and confirm the environment variables
+          landed, before scaling to 1.  The CCM's node controller resolves nodes
+          by providerID; whether it deletes a Node it cannot find in the cloud
+          was not established from the binary, and this cluster's nodes are
+          real.  Take a backup first:
+
+            oc get nodes -o yaml > nodes-backup.yaml

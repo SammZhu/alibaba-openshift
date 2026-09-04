@@ -33,3 +33,10 @@ capa_image: "{{ capa_image_repo }}:{{ capa_image_tag }}"
 #   - scripts/build-mirror-tarball.sh   CSI image tags
 csi_operator_image_repo: "quay.io/samzhu/alibaba-cloud-csi-operator"
 csi_operator_image_tag: "v0.1.13"
+
+# Alibaba cloud-controller-manager.  Only deployed on platforms where it can
+# work — see ccm_enabled, which defaults to false on Apsara.  The "-apsara" tag
+# is what 08d builds: upstream v2.14.0 plus a forked SDK that can decode this
+# gateway's LoadBalancer.Tags shape.
+ccm_image_tag: "v2.14.0"
+ccm_image_mirror_repo: "acs/cloud-controller-manager"

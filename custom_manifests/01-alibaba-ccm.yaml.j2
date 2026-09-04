@@ -213,7 +213,11 @@ spec:
           # mirror at install time, so masters pull from
           # mirror:8443/acs/cloud-controller-manager without crossing the
           # border to Hangzhou.
-          image: registry-cn-hangzhou.ack.aliyuncs.com/acs/cloud-controller-manager:v2.14.0
+          # Tag is a variable so 08d's rebuilt image can be selected without
+          # editing the manifest.  The IDMS rule rewrites the registry host to
+          # the mirror but not the tag, so the tag asked for here must exist
+          # there — which is what 08d pushes.
+          image: registry-cn-hangzhou.ack.aliyuncs.com/acs/cloud-controller-manager:{{ ccm_image_tag | default('v2.14.0') }}
           imagePullPolicy: IfNotPresent
           # v2.x of the Alibaba CCM has its own minimal flag set — quite
           # different from the generic kube-controller-manager / out-of-tree

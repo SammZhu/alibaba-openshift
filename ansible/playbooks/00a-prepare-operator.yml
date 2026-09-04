@@ -137,6 +137,10 @@
         _op_companion_default:
           - https://github.com/SammZhu/openshift-capi-alicloud.git
           - https://github.com/SammZhu/alibaba-cloud-csi-operator.git
+          # Fork of kubernetes/cloud-provider-alibaba-cloud, needed by 08d.
+          # Only the go.mod differs from upstream v2.14.0: a replace pointing at
+          # a forked SDK that can decode this gateway's LoadBalancer.Tags.
+          - https://github.com/SammZhu/cloud-provider-alibaba-cloud.git
       register: _op_companions
       # A companion repo missing is not fatal for the phases that do not use it,
       # so report clearly rather than blocking the whole operator prep.

@@ -15,6 +15,14 @@
 #   bi_binary      path (relative to bi_repo) that `make build` produces
 #   bi_mirror_repo repository path inside the mirror, e.g. samzhu/foo
 #   bi_base_tag    tag to layer onto (normally the currently deployed one)
+#   bi_image_path  where the binary lands in the image (default /manager).  The
+#                  CCM's manifest runs /cloud-controller-manager, and a pod's
+#                  `command` replaces ENTRYPOINT rather than finding the binary
+#                  elsewhere, so the path has to match what the manifest asks for.
+#   bi_image_user  USER line, or "" to inherit the base image's.  The controllers
+#                  built here run unprivileged; the CCM reads a hostPath mount of
+#                  /etc/kubernetes, so forcing 65532 on it would be a new failure
+#                  mode rather than a hardening win.
 #   bi_build_tag   tag to produce
 #   bi_goproxy     module proxy (proxy.golang.org is blocked here)
 # From state: mirror_private_ip, mirror_init_user, mirror_init_password.
@@ -168,9 +176,11 @@
     mode: "0644"
     content: |
       FROM {{ mirror_private_ip }}:8443/{{ bi_mirror_repo }}:{{ bi_base_tag }}
-      COPY manager /manager
-      USER 65532:65532
-      ENTRYPOINT ["/manager"]
+      COPY manager {{ bi_image_path | default('/manager') }}
+      {% if (bi_image_user | default('65532:65532')) | length > 0 %}
+      USER {{ bi_image_user | default('65532:65532') }}
+      {% endif %}
+      ENTRYPOINT ["{{ bi_image_path | default('/manager') }}"]
 
 - name: "{{ bi_name }} — build the image"
   ansible.builtin.command:
