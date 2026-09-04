@@ -32,6 +32,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk"
@@ -111,15 +112,38 @@ func describe(label string, withHeaders bool) {
 		fmt.Printf("%-18s  OK  RequestId=%q TotalCount=%d LoadBalancers=%d\n",
 			label, resp.RequestId, resp.TotalCount, len(resp.LoadBalancers.LoadBalancer))
 	}
-	if raw != "" {
-		if len(raw) > 400 {
-			raw = raw[:400] + " …"
-		}
-		fmt.Printf("%-18s  raw: %s\n", "", raw)
+	if raw == "" {
+		return
 	}
+
+	// Write the WHOLE body out, not a preview.  The open question is no longer
+	// "does this call work" (it does) but "how many fields does this gateway
+	// shape differently from the SDK's structs" — Tags is one, and one is only
+	// a floor.  With the full body on disk that can be answered offline, in a
+	// single pass, instead of one network round trip per field discovered.
+	if dir := os.Getenv("DUMP_DIR"); dir != "" {
+		name := filepath.Join(dir, "slb-describe-"+strings.ReplaceAll(label, " ", "_")+".json")
+		if werr := os.WriteFile(name, []byte(raw), 0o644); werr != nil {
+			fmt.Printf("%-18s  dump FAILED: %v\n", "", werr)
+		} else {
+			fmt.Printf("%-18s  raw body -> %s (%d bytes)\n", "", name, len(raw))
+		}
+	}
+	preview := raw
+	if len(preview) > 400 {
+		preview = preview[:400] + " …"
+	}
+	fmt.Printf("%-18s  raw: %s\n", "", preview)
 }
 
 func main() {
+	// Offline mode: analyse a body captured by an earlier run.  Needs no
+	// network, no credentials, and can be re-run as often as the question
+	// changes.
+	if len(os.Args) > 2 && os.Args[1] == "shapecheck" {
+		os.Exit(shapecheck(os.Args[2], slb.CreateDescribeLoadBalancersResponse()))
+	}
+
 	for _, k := range []string{"REGION", "SLB_ENDPOINT", "AK", "SK"} {
 		if os.Getenv(k) == "" {
 			fmt.Printf("missing required env %s\n", k)

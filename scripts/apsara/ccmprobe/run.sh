@@ -39,7 +39,13 @@ export RG_ID=${RG_ID:-$(get RG_ID)}
 : "${REGION:?could not read region from $AV}"
 : "${AK:?could not read capa_ak from $AV}"
 
+# Where the full response bodies land.  Kept out of the repo: they carry real
+# resource ids from a shared environment.
+export DUMP_DIR=${DUMP_DIR:-/home/claude}
+mkdir -p "$DUMP_DIR" 2>/dev/null || true
+
 echo "region=$REGION  slb=$SLB_ENDPOINT  org=${ORG_ID:0:8}…  ak=${AK:0:6}…"
+echo "dumps    = $DUMP_DIR"
 
 # The SDK version is a variable because the answer depends on it: the CCM
 # v2.14.0 binary embeds alibaba-cloud-sdk-go v1.63.99, and a response that one
