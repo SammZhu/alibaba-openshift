@@ -45,7 +45,12 @@ cloud_env:           {}         # apsara -> { CLOUD_PLATFORM: apsara, AK: .., SK
                                 #   ORG_ID: org-.., RG_ID: rs-.., ENDPOINT_ROS: ros.cloud.ste3.com,
                                 #   ENDPOINT_ECS: .., ENDPOINT_VPC: vpc.cloud.ste3.com,
                                 #   ENDPOINT_RAM: ram.cloud.ste3.com,
-                                #   ENDPOINT_CLOUDDNS: dns-control.pop.cloud.ste3.com }
+                                #   ENDPOINT_CLOUDDNS: dns-control.pop.cloud.ste3.com,
+                                #   ENDPOINT_SLB: slb-vpc.cloud.dyz7.com }
+                                # ENDPOINT_SLB is only needed with ccm_enabled: the CCM
+                                # resolves slb.<region>.aliyuncs.com otherwise, which does
+                                # not exist here.  Find it with scripts/apsara/probe-endpoints.sh;
+                                # note dyz7 has SLB but no NLB (every nlb-* pattern fails DNS).
                                 # ENDPOINT_CLOUDDNS = the DNS POP (private DNS / PrivateZone);
                                 # from Tianji: dnsProduct/dnsService docker env pop_out_endpoint.
                                 # cloudcli routes `clouddns` there via apsara-rpc NATIVE_SEND
