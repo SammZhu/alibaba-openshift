@@ -51,10 +51,13 @@ probe_tcp() {  # host -> prints "DNS=<ip> 80:OK 443:OK"
 }
 
 echo "=== phase 1: DNS + TCP  (domain: $DOMAIN) ==="
-# nas/slb matter for the CSI driver and for LoadBalancer Services; a product the
+# nas/slb matter for the CSI driver and for LoadBalancer Services; nlb/alb matter
+# because the CCM reaches them through a DIFFERENT SDK (alibabacloud-go/tea)
+# than slb (aliyun/alibaba-cloud-sdk-go), and the two disagree about response
+# shapes on this gateway — so which one is reachable decides real work.  A product the
 # environment simply does not deploy shows up here as every pattern failing DNS,
 # which is a real answer rather than a gap in this list.
-for svc in ecs vpc ros ram oss dns dns-control nas slb; do
+for svc in ecs vpc ros ram oss dns dns-control nas slb nlb alb; do
   for pat in "${PATTERNS[@]}"; do
     # shellcheck disable=SC2059
     host=$(printf "$pat" "$svc" "$DOMAIN")
