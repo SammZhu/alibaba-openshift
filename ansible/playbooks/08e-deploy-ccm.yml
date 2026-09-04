@@ -24,6 +24,40 @@
     - ansible.builtin.include_tasks: ../tasks/load_state.yml
     - ansible.builtin.include_tasks: ../tasks/deploy_host.yml
 
+    # The CCM's credentials Secret needs these, same as 08's does.
+    - name: "08e — resolve Alibaba AK/SK"
+      ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
+
+    # Without this the second play matches no hosts and is skipped in silence —
+    # a green run that did nothing at all, which is the failure mode this
+    # project keeps meeting.  deploy_host.yml resolves _dh_host/_dh_connection;
+    # turning that into an inventory entry is the caller's job.
+    - name: "08e — add the deploy host to the inventory"
+      ansible.builtin.add_host:
+        name: jumphost
+        ansible_host: "{{ _dh_host }}"
+        ansible_connection: "{{ _dh_connection }}"
+        ansible_user: root
+        ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+        groups: deploy
+        capa_ak: "{{ _ak }}"
+        capa_sk: "{{ _sk }}"
+        mirror_private_ip: "{{ mirror_private_ip | default('') }}"
+      no_log: true
+
+    # An empty group means the next play matches nothing and Ansible skips it
+    # without a word — the run ends failed=0 having done nothing.  Cheaper to
+    # catch here than to notice that a "successful" deploy changed nothing.
+    - name: "08e — the deploy host must be in the inventory"
+      ansible.builtin.assert:
+        that: (groups['deploy'] | default([])) | length > 0
+        fail_msg: >-
+          add_host did not register a deploy host, so the play that does the
+          work would be skipped silently.  Check _dh_host / _dh_connection from
+          tasks/deploy_host.yml.
+        quiet: true
+
 - name: Deploy the Alibaba CCM (executed on the deploy host)
   hosts: jumphost
   gather_facts: true
@@ -35,6 +69,10 @@
     kubeconfig_file: /root/kubeconfig
     _ccm_ns: alibaba-cloud-controller-manager
   tasks:
+    - name: "08e — running on the deploy host"
+      ansible.builtin.debug:
+        msg: "deploy host = {{ inventory_hostname }} ({{ ansible_host | default('local') }})"
+
     - name: "08e — kubeconfig must be present"
       ansible.builtin.stat:
         path: "{{ kubeconfig_file }}"
