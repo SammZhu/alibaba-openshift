@@ -38,14 +38,49 @@
     chdir: "{{ bi_repo }}"
     argv: [git, fetch, origin, "{{ bi_ref }}"]
   when: bi_ref | length > 0
+  register: _bi_fetch
   changed_when: true
+  failed_when: false
+  retries: 3
+  delay: 20
+  until: _bi_fetch.rc == 0
+
+# github.com is reachable from here only intermittently, and a failed fetch must
+# not quietly build whatever the clone happens to hold — that is how a "fix" got
+# deployed once without being in the image.  Stop, unless told explicitly to
+# build offline, and then say which commit is being built so the choice is made
+# with the facts.
+- name: "{{ bi_name }} — could not reach the remote"
+  ansible.builtin.assert:
+    that: (_bi_fetch.rc | default(0)) == 0
+    fail_msg: >-
+      git fetch failed ({{ (_bi_fetch.stderr | default('')) | trim | truncate(160) }}).
+      The image would otherwise be built from whatever this clone already has,
+      which may not contain the change you are deploying.  Retry when the
+      network is back, or pass -e {{ bi_name }}_allow_offline=true to build the
+      checked-out commit deliberately — it is printed below either way.
+  when:
+    - bi_ref | length > 0
+    - not (lookup('vars', bi_name ~ '_allow_offline', default=false) | bool)
 
 - name: "{{ bi_name }} — check out exactly what the remote has"
   ansible.builtin.command:
     chdir: "{{ bi_repo }}"
     argv: [git, checkout, --force, "-B", "{{ bi_ref }}", "origin/{{ bi_ref }}"]
-  when: bi_ref | length > 0
+  when:
+    - bi_ref | length > 0
+    - (_bi_fetch.rc | default(0)) == 0
   changed_when: true
+
+- name: "{{ bi_name }} — WARN building offline from the local clone"
+  ansible.builtin.debug:
+    msg: >-
+      Remote unreachable and offline build requested: building whatever
+      {{ bi_repo }} has checked out.  Confirm the commit printed next is the one
+      you mean to deploy.
+  when:
+    - bi_ref | length > 0
+    - (_bi_fetch.rc | default(0)) != 0
 
 - name: "{{ bi_name }} — which commit is being built"
   ansible.builtin.command:
