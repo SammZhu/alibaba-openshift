@@ -105,19 +105,10 @@
       changed_when: "'unchanged' not in _ccm_apply.stdout"
 
     - name: "08e — credentials Secret"
-      ansible.builtin.shell: |
-        oc --kubeconfig {{ kubeconfig_file }} create secret generic {{ ccm_credentials_secret | default('alibaba-ccm-creds') }} \
-          -n {{ _ccm_ns }} \
-          --from-literal=access_key_id='{{ capa_ak }}' \
-          --from-literal=access_key_secret='{{ capa_sk }}' \
-          --dry-run=client -o yaml | oc --kubeconfig {{ kubeconfig_file }} apply -f -
-      args:
-        executable: /bin/bash
-      register: _ccm_secret
-      changed_when: "'unchanged' not in _ccm_secret.stdout"
-      no_log: true
+      ansible.builtin.include_tasks: ../tasks/ccm_credentials_secret.yml
+      vars:
+        ccm_secret_caller: "08e"
       when: ccm_static_credentials | default(true) | bool
-
     # Read back what the cluster actually has, not what we think we sent.  The
     # recurring failure mode in this project is a step that reports success
     # while the running object still holds the old value.

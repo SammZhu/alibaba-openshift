@@ -559,25 +559,16 @@
     # fresh install the CCM pod waits in CreateContainerConfigError until this
     # lands, which is visible and self-explanatory rather than silent.
     - name: "08 — credentials Secret for the CCM (apsara)"
-      ansible.builtin.shell: |
-        oc --kubeconfig {{ kubeconfig_file }} create secret generic {{ ccm_credentials_secret | default('alibaba-ccm-creds') }} \
-          -n alibaba-cloud-controller-manager \
-          --from-literal=access_key_id='{{ capa_ak }}' \
-          --from-literal=access_key_secret='{{ capa_sk }}' \
-          --dry-run=client -o yaml | oc --kubeconfig {{ kubeconfig_file }} apply -f -
-      args:
-        executable: /bin/bash
-      register: _ccm_secret
-      changed_when: "'unchanged' not in _ccm_secret.stdout"
-      # Not fatal when the CCM is not deployed: the namespace will not exist.
-      failed_when:
-        - _ccm_secret.rc != 0
-        - "'not found' not in (_ccm_secret.stderr | default(''))"
+      ansible.builtin.include_tasks: ../tasks/ccm_credentials_secret.yml
+      vars:
+        ccm_secret_caller: "08"
+        # 08 runs whether or not the CCM was ever deployed, so a missing
+        # namespace is expected rather than a failure.
+        _ccm_secret_optional: true
       when:
         - (cloud_platform | default('public')) == 'apsara'
         - ccm_enabled | default(false) | bool
         - ccm_static_credentials | default(true) | bool
-      no_log: true
     - name: Apply NAS StorageClass (filesystem-mode, dynamic provisioning)
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
