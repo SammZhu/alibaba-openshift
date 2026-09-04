@@ -36,18 +36,24 @@ controlPlane:
 platform:
   external:
     platformName: AlibabaCloud
-{% if ccm_enabled | default((cloud_platform | default('public')) != 'apsara') %}
+{% if ccm_enabled | default(true) %}
+    # Declaring External makes kubelet run with --cloud-provider=external and
+    # taint every node node.cloudprovider.kubernetes.io/uninitialized until a
+    # CCM clears it.  That is a hard dependency: a CCM that cannot reach its
+    # cloud deadlocks the install outright — nothing schedules, OVN never
+    # starts, nodes stay NotReady.  On Apsara this was false for a long time
+    # (the CCM resolved ecs-vpc.<region>.aliyuncs.com, which does not exist
+    # there), which is why this used to default off.
+    #
+    # It now defaults on, because the pieces exist: 08d builds an image whose
+    # SDK can decode this gateway's responses, and the manifest passes the
+    # private-cloud endpoints and HTTP scheme through.  Both are required —
+    # an install with ccm_enabled and a stock image will deadlock.
+    #
+    # Escape hatch, if an install hangs with nodes NotReady and tainted
+    # uninitialized: -e ccm_enabled=false, which omits this line, drops the
+    # taint, and costs only ProviderID and LoadBalancer Services.
     cloudControllerManager: External
-{% else %}
-    # No cloudControllerManager: the Alibaba CCM only knows the public-cloud
-    # endpoint layout (ecs-vpc.<region>.aliyuncs.com), which does not exist on
-    # Apsara, so it can never initialise the nodes.  Declaring External makes
-    # kubelet run with --cloud-provider=external and taint every node
-    # node.cloudprovider.kubernetes.io/uninitialized until a CCM clears it —
-    # i.e. forever here, deadlocking the install (nothing schedules, OVN never
-    # starts, the node stays NotReady).  Omitting it means no taint and no CCM.
-    # Trade-off: no ProviderID and no LoadBalancer Services — neither of which
-    # this deployment uses (api/*.apps resolve via CloudDns to the node IP).
 {% endif %}
 {% if mirror_enabled | default(false) | bool %}
 # Mirror redirect — identical source->mirror mapping as the AI install-config

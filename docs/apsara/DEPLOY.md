@@ -315,63 +315,84 @@ only evidence the fix is actually in the image.
 Teardown of the persistent (mirror) stack needs RAM delete permissions the
 sub-user may lack — see the teardown note in `QUICKSTART.md`.
 
-## 5. Known limitation: no cloud-controller-manager
+## 5. cloud-controller-manager
 
-**The Alibaba CCM is not deployed on Apsara** (`ccm_enabled` defaults to false
-there). This is deliberate — deploying it deadlocks the install — but it costs
-you some cloud integration, so it is worth understanding.
+**The CCM is deployed by default**, on Apsara as well as public cloud
+(`ccm_enabled` defaults to true). It was off on Apsara for a long time, and the
+reasons it was off are worth keeping, because they are also the reasons it needs
+a specific image.
 
-### Why it cannot work as-is
+### What had to be true first
 
-Two problems, one of which is fundamental:
+Three claims used to stand in the way. Two turned out to be wrong when tested,
+and the third was smaller than feared:
 
-1. **Endpoints are built in the public-cloud shape.** The CCM composes
-   `ecs-vpc.<region>.aliyuncs.com`; Apsara serves `ecs-internal.cloud.<env>.com`.
-   Different structure, not a string swap. This one is *probably* solvable —
-   some CCM versions accept a custom endpoint in cloud-config (not investigated).
+1. ~~*Endpoints are built in the public-cloud shape and cannot be changed.*~~
+   The v2.x binary reads `ECS_ENDPOINT`, `VPC_ENDPOINT`, `SLB_ENDPOINT` and
+   `NLB_ENDPOINT` from the environment, plus `ALICLOUD_CLIENT_SCHEME` for the
+   HTTP/HTTPS choice — verified by reading the symbols out of the shipped image.
+   The manifest passes all of them through from `cloud_env`.
 
-2. **Apsara requires `x-acs-organizationid` / `x-acs-resourcegroupid` on every
-   request.** The CCM uses the stock Alibaba Go SDK, which never sends them.
-   This is exactly why `scripts/apsara/apsara-rpc` exists — it adds those headers
-   (plus `x-acs-regionid`, `x-acs-caller-sdk-source`) to each call. Without them
-   the gateway either rejects the request or returns an empty result set (a
-   `DescribeImages` returning `TotalCount:0` looks like "no images exist" rather
-   than "wrong scope" — that cost us an afternoon once).
+2. ~~*Apsara requires the tenancy headers on every request, and the CCM cannot
+   send them.*~~ The CCM genuinely cannot send them — there is no knob — but it
+   does not have to. `scripts/apsara/ccmprobe` makes the same
+   `DescribeLoadBalancers` call twice, with and without
+   `x-acs-organizationid` / `-resourcegroupid` / `-regionid`, and this gateway
+   returns the identical successful response either way. The headers matter for
+   apsara-rpc's own calls; they are not a gateway-wide requirement.
 
-So even with the endpoint fixed, the CCM would get no data back. Making it work
-means patching the CCM's SDK usage — maintaining a fork, not setting a config
-value.
+3. **The SDK cannot decode what the gateway returns.** This one is real. Apsara
+   serves `LoadBalancer.Tags` as a bare array where the SDK declares the
+   documented `{"Tag": [...]}` object, so `DescribeLoadBalancers` comes back
+   HTTP 200 with a complete body that the client discards. One tagged load
+   balancer anywhere in the region breaks the call for everyone in it.
 
-### Why leaving it out is safe here
+So the CCM needs an image whose SDK can parse the responses. `08d` builds one:
+upstream v2.14.0 plus a forked SDK carrying one `UnmarshalJSON` that accepts
+both shapes. **An install with `ccm_enabled` and a stock image will deadlock** —
+see below.
 
-Nothing this deployment does depends on it:
+The scope of that third problem was measured rather than guessed:
+`ccmprobe shapecheck` walks a captured response body against the SDK's structs
+by reflection and reports every disagreement at once. On
+`DescribeLoadBalancers` it is exactly one field. Only that one call has been
+measured; use the same tool on the others rather than assuming.
 
-| CCM provides | Why it isn't needed |
-| ------------ | ------------------- |
-| `LoadBalancer` Services (SLB/NLB) | api / api-int / `*.apps` resolve through CloudDns straight to the node IP |
-| ProviderID on nodes | SNO, no Machine API managing it |
-| zone/region labels | single availability zone |
-| Node lifecycle (ECS deleted → node removed) | single node, managed by hand |
-
-### Why leaving it IN is actively harmful
+### Why a broken CCM deadlocks the install
 
 `install-config` declaring `cloudControllerManager: External` makes kubelet run
 with `--cloud-provider=external`, which taints every node
 `node.cloudprovider.kubernetes.io/uninitialized:NoSchedule` until a CCM clears
-it. The CCM never can, so the taint never lifts: nothing schedules, OVN never
-starts, the node stays `NotReady`, and the install stalls at ~50% with no error
-pointing anywhere near the CCM. Two install attempts died this way before we
-traced it.
+it. A CCM that cannot reach its cloud never clears it: nothing schedules, OVN
+never starts, nodes stay `NotReady`, and the install stalls at ~50% with no
+error pointing anywhere near the CCM. Two installs died this way before it was
+traced.
 
-### When this becomes a problem again
+**If an install hangs with nodes NotReady and tainted `uninitialized`**, that is
+this failure. Re-run with `-e ccm_enabled=false`, which omits the declaration
+and drops the taint. The cost is ProviderID and LoadBalancer Services; api /
+api-int / `*.apps` resolve through CloudDns to the node IP either way, so the
+cluster itself is fine without it.
 
-- You need `type: LoadBalancer` Services → wire up SLB yourself, or use
-  NodePort / MetalLB
-- You add CAPA-managed workers → node lifecycle and ProviderID start to matter
-- CSI turns out to need topology labels → verify; the CSI driver here uses
-  explicit AK/SK rather than the cloud provider, so it likely does not
+### Adding it to a cluster installed without it
 
-The real fix, if it is ever needed, is to give the CCM the same treatment
-`apsara-rpc` gives our own calls: custom endpoints plus the org/resource-group
-headers. That is a project of its own and should not block installing clusters.
+The manifest is baked into the agent ISO at install time, so a cluster
+installed with `ccm_enabled=false` cannot gain the CCM by re-running a phase.
+`08e` renders the same template and applies it live, in two deliberate steps:
 
+```sh
+ansible-playbook playbooks/08d-build-ccm-image.yml -e ccm_build_ref=apsara-response-shapes
+ansible-playbook playbooks/08e-deploy-ccm.yml -e ccm_image_tag=v2.14.0-apsara
+# read the env it prints back off the live Deployment, then:
+ansible-playbook playbooks/08e-deploy-ccm.yml -e ccm_image_tag=v2.14.0-apsara -e ccm_scale_up=true
+```
+
+It stops at `replicas=0` on the first run on purpose. The CCM's node controller
+resolves Nodes by providerID, and whether it deletes a Node it cannot find in
+the cloud has not been established — a wrong endpoint being exactly the
+condition this is all fixing. The scale-up run snapshots the Node list first and
+fails loudly if any Node disappears.
+
+`cloud_env` must carry `ENDPOINT_SLB` (dyz7: `slb-vpc.cloud.dyz7.com`); nothing
+needed it before, so older configs do not have it and `08e` asserts on it.
+Note dyz7 has SLB but **no NLB** — every `nlb-*` hostname fails DNS.
