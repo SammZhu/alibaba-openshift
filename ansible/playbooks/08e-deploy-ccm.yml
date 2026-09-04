@@ -3,36 +3,46 @@
 #
 # The manifest is normally baked into the agent ISO at install time (07), so a
 # cluster installed with ccm_enabled=false has no way to gain it later.  This
-# play renders the same template and applies it live.
+# renders the same template and applies it live.  For a fresh install this play
+# is not needed: set ccm_enabled (now the default) and 07 does it.
 #
-# It deliberately lands the Deployment at replicas=0 and stops there.  The CCM's
-# node controller resolves Nodes by providerID; whether it deletes a Node it
-# cannot find in the cloud could NOT be established from the binary, and a
-# wrong endpoint is exactly the state this change exists to fix.  So: apply the
-# configuration, read back what actually landed, and only then scale up —
-# deliberately, with -e ccm_scale_up=true, after looking at the readback.
+# It lands the Deployment at replicas=0 and stops.  The CCM's node controller
+# resolves Nodes by providerID; whether it deletes a Node it cannot find in the
+# cloud could NOT be established from the binary, and a wrong endpoint is
+# exactly the state this change exists to fix.  So: apply, read back what
+# actually landed, and scale up only on a second, deliberate run.
 #
 #   ansible-playbook playbooks/08e-deploy-ccm.yml -e ccm_image_tag=v2.14.0-apsara
 #   # read the summary, then:
 #   ansible-playbook playbooks/08e-deploy-ccm.yml -e ccm_image_tag=v2.14.0-apsara -e ccm_scale_up=true
 #
 # Prerequisites: 08d built the image, and cloud_env carries ENDPOINT_SLB.
-- name: Deploy the Alibaba CCM to a running cluster
+- name: Resolve the deploy host (08e runs standalone)
   hosts: local
   gather_facts: false
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/deploy_host.yml
+
+- name: Deploy the Alibaba CCM (executed on the deploy host)
+  hosts: jumphost
+  gather_facts: true
   vars_files:
     - "{{ playbook_dir }}/../vars/images.yml"
   vars:
     ccm_enabled: true
     ccm_scale_up: false
+    kubeconfig_file: /root/kubeconfig
     _ccm_ns: alibaba-cloud-controller-manager
-    _ccm_render: "/tmp/ccm-render-{{ cluster_name }}"
   tasks:
-    - ansible.builtin.include_tasks: ../tasks/load_state.yml
-    - ansible.builtin.include_tasks: ../tasks/deploy_host.yml
+    - name: "08e — kubeconfig must be present"
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_file }}"
+      register: _ccm_kc
+      failed_when: not _ccm_kc.stat.exists
 
-    # Fail here rather than three steps later with an empty env var: without
-    # this the CCM resolves slb.<region>.aliyuncs.com, which does not exist on
+    # Fail here rather than three steps later with an empty env var: without it
+    # the CCM resolves slb.<region>.aliyuncs.com, which does not exist on
     # Apsara, and the symptom is an endless "no such host" in the controller log.
     - name: "08e — the SLB endpoint must be configured"
       ansible.builtin.assert:
@@ -42,6 +52,7 @@
           it (dyz7: slb-vpc.cloud.dyz7.com — find yours with
           scripts/apsara/probe-endpoints.sh <domain>).  Add it to
           group_vars/all.yml under cloud_env and re-run.
+        quiet: true
       when: (cloud_platform | default('public')) == 'apsara'
 
     - name: "08e — the image tag must be one built for this platform"
@@ -51,6 +62,7 @@
           ccm_image_tag is "{{ ccm_image_tag }}".  Upstream images cannot decode
           this gateway's LoadBalancer.Tags — run 08d and pass the tag it prints
           (-e ccm_image_tag=v2.14.0-apsara).
+        quiet: true
       when: (cloud_platform | default('public')) == 'apsara'
 
     # Take our own backup regardless of what was taken by hand: this play is the
@@ -59,11 +71,9 @@
       ansible.builtin.shell:
         cmd: >-
           oc --kubeconfig {{ kubeconfig_file }} get nodes -o yaml
-          > /root/nodes-before-ccm-{{ ansible_date_time.iso8601_basic_short | default('run') }}.yaml
+          > /root/nodes-before-ccm-{{ ansible_date_time.iso8601_basic_short }}.yaml
       args:
         executable: /bin/bash
-      delegate_to: "{{ _dh_host }}"
-      register: _ccm_backup
       changed_when: true
 
     - name: "08e — record the Nodes as they are now (compared after scale-up)"
@@ -73,32 +83,33 @@
       register: _ccm_nodes_before
       changed_when: false
 
+    # Rendered on the controller with lookup(), not written to a file: the repo
+    # lives on the operator while these tasks run on the deploy host, and a
+    # file-then-read dance across the two is how a play ends up applying
+    # something other than what it rendered.
     - name: "08e — render the CCM manifest"
-      ansible.builtin.template:
-        src: "{{ playbook_dir }}/../../custom_manifests/01-alibaba-ccm.yaml.j2"
-        dest: "{{ _ccm_render }}.yaml"
-        mode: '0644'
+      ansible.builtin.set_fact:
+        _ccm_yaml: "{{ lookup('template', playbook_dir + '/../../custom_manifests/01-alibaba-ccm.yaml.j2') }}"
 
-    # Same guard 07 applies to the installed copy: an unrendered {{ }} or a
-    # wrong FQDN would deploy a CCM that cannot reach the API server.
+    # Same guard 07 applies to the installed copy: an unrendered {{ }} would
+    # deploy a CCM that cannot reach the API server.
     - name: "08e — the render must have no template residue"
-      ansible.builtin.shell:
-        cmd: "! grep -qE '\\{\\{|\\}\\}' {{ _ccm_render }}.yaml"
-      args:
-        executable: /bin/bash
-      changed_when: false
+      ansible.builtin.assert:
+        that:
+          - _ccm_yaml is not search('\\{\\{')
+          - _ccm_yaml is search('image:.*cloud-controller-manager')
+        fail_msg: "the rendered manifest is not what it should be"
+        quiet: true
 
     - name: "08e — force replicas to 0 for the first apply"
-      ansible.builtin.replace:
-        path: "{{ _ccm_render }}.yaml"
-        regexp: '^(\s*replicas:)\s*\d+\s*$'
-        replace: '\1 0'
+      ansible.builtin.set_fact:
+        _ccm_yaml: "{{ _ccm_yaml | regex_replace('(?m)^(\\s*replicas:)\\s*\\d+\\s*$', '\\1 0') }}"
       when: not (ccm_scale_up | bool)
 
     - name: "08e — apply the manifest"
       ansible.builtin.shell:
         cmd: "oc --kubeconfig {{ kubeconfig_file }} apply -f -"
-        stdin: "{{ lookup('file', _ccm_render ~ '.yaml') }}"
+        stdin: "{{ _ccm_yaml }}"
       args:
         executable: /bin/bash
       register: _ccm_apply
@@ -109,9 +120,10 @@
       vars:
         ccm_secret_caller: "08e"
       when: ccm_static_credentials | default(true) | bool
+
     # Read back what the cluster actually has, not what we think we sent.  The
-    # recurring failure mode in this project is a step that reports success
-    # while the running object still holds the old value.
+    # recurring failure here is a step that reports success while the running
+    # object still holds the old value.
     - name: "08e — read the env back off the Deployment"
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ _ccm_ns }}",
@@ -124,11 +136,9 @@
       ansible.builtin.debug:
         msg: |
           {{ _ccm_env.stdout }}
-
           Check before scaling up:
             - image ends in -apsara (an upstream image cannot decode Tags here)
-            - SLB_ENDPOINT / ECS_ENDPOINT / VPC_ENDPOINT are the private-cloud
-              hostnames, not *.aliyuncs.com
+            - SLB_/ECS_/VPC_ENDPOINT are private-cloud hostnames, not *.aliyuncs.com
             - ALICLOUD_CLIENT_SCHEME=HTTP (the gateway's CA is not in the pod)
           Credentials come from a Secret, so they do not appear above.
 
@@ -136,16 +146,13 @@
       ansible.builtin.debug:
         msg: |
           The CCM is applied but NOT running.  Nothing has touched the Nodes.
-
-          When the readback above is right, scale up with:
+          When the readback above is right:
             ansible-playbook playbooks/08e-deploy-ccm.yml \
               -e ccm_image_tag={{ ccm_image_tag }} -e ccm_scale_up=true
-
-          Watch it, in another shell:
+          Watch, in another shell:
             oc -n {{ _ccm_ns }} logs -f deploy/cloud-controller-manager
             oc get nodes -w
-
-          Roll back at any point with:
+          Roll back at any point:
             oc -n {{ _ccm_ns }} scale deploy/cloud-controller-manager --replicas=0
       when: not (ccm_scale_up | bool)
 
@@ -167,10 +174,6 @@
       failed_when: false
       when: ccm_scale_up | bool
 
-    # The whole reason for the staged rollout.  Compare the Node list to what it
-    # was before the CCM started, and say so loudly if any went missing — that is
-    # the failure this play is shaped around, and it must not be something the
-    # operator has to notice on their own.
     - name: "08e — re-read the Nodes"
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", get, nodes,
@@ -179,31 +182,28 @@
       changed_when: false
       when: ccm_scale_up | bool
 
+    # The whole reason for the staged rollout.  This must not be something the
+    # operator has to notice on their own.
     - name: "08e — no Node may have disappeared"
       ansible.builtin.assert:
         that: >-
-          (_ccm_nodes_before.stdout_lines | map('trim') | select() | list | difference(
-           _ccm_nodes_after.stdout_lines | map('trim') | select() | list)) | length == 0
+          (_ccm_nodes_before.stdout_lines | map('trim') | select() | list
+           | difference(_ccm_nodes_after.stdout_lines | map('trim') | select() | list))
+          | length == 0
         fail_msg: |
           NODES WENT MISSING after the CCM started.  Scale it back to 0 now:
             oc -n {{ _ccm_ns }} scale deploy/cloud-controller-manager --replicas=0
           Before: {{ _ccm_nodes_before.stdout_lines | join(' | ') }}
           After:  {{ _ccm_nodes_after.stdout_lines | join(' | ') }}
-          The backup taken at the start of this play is on the deploy host as
-          /root/nodes-before-ccm-*.yaml.
+          The backup this play took is /root/nodes-before-ccm-*.yaml.
         success_msg: "all {{ _ccm_nodes_after.stdout_lines | select() | list | length }} Node(s) still present"
+        quiet: true
       when: ccm_scale_up | bool
 
     - name: "08e — running"
       ansible.builtin.debug:
         msg: |
           CCM is up ({{ 'Available' if _ccm_avail.rc | default(1) == 0 else 'NOT Available — check the logs' }}).
-
-          Try a LoadBalancer Service to prove it end to end:
-            oc create deploy hello --image=<a mirrored image>
-            oc expose deploy/hello --type=LoadBalancer --port=80
-            oc get svc hello -w        # EXTERNAL-IP should be filled by the CCM
-          Then delete it — a leaked SLB costs money and teardown sweeps only
-          what it knows about:
-            oc delete svc hello deploy/hello
+          Prove it end to end with a LoadBalancer Service, then delete it — a
+          leaked SLB costs money and teardown only sweeps what it knows about.
       when: ccm_scale_up | bool
