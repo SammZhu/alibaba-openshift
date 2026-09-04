@@ -50,6 +50,10 @@
         mirror_vpc_id: "{{ mirror_vpc_id | default('') }}"
         mirror_zone_id: "{{ mirror_zone_id | default('') }}"
         mirror_private_vsw_1: "{{ mirror_private_vsw_1 | default('') }}"
+        # 08d records this in state.yml, which only play one reads — state facts
+        # do not cross to a host added with add_host, so without carrying it the
+        # manifest silently renders the tag instead of the digest.
+        ccm_image_digest: "{{ ccm_image_digest | default('') }}"
       no_log: true
 
     # An empty group means the next play matches nothing and Ansible skips it
