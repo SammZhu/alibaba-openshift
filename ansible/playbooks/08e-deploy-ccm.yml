@@ -177,6 +177,33 @@
       register: _ccm_cfg
       changed_when: "'unchanged' not in _ccm_cfg.stdout"
 
+    # The image is pulled by tag, and tag pulls are redirected by an
+    # ImageTagMirrorSet — the install-config only mirrors digests.  The CCM also
+    # ships from registry-cn-hangzhou.ack.aliyuncs.com, a different host from the
+    # registry.cn-hangzhou.aliyuncs.com that 08's rule covers, so neither applies
+    # and the pull escapes to the public registry.  Applied under its own name so
+    # it does not fight 08's.
+    #
+    # Note this makes the MCO rewrite registries.conf and roll the nodes.
+    - name: "08e — ImageTagMirrorSet for the CCM image"
+      ansible.builtin.shell:
+        cmd: "oc --kubeconfig {{ kubeconfig_file }} apply -f -"
+        stdin: |
+          apiVersion: config.openshift.io/v1
+          kind: ImageTagMirrorSet
+          metadata:
+            name: ccm-tag-mirror
+          spec:
+            imageTagMirrors:
+              - source: registry-cn-hangzhou.ack.aliyuncs.com/acs
+                mirrors:
+                  - {{ mirror_private_ip }}:8443/acs
+      args:
+        executable: /bin/bash
+      register: _ccm_itms
+      changed_when: "'unchanged' not in _ccm_itms.stdout"
+      when: mirror_private_ip | default('') | length > 0
+
     - name: "08e — credentials Secret"
       ansible.builtin.include_tasks: ../tasks/ccm_credentials_secret.yml
       vars:

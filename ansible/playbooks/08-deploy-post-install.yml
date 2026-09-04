@@ -222,6 +222,15 @@
               - source: registry.cn-hangzhou.aliyuncs.com/acs
                 mirrors:
                   - {{ mirror_private_ip }}:8443/acs
+              # The CCM ships from a DIFFERENT host — registry-cn-hangzhou.ack.
+              # aliyuncs.com, not registry.cn-hangzhou.aliyuncs.com — so the rule
+              # above does not cover it, and 08d's -apsara tag is a tag pull that
+              # the install-config's digest-only mirroring never redirects.
+              # Without this the CCM pod sits in ErrImagePull reaching for the
+              # public registry.
+              - source: registry-cn-hangzhou.ack.aliyuncs.com/acs
+                mirrors:
+                  - {{ mirror_private_ip }}:8443/acs
       register: _itms_apply
       changed_when: "'unchanged' not in _itms_apply.stdout"
       when: mirror_private_ip | default('') | length > 0
