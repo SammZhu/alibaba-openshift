@@ -264,6 +264,58 @@ spec:
               value: api-int.{{ cluster_name }}.{{ base_domain }}
             - name: KUBERNETES_SERVICE_PORT
               value: "6443"
+{% if (cloud_platform | default('public')) == 'apsara' %}
+            # ── Apsara ────────────────────────────────────────────────────────
+            # The v2.14.0 binary reads these four endpoint overrides and
+            # ALICLOUD_CLIENT_SCHEME (verified by reading the symbols out of the
+            # image, not by assuming).  Without them the embedded SDK builds
+            # <product><suffix><network>.<region_id>.aliyuncs.com, which does
+            # not resolve here — the same wall the CAPA provider hit.
+            #
+            # Unlike CAPA, no code change is needed for this part: the knobs are
+            # already there.  What the CCM has NO knob for is the tenancy
+            # headers (x-acs-organizationid / -resourcegroupid) — and a
+            # controlled probe (scripts/apsara/ccmprobe) showed this gateway
+            # answers identically with and without them, so they are not needed.
+{% if (cloud_env.ENDPOINT_ECS | default('')) | length > 0 %}
+            - name: ECS_ENDPOINT
+              value: "{{ cloud_env.ENDPOINT_ECS }}"
+{% endif %}
+{% if (cloud_env.ENDPOINT_VPC | default('')) | length > 0 %}
+            - name: VPC_ENDPOINT
+              value: "{{ cloud_env.ENDPOINT_VPC }}"
+{% endif %}
+{% if (cloud_env.ENDPOINT_SLB | default('')) | length > 0 %}
+            - name: SLB_ENDPOINT
+              value: "{{ cloud_env.ENDPOINT_SLB }}"
+{% endif %}
+{% if (cloud_env.ENDPOINT_NLB | default('')) | length > 0 %}
+            - name: NLB_ENDPOINT
+              value: "{{ cloud_env.ENDPOINT_NLB }}"
+{% endif %}
+            # The gateway's certificate is signed by the environment's own CA,
+            # so HTTPS fails verification inside the pod exactly as it did for
+            # the CSI driver.  Same variable name, same reason.
+            - name: ALICLOUD_CLIENT_SCHEME
+              value: "{{ ccm_client_scheme | default('HTTP') }}"
+{% if ccm_static_credentials | default(true) %}
+            # IMDSv2 + node RAM role is the default and works for most calls,
+            # but the STS token it yields is what broke CSI snapshots here.
+            # Static credentials take precedence in the SDK's provider chain and
+            # cost nothing to prefer.  Set ccm_static_credentials=false to fall
+            # back to the instance role.
+            - name: ALIBABA_CLOUD_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ ccm_credentials_secret | default('alibaba-ccm-creds') }}"
+                  key: access_key_id
+            - name: ALIBABA_CLOUD_ACCESS_KEY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ ccm_credentials_secret | default('alibaba-ccm-creds') }}"
+                  key: access_key_secret
+{% endif %}
+{% endif %}
           ports:
             - name: health
               containerPort: 10258
