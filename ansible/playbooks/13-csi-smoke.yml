@@ -383,27 +383,36 @@
                   - name: v
                     persistentVolumeClaim: { claimName: disk-fs-restore }
           changed_when: true
-          when: _snap_wait.rc == 0
-
-          when: csi_smoke_snapshot | default(true) | bool
+          # Both conditions, as a list.  These were two separate `when:` keys —
+          # YAML keeps the last, so the rc guard was silently discarded and the
+          # restore ran against a snapshot that never became ready.
+          when:
+            - csi_smoke_snapshot | default(true) | bool
+            - _snap_wait.rc == 0
         - name: "[snapshot] wait restore reader Ready"
           ansible.builtin.command:
             argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ ns }}", wait, --for=condition=Ready, pod/disk-fs-restore-reader, "--timeout={{ wait_timeout }}"]
           register: _restore_wait
           changed_when: false
           failed_when: false
-          when: _snap_wait.rc == 0
-
-          when: csi_smoke_snapshot | default(true) | bool
+          # Both conditions, as a list.  These were two separate `when:` keys —
+          # YAML keeps the last, so the rc guard was silently discarded and the
+          # restore ran against a snapshot that never became ready.
+          when:
+            - csi_smoke_snapshot | default(true) | bool
+            - _snap_wait.rc == 0
         - name: "[snapshot] verify the pre-snapshot file survived"
           ansible.builtin.command:
             argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ ns }}", exec, disk-fs-restore-reader, --, cat, /data/hello.txt]
           register: _restore_cat
           changed_when: false
           failed_when: false
-          when: _snap_wait.rc == 0
-
-          when: csi_smoke_snapshot | default(true) | bool
+          # Both conditions, as a list.  These were two separate `when:` keys —
+          # YAML keeps the last, so the rc guard was silently discarded and the
+          # restore ran against a snapshot that never became ready.
+          when:
+            - csi_smoke_snapshot | default(true) | bool
+            - _snap_wait.rc == 0
         - name: "[snapshot] record result"
           ansible.builtin.set_fact:
             r_snapshot: "{{ (_snap_wait.rc == 0) and (_restore_wait.rc | default(1) == 0) and ('csi-smoke-disk-fs' in (_restore_cat.stdout | default(''))) }}"
