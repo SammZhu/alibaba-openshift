@@ -65,6 +65,18 @@ imageDigestSources:
   - source: quay.io/openshift-release-dev/ocp-v4.0-art-dev
     mirrors:
       - {{ mirror_private_ip }}:8443/openshift/release
+{% if ccm_enabled | default(true) %}
+  # The CCM has to be pullable before the cluster exists: kubelet taints every
+  # node uninitialized until it runs, so nothing schedules until it does — an
+  # ImageDigestMirrorSet applied afterwards is far too late.  Only this file is
+  # in force during bootstrap.
+  #
+  # 04 carries the same mapping for the Assisted-Installer path, which is a
+  # different file; the two lists have to be kept in step by hand, and were not.
+  - source: registry-cn-hangzhou.ack.aliyuncs.com/acs/cloud-controller-manager
+    mirrors:
+      - {{ mirror_private_ip }}:8443/acs/cloud-controller-manager
+{% endif %}
 additionalTrustBundlePolicy: Always
 additionalTrustBundle: |
 {{ _mirror_ca_cert | indent(2, true) }}
