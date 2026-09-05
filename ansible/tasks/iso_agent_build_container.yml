@@ -28,22 +28,49 @@
   register: _cb_podman
   changed_when: false
 
+# Report the ISO's mtime, not just whether it exists: an ISO carries the
+# install-config and manifests as they were when it was built, and its ignition
+# certificates expire about 24h later.  Resuming onto a stale one produces a
+# cluster configured from whatever was true days ago — which reads as a
+# mysterious install failure, or worse, as a successful install of the wrong
+# thing.
 - name: "container-build: check for an existing ISO on the mirror (resume)"
-  ansible.builtin.shell: "{{ _ssh_root_mirror }} 'test -f {{ _m_iso }} && echo yes || echo no'"
+  ansible.builtin.shell: "{{ _ssh_root_mirror }} 'if [ -f {{ _m_iso }} ]; then stat -c %Y {{ _m_iso }}; else echo no; fi'"
   register: _cb_iso_present
   changed_when: false
 
+- name: "container-build: how old that ISO is"
+  ansible.builtin.set_fact:
+    _cb_iso_epoch: "{{ (_cb_iso_present.stdout | trim) if ((_cb_iso_present.stdout | trim) is match('^[0-9]+$')) else '' }}"
+    _cb_now_epoch: "{{ lookup('pipe', 'date -u +%s') }}"
+
 - name: "container-build: decide whether to (re)build the ISO"
   ansible.builtin.set_fact:
+    _cb_iso_age_h: "{{ (((_cb_now_epoch | int) - (_cb_iso_epoch | int)) / 3600) | round(1)
+                       if (_cb_iso_epoch | length) > 0 else -1 }}"
     _cb_build_iso: "{{ (agent_iso_force_rebuild | default(false) | bool)
-                       or ((_cb_iso_present.stdout | trim) != 'yes') }}"
+                       or ((_cb_iso_epoch | length) == 0)
+                       or ((((_cb_now_epoch | int) - (_cb_iso_epoch | int)) / 3600)
+                           >= (agent_iso_max_age_hours | default(20) | float)) }}"
+
+- name: "container-build: the existing ISO is too old to reuse"
+  ansible.builtin.debug:
+    msg: >-
+      {{ _m_iso }} is {{ _cb_iso_age_h }}h old, past the
+      {{ agent_iso_max_age_hours | default(20) }}h reuse limit — rebuilding.
+      Its ignition certificates are good for about 24h, and it carries the
+      install-config and manifests from when it was built, not from now.
+  when:
+    - (_cb_iso_epoch | length) > 0
+    - not (agent_iso_force_rebuild | default(false) | bool)
+    - _cb_build_iso | bool
 
 - name: "container-build: reuse existing ISO on mirror (skip ~30 min rebuild)"
   ansible.builtin.debug:
     msg: >-
-      Existing {{ _m_iso }} on the mirror ECS — skipping the container rebuild.
-      Set agent_iso_force_rebuild=true to force a rebuild (needed if the
-      install-config / agent-config changed).
+      Existing {{ _m_iso }} on the mirror ECS, {{ _cb_iso_age_h }}h old —
+      skipping the container rebuild.  Set agent_iso_force_rebuild=true to
+      force a rebuild (needed if the install-config / agent-config changed).
   when: not _cb_build_iso
 
 - name: "container-build: build + push the agent ISO"

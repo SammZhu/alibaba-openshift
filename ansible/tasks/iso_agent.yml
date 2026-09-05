@@ -753,9 +753,16 @@
   ignore_errors: true
 
 # ── record outputs + tidy scratch ───────────────────────────────────────────
+# When the ISO was reused rather than rebuilt, this must carry the ISO's own
+# mtime.  Stamping "now" onto a resumed build makes a two-day-old ISO look
+# freshly made — which is precisely the fact anyone checking the 24h window
+# needs, and would not get.
 - name: ABI — record ISO build timestamp (24h ignition-cert window)
   ansible.builtin.set_fact:
-    agent_iso_built_at: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+    agent_iso_built_at: >-
+      {{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')
+         if (_cb_build_iso | default(true) | bool)
+         else lookup('pipe', 'date -u -d @' ~ (_cb_iso_epoch | default(0)) ~ ' +%Y-%m-%dT%H:%M:%SZ') }}
 
 - name: ABI — persist ecs_image_id + build timestamp to state
   ansible.builtin.include_tasks: ../tasks/save_state.yml
