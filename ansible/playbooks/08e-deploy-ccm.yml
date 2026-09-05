@@ -208,6 +208,31 @@
       changed_when: "'unchanged' not in _ccm_itms.stdout"
       when: mirror_private_ip | default('') | length > 0
 
+    # Companion IDMS for the digest reference.  The ITMS above only redirects
+    # tag pulls, and the install-config's own digest mirroring did not cover this
+    # source on this cluster — the pull went straight to the public registry and
+    # came back "manifest unknown", which is what a digest that only exists in
+    # the mirror looks like from outside.  Same digest+IDMS pairing 08 uses for
+    # the CAPA controller.
+    - name: "08e — ImageDigestMirrorSet for the CCM image"
+      ansible.builtin.shell:
+        cmd: "oc --kubeconfig {{ kubeconfig_file }} apply -f -"
+        stdin: |
+          apiVersion: config.openshift.io/v1
+          kind: ImageDigestMirrorSet
+          metadata:
+            name: ccm-digest-mirror
+          spec:
+            imageDigestMirrors:
+              - source: registry-cn-hangzhou.ack.aliyuncs.com/acs/cloud-controller-manager
+                mirrors:
+                  - {{ mirror_private_ip }}:8443/acs/cloud-controller-manager
+      args:
+        executable: /bin/bash
+      register: _ccm_idms
+      changed_when: "'unchanged' not in _ccm_idms.stdout"
+      when: mirror_private_ip | default('') | length > 0
+
     - name: "08e — credentials Secret"
       ansible.builtin.include_tasks: ../tasks/ccm_credentials_secret.yml
       vars:
