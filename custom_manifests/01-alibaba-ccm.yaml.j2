@@ -331,16 +331,27 @@ spec:
               value: "{{ ccm_client_scheme | default('HTTP') }}"
 {% if ccm_static_credentials | default(true) %}
             # IMDSv2 + node RAM role is the default and works for most calls,
-            # but the STS token it yields is what broke CSI snapshots here.
-            # Static credentials take precedence in the SDK's provider chain and
-            # cost nothing to prefer.  Set ccm_static_credentials=false to fall
-            # back to the instance role.
-            - name: ALIBABA_CLOUD_ACCESS_KEY_ID
+            # but that role is scoped for the node's own needs and has no SLB
+            # permissions, so every load balancer call comes back Forbidden while
+            # ECS calls succeed — which reads like a policy gap in the account
+            # rather than the wrong identity being used.
+            #
+            # The names matter and are NOT the SDK's usual ALIBABA_CLOUD_* ones:
+            # the CCM reads ACCESS_KEY_ID / ACCESS_KEY_SECRET
+            # (pkg/provider/alibaba/base/clientMgr.go), and its chain is
+            #   addon token > cloud.conf Global.AccessKeyID > these > RAM role.
+            # Set the wrong names and it silently falls through to the RAM role;
+            # the giveaway is the startup line "use ram role mode to get token",
+            # which should read "use ak mode to get token" instead.
+            #
+            # Credentials stay in a Secret rather than cloud.conf, which is a
+            # ConfigMap.  Set ccm_static_credentials=false to use the node role.
+            - name: ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
                   name: "{{ ccm_credentials_secret | default('alibaba-ccm-creds') }}"
                   key: access_key_id
-            - name: ALIBABA_CLOUD_ACCESS_KEY_SECRET
+            - name: ACCESS_KEY_SECRET
               valueFrom:
                 secretKeyRef:
                   name: "{{ ccm_credentials_secret | default('alibaba-ccm-creds') }}"
