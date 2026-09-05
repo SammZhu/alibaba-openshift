@@ -1,0 +1,280 @@
+---
+# 14 — does the CCM actually serve a LoadBalancer Service?
+#
+# The CCM being Running proves it reached ECS (it labels Nodes from
+# DescribeInstances).  It does not prove the SLB path works, which is the whole
+# point of deploying it — and that path is where the forked SDK's response
+# decoding matters.
+#
+# Shaped by what the first manual attempt cost:
+#   - it created an SLB in the cloud and nobody noticed it stayed there.  A
+#     LoadBalancer Service is the one smoke test in this repo that spends money
+#     if it leaks, and the CCM's own SLBs belong to no ROS stack, so
+#     99-teardown does not know about them.  So: count the cloud's load
+#     balancers before and after, and FAIL on a difference.
+#   - deleting the Service wedged the namespace in Terminating, because the
+#     load-balancer-cleanup finalizer only clears once the CCM confirms the
+#     cloud resource is gone — which it cannot do without the RAM permissions.
+#     So: bounded wait, then release the finalizer explicitly rather than
+#     leaving a namespace no one can delete.
+#
+#   ansible-playbook playbooks/14-ccm-smoke.yml
+#
+# Expected to FAIL today, and that is the point: the sub-user is missing
+# slb:DescribeVServerGroups and slb:DescribeLoadBalancerListeners, so the
+# EXTERNAL-IP never arrives.  It should start passing when those are granted.
+- name: Resolve the deploy host and record the cloud's load balancers (14)
+  hosts: local
+  gather_facts: false
+  environment: "{{ cloud_env | default({}) }}"
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/deploy_host.yml
+
+    - name: "14 — the SLB endpoint must be configured"
+      ansible.builtin.assert:
+        that: (cloud_env.ENDPOINT_SLB | default('')) | length > 0
+        fail_msg: >-
+          cloud_env.ENDPOINT_SLB is not set, so this play cannot check whether a
+          load balancer leaked — which is the only reason it is safe to create
+          one.  Add it to group_vars/all.yml (dyz7: slb-vpc.cloud.dyz7.com).
+        quiet: true
+      when: (cloud_platform | default('public')) == 'apsara'
+
+    - name: "14 — load balancers in the cloud BEFORE"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", slb, DescribeLoadBalancers, --RegionId, "{{ region }}",
+               --PageSize, "100", --profile, "{{ aliyun_profile | default('default') }}"]
+      register: _lb_before_q
+      changed_when: false
+
+    # A failed listing must not read as "no load balancers": that is how the
+    # leak check silently passes while leaking.  Insist on parseable output.
+    - name: "14 — the BEFORE listing must be usable"
+      ansible.builtin.assert:
+        that:
+          - _lb_before_q.rc == 0
+          - (_lb_before_q.stdout | default('')) is search('LoadBalancers')
+        fail_msg: >-
+          Could not list load balancers: {{ _lb_before_q.stdout | default('') | truncate(200) }}
+          {{ _lb_before_q.stderr | default('') | truncate(200) }}
+        quiet: true
+
+    - name: "14 — remember them"
+      ansible.builtin.set_fact:
+        _lb_before: >-
+          {{ ((_lb_before_q.stdout | from_json).LoadBalancers | default({})).LoadBalancer
+             | default([]) | map(attribute='LoadBalancerId') | list | sort }}
+
+    - name: "14 — add the deploy host to the inventory"
+      ansible.builtin.add_host:
+        name: jumphost
+        ansible_host: "{{ _dh_host }}"
+        ansible_connection: "{{ _dh_connection }}"
+        ansible_user: root
+        ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+        groups: deploy
+        lb_before: "{{ _lb_before }}"
+
+    - name: "14 — the deploy host must be in the inventory"
+      ansible.builtin.assert:
+        that: (groups['deploy'] | default([])) | length > 0
+        fail_msg: "add_host registered no deploy host; the next play would be skipped in silence."
+        quiet: true
+
+    - name: "14 — starting from"
+      ansible.builtin.debug:
+        msg: "{{ _lb_before | length }} load balancer(s) in {{ region }} before the test"
+
+- name: LoadBalancer Service smoke (executed on the deploy host)
+  hosts: jumphost
+  gather_facts: false
+  vars:
+    kubeconfig_file: /root/kubeconfig
+    _ns: ccm-smoke
+    _svc: ccm-smoke-lb
+    lb_wait_seconds: 180
+  tasks:
+    - name: "14 — clean any namespace left by an earlier run"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", delete, ns, "{{ _ns }}",
+               --ignore-not-found, --wait=false]
+      changed_when: false
+
+    # No Pods and no Deployment: the CCM provisions the load balancer from the
+    # Service alone, and a workload would only add image-pull failures to a test
+    # that is not about workloads.
+    - name: "14 — create the namespace and a LoadBalancer Service"
+      ansible.builtin.shell:
+        cmd: "oc --kubeconfig {{ kubeconfig_file }} apply -f -"
+        stdin: |
+          apiVersion: v1
+          kind: Namespace
+          metadata: { name: {{ _ns }} }
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: {{ _svc }}
+            namespace: {{ _ns }}
+          spec:
+            type: LoadBalancer
+            ports: [{ port: 80, targetPort: 8080 }]
+            selector: { app: ccm-smoke-nothing }
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: "14 — wait for the CCM to assign an EXTERNAL-IP"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ _ns }}",
+               get, svc, "{{ _svc }}",
+               -o, 'jsonpath={.status.loadBalancer.ingress[0].ip}']
+      register: _lb_ip
+      changed_when: false
+      failed_when: false
+      retries: "{{ ((lb_wait_seconds | int) / 10) | int }}"
+      delay: 10
+      until: (_lb_ip.stdout | default('')) | length > 0
+
+    - name: "14 — why it did not get one"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ _ns }}",
+               describe, svc, "{{ _svc }}"]
+      register: _svc_desc
+      changed_when: false
+      when: (_lb_ip.stdout | default('')) | length == 0
+
+    - name: "14 — result"
+      ansible.builtin.set_fact:
+        _lb_pass: "{{ (_lb_ip.stdout | default('')) | length > 0 }}"
+
+    # ── teardown, which runs whether or not the test passed ──────────────────
+    - name: "14 — delete the Service"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ _ns }}",
+               delete, svc, "{{ _svc }}", --ignore-not-found, --wait=false]
+      changed_when: true
+
+    # The finalizer clears only once the CCM confirms the cloud resource is
+    # gone.  Give it time, then stop waiting — an uncleared finalizer wedges the
+    # namespace in Terminating forever, and the leak check below is what
+    # actually establishes whether the cloud is clean.
+    - name: "14 — wait for the load-balancer-cleanup finalizer to clear"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ _ns }}",
+               get, svc, "{{ _svc }}", -o, 'jsonpath={.metadata.finalizers}']
+      register: _fin
+      changed_when: false
+      failed_when: false
+      retries: 12
+      delay: 10
+      until: (_fin.stdout | default('')) | length == 0 or _fin.rc != 0
+
+    - name: "14 — release the finalizer so the namespace can go"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ _ns }}",
+               patch, svc, "{{ _svc }}", --type=merge,
+               -p, '{"metadata":{"finalizers":null}}']
+      register: _fin_force
+      changed_when: true
+      failed_when: false
+      when:
+        - _fin.rc == 0
+        - (_fin.stdout | default('')) | length > 0
+
+    - name: "14 — delete the namespace"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", delete, ns, "{{ _ns }}",
+               --ignore-not-found, --timeout=120s]
+      changed_when: true
+      failed_when: false
+
+    - name: "14 — carry the result back"
+      ansible.builtin.set_fact:
+        lb_pass: "{{ _lb_pass }}"
+        lb_forced: "{{ (_fin_force.changed | default(false)) }}"
+        lb_events: "{{ (_svc_desc.stdout | default('')) | regex_findall('(?m)^\\s+Warning\\s+\\S+\\s+\\S+\\s+\\S+\\s+(.*)$') | unique }}"
+
+- name: Verify the cloud is as clean as it was (14)
+  hosts: local
+  gather_facts: false
+  environment: "{{ cloud_env | default({}) }}"
+  tasks:
+    - name: "14 — load balancers in the cloud AFTER"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", slb, DescribeLoadBalancers, --RegionId, "{{ region }}",
+               --PageSize, "100", --profile, "{{ aliyun_profile | default('default') }}"]
+      register: _lb_after_q
+      changed_when: false
+
+    - name: "14 — the AFTER listing must be usable"
+      ansible.builtin.assert:
+        that:
+          - _lb_after_q.rc == 0
+          - (_lb_after_q.stdout | default('')) is search('LoadBalancers')
+        fail_msg: >-
+          Could not list load balancers after the test, so a leak cannot be ruled
+          out.  Check by hand before walking away:
+            ENDPOINT_SLB=... {{ cloud_cli }} slb DescribeLoadBalancers --RegionId {{ region }}
+        quiet: true
+
+    - name: "14 — what is there now"
+      ansible.builtin.set_fact:
+        _lb_after: >-
+          {{ ((_lb_after_q.stdout | from_json).LoadBalancers | default({})).LoadBalancer
+             | default([]) | map(attribute='LoadBalancerId') | list | sort }}
+        _lb_before: "{{ hostvars['jumphost'].lb_before | default([]) }}"
+
+    - name: "14 — anything new is ours, and it is leaking"
+      ansible.builtin.set_fact:
+        _lb_leaked: "{{ _lb_after | difference(_lb_before) }}"
+
+    - name: "14 — report"
+      ansible.builtin.debug:
+        msg: |
+          ===== CCM LoadBalancer smoke =====
+          [external-ip]  Service got an address ....... {{ 'PASS' if hostvars['jumphost'].lb_pass | default(false) | bool else 'FAIL' }}
+          [no-leak]      cloud unchanged .............. {{ 'PASS' if (_lb_leaked | length) == 0 else 'FAIL' }}
+          ==================================
+          load balancers: {{ _lb_before | length }} before, {{ _lb_after | length }} after
+          {% if hostvars['jumphost'].lb_forced | default(false) | bool %}
+          The cleanup finalizer had to be released by force, which means the CCM
+          could not confirm the cloud resource was gone.  That is expected while
+          it lacks slb:DescribeVServerGroups / slb:DescribeLoadBalancerListeners.
+          {% endif %}
+          {% for e in hostvars['jumphost'].lb_events | default([]) %}
+            event: {{ e | trim }}
+          {% endfor %}
+
+    # Loud, and with the exact commands: a leaked SLB costs money, belongs to no
+    # ROS stack, and 99-teardown will not find it.  The CCM creates them with
+    # both protections on, so deletion is three calls, not one.
+    - name: "14 — a leaked load balancer must be dealt with now"
+      ansible.builtin.assert:
+        that: (_lb_leaked | length) == 0
+        fail_msg: |
+          LEAKED: {{ _lb_leaked | join(', ') }}
+
+          These were created by this test and are still in the cloud.  They are
+          not part of any ROS stack, so 99-teardown will not remove them, and
+          they bill until deleted.  The CCM sets both protections, so:
+          {% for lb in _lb_leaked %}
+            {{ cloud_cli }} slb SetLoadBalancerDeleteProtection --LoadBalancerId {{ lb }} --DeleteProtection off --RegionId {{ region }}
+            {{ cloud_cli }} slb SetLoadBalancerModificationProtection --LoadBalancerId {{ lb }} --ModificationProtectionStatus NonProtection --RegionId {{ region }}
+            {{ cloud_cli }} slb DeleteLoadBalancer --LoadBalancerId {{ lb }} --RegionId {{ region }}
+          {% endfor %}
+          (export ENDPOINT_SLB={{ cloud_env.ENDPOINT_SLB | default('<slb endpoint>') }} first)
+        quiet: true
+
+    - name: "14 — fail if the Service never got an address"
+      ansible.builtin.assert:
+        that: hostvars['jumphost'].lb_pass | default(false) | bool
+        fail_msg: >-
+          The Service never got an EXTERNAL-IP.  If the events above say
+          Forbidden on DescribeVServerGroups / DescribeLoadBalancerListeners,
+          that is the known RAM gap, not a code problem — grant those to the
+          sub-user and re-run.
+        success_msg: "LoadBalancer Services work on this platform."
+        quiet: true
