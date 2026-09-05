@@ -272,9 +272,15 @@
       ansible.builtin.assert:
         that: hostvars['jumphost'].lb_pass | default(false) | bool
         fail_msg: >-
-          The Service never got an EXTERNAL-IP.  If the events above say
-          Forbidden on DescribeVServerGroups / DescribeLoadBalancerListeners,
-          that is the known RAM gap, not a code problem — grant those to the
-          sub-user and re-run.
+          The Service never got an EXTERNAL-IP.  Read the events above, and
+          check the two things that produced this before, both of which look
+          like something else:
+          Forbidden on every SLB call while ECS calls succeed usually means the
+          CCM fell back to the node RAM role — check its startup line, which
+          should read "use ak mode to get token" and not "use ram role mode".
+          It reads ACCESS_KEY_ID / ACCESS_KEY_SECRET, not ALIBABA_CLOUD_*.
+          InvalidAction.NotFound on ModifyLoadBalancerInstanceChargeType means
+          ALIBABA_CLOUD_DEFAULT_INSTANCE_CHARGE_TYPE is not set to PayBySpec;
+          Apsara has no PayByCLCU, and the error aborts the whole reconcile.
         success_msg: "LoadBalancer Services work on this platform."
         quiet: true
