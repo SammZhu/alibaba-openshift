@@ -318,6 +318,15 @@ spec:
             # The gateway's certificate is signed by the environment's own CA,
             # so HTTPS fails verification inside the pod exactly as it did for
             # the CSI driver.  Same variable name, same reason.
+            # A Service with no instance-charge-type annotation is treated as
+            # wanting PayByCLCU (the empty string classifies as CLCU upstream),
+            # which makes the reconciler call ModifyLoadBalancerInstanceChargeType
+            # against every existing load balancer.  That API does not exist on
+            # Apsara — InvalidAction.NotFound — and the error aborts the whole
+            # reconcile, so no Service ever gets an EXTERNAL-IP.  Apsara only has
+            # the older PayBySpec model, so say so and the call is never made.
+            - name: ALIBABA_CLOUD_DEFAULT_INSTANCE_CHARGE_TYPE
+              value: "{{ ccm_default_instance_charge_type | default('PayBySpec') }}"
             - name: ALICLOUD_CLIENT_SCHEME
               value: "{{ ccm_client_scheme | default('HTTP') }}"
 {% if ccm_static_credentials | default(true) %}
