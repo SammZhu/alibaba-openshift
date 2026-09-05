@@ -346,16 +346,32 @@ spec:
             #
             # Credentials stay in a Secret rather than cloud.conf, which is a
             # ConfigMap.  Set ccm_static_credentials=false to use the node role.
+            #
+            # optional: the Secret is created by 08, which cannot run until the
+            # cluster is up — and the cluster cannot come up until this pod
+            # does, because kubelet taints every node uninitialized until the
+            # CCM clears it.  Required, the pod sits in
+            # CreateContainerConfigError and the install deadlocks at ~73%.
+            #
+            # Optional, a missing Secret leaves these unset and the chain falls
+            # through to the node RAM role, which carries the ECS permissions
+            # node initialisation needs.  That is enough to lift the taint and
+            # finish the install; 08 then creates the Secret and restarts this
+            # Deployment, and the SLB calls that the node role cannot make start
+            # working.  Check the startup line to see which is in force:
+            # "use ak mode to get token" vs "use ram role mode to get token".
             - name: ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
                   name: "{{ ccm_credentials_secret | default('alibaba-ccm-creds') }}"
                   key: access_key_id
+                  optional: true
             - name: ACCESS_KEY_SECRET
               valueFrom:
                 secretKeyRef:
                   name: "{{ ccm_credentials_secret | default('alibaba-ccm-creds') }}"
                   key: access_key_secret
+                  optional: true
 {% endif %}
 {% endif %}
           ports:
