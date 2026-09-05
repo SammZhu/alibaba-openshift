@@ -1,0 +1,322 @@
+---
+# 15 — does traffic actually flow through the load balancer?
+#
+# 14 proves the CCM can get an EXTERNAL-IP assigned.  That is the control
+# plane: an address exists.  It does not prove the data path — listeners can be
+# misconfigured, the vserver group empty, or the health check failing, and the
+# Service still shows an address.
+#
+# This puts a real backend behind the Service and fetches through the
+# load balancer's own address from inside the cluster, so the request traverses
+# the SLB rather than the ClusterIP.
+#
+#   ansible-playbook playbooks/15-ccm-dataplane.yml
+#
+# With -e ccm_keep=true the namespace and Service are LEFT IN PLACE, so a
+# following teardown has a real CCM-created load balancer to reclaim.  That is
+# the only way to test that path: 99-teardown deletes LoadBalancer Services
+# first and relies on the CCM to release the cloud resource, and with nothing
+# to release the step proves nothing.  These load balancers belong to no ROS
+# stack, so if the CCM does not free it, nothing else will.
+#
+# The default is to clean up.  Leaving cloud resources behind should take
+# saying so.
+- name: Resolve the deploy host and record the cloud's load balancers (15)
+  hosts: local
+  gather_facts: false
+  environment: "{{ cloud_env | default({}) }}"
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+    - ansible.builtin.include_tasks: ../tasks/deploy_host.yml
+    - ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
+
+    - name: "15 — load balancers in the cloud BEFORE"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", slb, DescribeLoadBalancers, --RegionId, "{{ region }}",
+               --PageSize, "100", --profile, "{{ aliyun_profile | default('default') }}"]
+      register: _lb_before_q
+      changed_when: false
+
+    - name: "15 — the BEFORE listing must be usable"
+      ansible.builtin.assert:
+        that:
+          - _lb_before_q.rc == 0
+          - (_lb_before_q.stdout | default('')) is search('LoadBalancers')
+        fail_msg: "Could not list load balancers, so a leak could not be detected afterwards."
+        quiet: true
+
+    - name: "15 — add the deploy host to the inventory"
+      ansible.builtin.add_host:
+        name: jumphost
+        ansible_host: "{{ _dh_host }}"
+        ansible_connection: "{{ _dh_connection }}"
+        ansible_user: root
+        ansible_ssh_private_key_file: "{{ ssh_priv_key_file }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+        groups: deploy
+        lb_before: >-
+          {{ ((_lb_before_q.stdout | from_json).LoadBalancers | default({})).LoadBalancer
+             | default([]) | map(attribute='LoadBalancerId') | list | sort }}
+      no_log: true
+
+    - name: "15 — the deploy host must be in the inventory"
+      ansible.builtin.assert:
+        that: (groups['deploy'] | default([])) | length > 0
+        fail_msg: "add_host registered no deploy host; the work play would be skipped in silence."
+        quiet: true
+
+- name: Serve traffic through the load balancer (executed on the deploy host)
+  hosts: jumphost
+  gather_facts: false
+  vars:
+    kubeconfig_file: /root/kubeconfig
+    ccm_keep: false
+    _ns: ccm-dataplane
+    _svc: ccm-dataplane-lb
+    lb_wait_seconds: 240
+  tasks:
+    - name: "15 — clean anything left by an earlier run"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", delete, ns, "{{ _ns }}",
+               --ignore-not-found, --wait=false]
+      changed_when: false
+
+    # Same resolution 13 uses, and for the same reason: the node pulls, and its
+    # resolver cannot see *.svc, so the in-cluster registry is not an option.
+    - name: "15 — cluster pull secret for resolving the test image"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, openshift-config,
+               extract, secret/pull-secret, --to=/root, --confirm]
+      changed_when: false
+      failed_when: false
+
+    - name: "15 — resolve a node-pullable image from the release payload"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", adm, release, info,
+               "--image-for={{ item }}",
+               --registry-config=/root/.dockerconfigjson, --insecure]
+      register: _img_probe
+      changed_when: false
+      failed_when: false
+      loop: [tools, cli]
+
+    - name: "15 — first image that resolved"
+      ansible.builtin.set_fact:
+        _img: >-
+          {{ (_img_probe.results | selectattr('rc', 'equalto', 0)
+              | map(attribute='stdout') | map('trim')
+              | select('match', '.+') | list | first | default('')) }}
+
+    - name: "15 — an image is required"
+      ansible.builtin.assert:
+        that: _img | length > 0
+        fail_msg: >-
+          Could not resolve an image from the release payload.  Pass one the
+          node can pull with -e ccm_dataplane_image=<ref>.
+        quiet: true
+      when: (ccm_dataplane_image | default('')) | length == 0
+
+    - name: "15 — image to use"
+      ansible.builtin.set_fact:
+        _use_img: "{{ ccm_dataplane_image | default(_img) }}"
+
+    # python3's http.server rather than a hand-rolled listener: the tools image
+    # has it, and a one-liner with nc behaves differently across builds — the
+    # test would then fail for reasons that have nothing to do with the load
+    # balancer, which is the failure mode this whole file exists to avoid.
+    - name: "15 — namespace, backend, and LoadBalancer Service"
+      ansible.builtin.shell:
+        cmd: "oc --kubeconfig {{ kubeconfig_file }} apply -f -"
+        stdin: |
+          apiVersion: v1
+          kind: Namespace
+          metadata: { name: {{ _ns }} }
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: backend, namespace: {{ _ns }} }
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: ccm-dataplane } }
+            template:
+              metadata: { labels: { app: ccm-dataplane } }
+              spec:
+                containers:
+                  - name: web
+                    image: {{ _use_img }}
+                    command: ["/bin/sh","-c","echo ccm-dataplane-ok > /tmp/index.html && cd /tmp && exec python3 -m http.server 8080"]
+                    ports: [{ containerPort: 8080 }]
+                    readinessProbe:
+                      tcpSocket: { port: 8080 }
+                      initialDelaySeconds: 3
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: {{ _svc }}
+            namespace: {{ _ns }}
+          spec:
+            type: LoadBalancer
+            selector: { app: ccm-dataplane }
+            ports: [{ port: 80, targetPort: 8080 }]
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: "15 — wait for the backend to be Ready"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ _ns }}",
+               wait, --for=condition=Available, deploy/backend, --timeout=180s]
+      register: _backend
+      changed_when: false
+      failed_when: false
+
+    - name: "15 — the backend must be running before the path can mean anything"
+      ansible.builtin.assert:
+        that: _backend.rc == 0
+        fail_msg: >-
+          The backend never became Available, so a data-path failure would say
+          nothing about the load balancer.  Check whether the image has python3:
+          oc -n {{ _ns }} logs deploy/backend
+        quiet: true
+
+    - name: "15 — wait for the CCM to assign an EXTERNAL-IP"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ _ns }}",
+               get, svc, "{{ _svc }}", -o, 'jsonpath={.status.loadBalancer.ingress[0].ip}']
+      register: _lb_ip
+      changed_when: false
+      failed_when: false
+      retries: "{{ ((lb_wait_seconds | int) / 10) | int }}"
+      delay: 10
+      until: (_lb_ip.stdout | default('')) | length > 0
+
+    - name: "15 — an address is required before testing the path"
+      ansible.builtin.assert:
+        that: (_lb_ip.stdout | default('')) | length > 0
+        fail_msg: >-
+          No EXTERNAL-IP after {{ lb_wait_seconds }}s.  That is 14's failure, not
+          this one — run playbooks/14-ccm-smoke.yml, which explains the two
+          causes that produce it.
+        quiet: true
+
+    # Fetch from inside the cluster but through the load balancer's own address,
+    # so the request leaves the node and comes back through the SLB.  Hitting the
+    # ClusterIP would pass without the SLB being involved at all.
+    - name: "15 — fetch through the load balancer"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ _ns }}",
+               run, lbclient, --rm, -i, --restart=Never, --quiet,
+               "--image={{ _use_img }}", --,
+               /bin/sh, -c,
+               "curl -sS -m 15 http://{{ _lb_ip.stdout }}/index.html || echo CURL_FAILED"]
+      register: _curl
+      changed_when: false
+      failed_when: false
+      retries: 6
+      delay: 20
+      until: "'ccm-dataplane-ok' in (_curl.stdout | default(''))"
+
+    - name: "15 — result"
+      ansible.builtin.set_fact:
+        _dp_pass: "{{ 'ccm-dataplane-ok' in (_curl.stdout | default('')) }}"
+        _dp_ip: "{{ _lb_ip.stdout }}"
+
+    - name: "15 — what came back"
+      ansible.builtin.debug:
+        msg: |
+          ===== CCM data path =====
+          EXTERNAL-IP ................. {{ _dp_ip }}
+          [dataplane] fetch through LB  {{ 'PASS' if _dp_pass | bool else 'FAIL' }}
+          =========================
+          {% if not (_dp_pass | bool) %}
+          response: {{ (_curl.stdout | default('')) | truncate(300) }}
+          An address with no path through it usually means the vserver group has
+          no backends or the health check is failing.  Look at the listener:
+            oc -n {{ _ns }} describe svc {{ _svc }}
+          {% endif %}
+
+    # ── cleanup, unless deliberately kept ────────────────────────────────────
+    - name: "15 — remove the Service and namespace"
+      when: not (ccm_keep | bool)
+      block:
+        - name: "15 — delete the Service"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, "{{ _ns }}",
+                   delete, svc, "{{ _svc }}", --ignore-not-found, --timeout=180s]
+          changed_when: true
+          failed_when: false
+
+        - name: "15 — delete the namespace"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", delete, ns, "{{ _ns }}",
+                   --ignore-not-found, --timeout=180s]
+          changed_when: true
+          failed_when: false
+
+    - name: "15 — carry the result back"
+      ansible.builtin.set_fact:
+        dp_pass: "{{ _dp_pass }}"
+        dp_ip: "{{ _dp_ip }}"
+        dp_kept: "{{ ccm_keep | bool }}"
+
+- name: Account for the cloud's load balancers (15)
+  hosts: local
+  gather_facts: false
+  environment: "{{ cloud_env | default({}) }}"
+  tasks:
+    - name: "15 — load balancers in the cloud AFTER"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", slb, DescribeLoadBalancers, --RegionId, "{{ region }}",
+               --PageSize, "100", --profile, "{{ aliyun_profile | default('default') }}"]
+      register: _lb_after_q
+      changed_when: false
+
+    - name: "15 — compare"
+      ansible.builtin.set_fact:
+        _lb_after: >-
+          {{ ((_lb_after_q.stdout | from_json).LoadBalancers | default({})).LoadBalancer
+             | default([]) | map(attribute='LoadBalancerId') | list | sort }}
+        _lb_before: "{{ hostvars['jumphost'].lb_before | default([]) }}"
+
+    - name: "15 — new load balancers"
+      ansible.builtin.set_fact:
+        _lb_new: "{{ _lb_after | difference(_lb_before) }}"
+
+    - name: "15 — deliberately left in place for the teardown test"
+      ansible.builtin.debug:
+        msg: |
+          KEPT ON PURPOSE: {{ _lb_new | join(', ') if _lb_new | length > 0 else '(none appeared?)' }}
+          Namespace ccm-dataplane and its Service are still there, so the next
+          teardown has a real CCM-created load balancer to reclaim.
+
+          Run the teardown, then count again — {{ _lb_before | length }} is the
+          number to come back to:
+            {{ cloud_cli }} slb DescribeLoadBalancers --RegionId {{ region }}
+
+          If it does not come back, the CCM did not release it and nothing else
+          will: these belong to no ROS stack.  Delete by hand — they carry both
+          protections, so it is three calls, and the id is above.
+      when: hostvars['jumphost'].dp_kept | default(false) | bool
+
+    - name: "15 — nothing may be left behind"
+      ansible.builtin.assert:
+        that: (_lb_new | length) == 0
+        fail_msg: |
+          LEAKED: {{ _lb_new | join(', ') }}
+          Created by this test and still in the cloud after cleanup.  They bill,
+          and 99-teardown does not know about them:
+          {% for lb in _lb_new %}
+            {{ cloud_cli }} slb SetLoadBalancerDeleteProtection --LoadBalancerId {{ lb }} --DeleteProtection off --RegionId {{ region }}
+            {{ cloud_cli }} slb SetLoadBalancerModificationProtection --LoadBalancerId {{ lb }} --ModificationProtectionStatus NonProtection --RegionId {{ region }}
+            {{ cloud_cli }} slb DeleteLoadBalancer --LoadBalancerId {{ lb }} --RegionId {{ region }}
+          {% endfor %}
+        quiet: true
+      when: not (hostvars['jumphost'].dp_kept | default(false) | bool)
+
+    - name: "15 — data path"
+      ansible.builtin.assert:
+        that: hostvars['jumphost'].dp_pass | default(false) | bool
+        fail_msg: "Traffic did not reach the backend through {{ hostvars['jumphost'].dp_ip | default('the load balancer') }}."
+        success_msg: "traffic reached the backend through {{ hostvars['jumphost'].dp_ip | default('?') }}"
+        quiet: true
