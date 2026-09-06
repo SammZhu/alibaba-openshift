@@ -81,6 +81,72 @@
     csi_repo: "{{ playbook_dir }}/../../../alibaba-cloud-csi-operator"
     deploy_repo: "{{ playbook_dir }}/../.."
   tasks:
+    # Deploy what 08b/08c actually built, without anyone retyping the tag.
+    #
+    # vars/images.yml holds the UPSTREAM base tags; 08b/08c layer Apsara support
+    # on top and push under `<tag>-apsara`, recording it in state.yml. Reading it
+    # back here is what removes the hand-carried `-e` that, left out for one
+    # component on 2026-09-06, silently reverted it to a base image.
+    #
+    # Precedence makes this work: set_fact (19) outranks play vars_files (14),
+    # so state beats the SSOT default — and extra vars (22) outrank set_fact, so
+    # an explicit `-e capa_image_tag=…` still wins over both.
+    - name: "08 — is there recorded build state?"
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../state.yml"
+      register: _deploy_state_stat
+      delegate_to: local
+      changed_when: false
+
+    - name: "08 — read what 08b/08c recorded"
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../state.yml"
+        name: _built
+      when: _deploy_state_stat.stat.exists
+
+    # Read separately from vars_files so the SSOT base tags stay visible after
+    # the set_fact below rewrites the top-level ones — the staleness check needs
+    # to compare the two.
+    - name: "08 — read the SSOT image tags"
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../vars/images.yml"
+        name: _ssot
+
+    # Falls back to _ssot rather than to capa_image_tag itself: a set_fact whose
+    # value references the name it is setting can trip Ansible's recursive-loop
+    # detection, and _ssot holds the identical value.
+    - name: "08 — prefer the recorded build over the SSOT base tag"
+      ansible.builtin.set_fact:
+        capa_image_tag: "{{ _built.capa_image_built_tag | default(_ssot.capa_image_tag, true) }}"
+        csi_operator_image_tag: "{{ _built.csi_image_built_tag | default(_ssot.csi_operator_image_tag, true) }}"
+      when: _built is defined
+
+    # A recorded build carries the base it was layered on. When vars/images.yml
+    # moves to a new upstream version, that recording goes stale WITHOUT its tag
+    # changing — `v0.1.13-apsara` is still called that after the base becomes
+    # v0.1.14 — so deploying it would put an old build against new manifests.
+    # The tag cannot show this; only the recorded base can.
+    - name: "08 — the recorded builds must match the current base versions"
+      ansible.builtin.assert:
+        that:
+          - (_built.capa_image_built_base_tag | default(_ssot.capa_image_tag)) == _ssot.capa_image_tag
+          - (_built.csi_image_built_base_tag | default(_ssot.csi_operator_image_tag)) == _ssot.csi_operator_image_tag
+        fail_msg: >-
+          A recorded image was built against a base version that vars/images.yml
+          has since moved past, so it is stale even though its tag still looks
+          right. CAPA: built on
+          {{ _built.capa_image_built_base_tag | default('(none)') }}, SSOT now
+          {{ _ssot.capa_image_tag }}. CSI operator: built on
+          {{ _built.csi_image_built_base_tag | default('(none)') }}, SSOT now
+          {{ _ssot.csi_operator_image_tag }}. Re-run 08b and/or 08c to rebuild on
+          the current base, then run 08 again.
+        success_msg: >-
+          builds current — capa {{ capa_image_tag }}
+          (from {{ _built.capa_image_built_sha | default('?') }}),
+          csi {{ csi_operator_image_tag }}
+          (from {{ _built.csi_image_built_sha | default('?') }})
+      when: _built is defined
+
     # Apsara only works from the images 08b/08c build: the endpoint, scheme and
     # tenancy-header support is compiled or baked into them, not configured here.
     # Their tags default to the base values in vars/images.yml, so re-running 08
