@@ -770,6 +770,10 @@
     new_state:
       ecs_image_id: "{{ ecs_image_id }}"
       agent_iso_built_at: "{{ agent_iso_built_at }}"
+      # What the ISO was actually built from.  agent_iso_built_at answers "how
+      # old", which does not survive a teardown+rebuild inside the age window;
+      # this answers "built from the same inputs?", which does.
+      agent_iso_config_sha: "{{ _cb_cfg_sha.stdout | default('') | trim }}"
 
 - name: ABI — free transient scratch on the mirror ECS (keep ISO + .cache)
   ansible.builtin.shell: >-
