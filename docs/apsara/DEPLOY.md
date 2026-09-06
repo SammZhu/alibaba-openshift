@@ -374,6 +374,39 @@ and drops the taint. The cost is ProviderID and LoadBalancer Services; api /
 api-int / `*.apps` resolve through CloudDns to the node IP either way, so the
 cluster itself is fine without it.
 
+### Three things the install itself needs
+
+Enabling the CCM makes it part of the boot chain: kubelet taints every node
+`node.cloudprovider.kubernetes.io/uninitialized` and nothing schedules until
+the CCM clears it. Each of these three, missing, deadlocks the install at
+roughly 73% with the node `NotReady` and every other pod `Pending`. All three
+were found the hard way on 2026-09-05, in this order, one per attempt.
+
+**The image must be mirrored by digest in install-config.** Tag pulls are
+redirected by an ImageTagMirrorSet, which needs a running cluster with MCO —
+far too late. Only `imageDigestSources` in install-config is in force while the
+first node boots, so the CCM repo has an entry there
+(`registry-cn-hangzhou.ack.aliyuncs.com/acs/cloud-controller-manager`), and 08d
+records the digest it pushed into `state.yml` for the manifest to reference.
+Note 04 carries the same mapping for the Assisted-Installer path — a *different*
+install-config. Having it there is not having it here.
+
+**The credentials Secret must be optional.** 08 creates
+`alibaba-ccm-creds`, and 08 cannot run until the cluster is up, which cannot
+happen until the CCM runs. Required, the pod sits in
+`CreateContainerConfigError`. Marked optional, the environment simply goes
+unset and the credential chain falls through to the node RAM role, which has
+the ECS permissions node initialisation needs. That is enough to lift the taint
+and finish the install; 08 then writes the Secret and restarts the Deployment.
+
+**The variable names are `ACCESS_KEY_ID` / `ACCESS_KEY_SECRET`,** not the SDK's
+usual `ALIBABA_CLOUD_*`. Get them wrong and the CCM does not fail — it falls
+through to the node RAM role, which can label nodes but cannot touch SLB, so
+every LoadBalancer call returns Forbidden and reads like a missing permission.
+The startup line says which identity is in use: `use ak mode to get token`
+against `use ram role mode to get token`. Check it before believing anything
+else about credentials.
+
 ### Adding it to a cluster installed without it
 
 The manifest is baked into the agent ISO at install time, so a cluster
@@ -387,11 +420,17 @@ ansible-playbook playbooks/08e-deploy-ccm.yml -e ccm_image_tag=v2.14.0-apsara
 ansible-playbook playbooks/08e-deploy-ccm.yml -e ccm_image_tag=v2.14.0-apsara -e ccm_scale_up=true
 ```
 
-It stops at `replicas=0` on the first run on purpose. The CCM's node controller
-resolves Nodes by providerID, and whether it deletes a Node it cannot find in
-the cloud has not been established — a wrong endpoint being exactly the
-condition this is all fixing. The scale-up run snapshots the Node list first and
-fails loudly if any Node disappears.
+It stops at `replicas=0` on the first run so the environment can be read back
+off the live Deployment before anything talks to the cloud. The scale-up run
+snapshots the Node list first and fails loudly if any Node disappears.
+
+That caution was aimed at the node controller deleting Nodes it could not match.
+It cannot: the startup line reads `Loaded controllers: [node route service nlb]`
+— there is no `cloud-node-lifecycle`, so this CCM has no code path that removes
+a Node. Confirmed 2026-09-05 by leaving a Node whose instance had been deleted
+in place for half an hour; the CCM never touched it. It has to be removed by
+hand (`oc delete node`), and until it is, its kubelet keeps filing CSRs that the
+approver rejects for having no matching Machine.
 
 `cloud_env` must carry `ENDPOINT_SLB` (dyz7: `slb-vpc.cloud.dyz7.com`); nothing
 needed it before, so older configs do not have it and `08e` asserts on it.
