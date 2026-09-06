@@ -200,6 +200,37 @@
               changed_when: true
               failed_when: false
 
+            # A PVC that a Pod still mounts keeps the kubernetes.io/pvc-protection
+            # finalizer, so the delete above only marks it Terminating: the PV is
+            # never released, CSI DeleteVolume is never called, and the cloud disk
+            # outlives the cluster.  Deleting the consumers is safe here — the
+            # cluster is being destroyed — and it is what makes PVC-delete-first
+            # the primary path rather than a no-op deferring to a backstop that
+            # does not cover disks at all.
+            #
+            # Order matters: PVCs are deleted FIRST, above.  Do it the other way
+            # and the owning Deployment/StatefulSet recreates the Pod, which
+            # remounts the PVC and restores the finalizer.  With the PVC already
+            # Terminating a recreated Pod just stays Pending, so the PV drains.
+            #
+            # Observed 2026-09-06: a single 20Gi PVC held by one running Pod made
+            # the wait below run its full three minutes and leave the disk behind,
+            # Available and billing, with nothing in the teardown reporting it.
+            - name: Delete the Pods holding those PVCs, so pvc-protection can clear
+              ansible.builtin.shell: |
+                set -o pipefail
+                oc --kubeconfig /root/kubeconfig get pvc -A \
+                  -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' \
+                | sort -u \
+                | while read -r ns; do
+                    [ -n "$ns" ] && oc --kubeconfig /root/kubeconfig -n "$ns" \
+                      delete pods --all --force --grace-period=0 --wait=false
+                  done
+              args: { executable: /bin/bash }
+              delegate_to: jumphost
+              changed_when: true
+              failed_when: false
+
             - name: Wait (bounded ~3m) for PVs to drain as CSI DeleteVolume completes
               ansible.builtin.command: oc --kubeconfig /root/kubeconfig get pv -o name
               delegate_to: jumphost
@@ -1200,6 +1231,50 @@
                  if ((teardown_target in ['mirror','both']) and (delete_mirror_snapshots | default(false) | bool))
                  else 2 if (teardown_target in ['mirror','both'])
                  else (_obs_mirror_snaps | int) }}
+
+        # Disks were the one resource this audit never looked at, and the one
+        # that leaked: a CSI-provisioned disk is a separate cloud disk with
+        # DeleteWithInstance=false, so deleting the ECS detaches it and leaves it
+        # Available and billing.  On 2026-09-06 exactly that happened and the
+        # teardown reported ✓ throughout — the audit could not contradict it,
+        # because it was not looking.  Any disk left by the CSI plugin is a leak:
+        # the mirror's own disks stay attached to the mirror ECS.
+        - name: "Audit — orphan CSI cloud disks (Available, created by the CSI plugin)"
+          ansible.builtin.command:
+            argv: ["{{ cloud_cli }}", ecs, DescribeDisks, --RegionId, "{{ region }}",
+                   --Status, Available,
+                   --PageSize, "100",
+                   --profile, "{{ aliyun_profile }}"]
+          register: _audit_disks
+          changed_when: false
+          failed_when: false
+
+        - name: Audit — extract CSI-created orphan disk ids
+          ansible.builtin.set_fact:
+            # Keyed on DiskName, not on the createdby tag: Tags.Tag is a list of
+            # dicts, which selectattr's string tests cannot see into.  The CSI
+            # plugin names every volume pvc-<uuid>, and the orphan-snapshot sweep
+            # above already identifies its own leftovers the same way.
+            _orphan_disk_ids: >-
+              {{ (_audit_disks.stdout | default('{}') | from_json).Disks.Disk
+                 | default([])
+                 | selectattr('DiskName', 'defined')
+                 | selectattr('DiskName', 'match', '^pvc-')
+                 | map(attribute='DiskId') | list }}
+          failed_when: false
+
+        - name: Audit — no CSI disk may outlive the cluster
+          ansible.builtin.assert:
+            that: (_orphan_disk_ids | default([])) | length == 0
+            fail_msg: >-
+              ❌ {{ (_orphan_disk_ids | default([])) | length }} CSI-provisioned
+              cloud disk(s) survived the teardown, Available and billing:
+              {{ (_orphan_disk_ids | default([])) | join(', ') }}.
+              PVC-delete-first did not reclaim them — check whether the PVCs were
+              still held by running Pods, which keeps the pvc-protection finalizer
+              and stops the PV ever being released. Delete them by hand
+              (ecs DeleteDisk), then fix the path rather than the symptom.
+            success_msg: "✓ no CSI cloud disks left behind"
 
         - name: Audit — assert observed == expected
           ansible.builtin.assert:
