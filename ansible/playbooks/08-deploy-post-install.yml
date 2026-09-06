@@ -165,9 +165,11 @@
           Apsara needs the images built by 08b (CAPA) and 08c (CSI operator).
           Right now capa_image_tag={{ capa_image_tag }} and
           csi_operator_image_tag={{ csi_operator_image_tag }} — at least one is a
-          base image that does not speak Apsara. Build whichever is missing, then
-          re-run 08 passing BOTH tags, because passing one reverts the other:
-          -e capa_image_tag=<tag>-apsara -e csi_operator_image_tag=<tag>-apsara
+          base image that does not speak Apsara. Run the build playbook for
+          whichever is missing (08b for CAPA, 08c for the CSI operator); it
+          records the tag in state.yml and 08 reads it back on the next run.
+          There is nothing to pass by hand — and passing tags by hand is what
+          used to revert whichever component was left out.
         success_msg: >-
           Apsara images: capa={{ capa_image_tag }}, csi={{ csi_operator_image_tag }}
       when: (cloud_platform | default('public')) == 'apsara'
