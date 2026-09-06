@@ -81,6 +81,31 @@
     csi_repo: "{{ playbook_dir }}/../../../alibaba-cloud-csi-operator"
     deploy_repo: "{{ playbook_dir }}/../.."
   tasks:
+    # Apsara only works from the images 08b/08c build: the endpoint, scheme and
+    # tenancy-header support is compiled or baked into them, not configured here.
+    # Their tags default to the base values in vars/images.yml, so re-running 08
+    # with only one overridden silently reverts the OTHER component to its base
+    # image — and that failure surfaces much later, somewhere else, looking like
+    # something unrelated: on 2026-09-06 it was CSI PVCs stuck Pending behind
+    # "x509: certificate signed by unknown authority", because the driver had
+    # lost ALICLOUD_CLIENT_SCHEME and gone back to https.  Fail here instead,
+    # before anything is applied.
+    - name: "08 — on Apsara BOTH components must run their -apsara images"
+      ansible.builtin.assert:
+        that:
+          - capa_image_tag.endswith('-apsara')
+          - csi_operator_image_tag.endswith('-apsara')
+        fail_msg: >-
+          Apsara needs the images built by 08b (CAPA) and 08c (CSI operator).
+          Right now capa_image_tag={{ capa_image_tag }} and
+          csi_operator_image_tag={{ csi_operator_image_tag }} — at least one is a
+          base image that does not speak Apsara. Build whichever is missing, then
+          re-run 08 passing BOTH tags, because passing one reverts the other:
+          -e capa_image_tag=<tag>-apsara -e csi_operator_image_tag=<tag>-apsara
+        success_msg: >-
+          Apsara images: capa={{ capa_image_tag }}, csi={{ csi_operator_image_tag }}
+      when: (cloud_platform | default('public')) == 'apsara'
+
     - name: Assert kubeconfig is present on the jump host
       ansible.builtin.stat:
         path: "{{ kubeconfig_file }}"
