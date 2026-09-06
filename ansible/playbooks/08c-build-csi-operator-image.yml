@@ -10,9 +10,10 @@
 # through; that needs a rebuilt operator AND a re-applied CRD (08 does the CRD).
 #
 # Usage:
-#   ansible-playbook playbooks/08c-build-csi-operator-image.yml \
-#     -e csi_build_ref=apsara-extra-env
-#   then re-run 08 with -e csi_operator_image_tag=<the tag printed below>
+#   ansible-playbook playbooks/08c-build-csi-operator-image.yml
+#   Builds csi_build_ref, which defaults to main — the extraEnv support was
+#   merged there (#29), so the old apsara-extra-env branch is gone.  Then just
+#   run 08: the tag is recorded in state.yml and read back from there.
 - name: Build the CSI operator image on the operator, push to the mirror
   hosts: local
   gather_facts: false
@@ -20,7 +21,7 @@
     - "{{ playbook_dir }}/../vars/images.yml"
   vars:
     csi_repo: "{{ playbook_dir }}/../../../alibaba-cloud-csi-operator"
-    csi_build_ref: ""
+    csi_build_ref: "main"              # the extraEnv support lives on main since #29
     csi_base_tag: "{{ csi_operator_image_tag }}"
     csi_build_tag: "{{ csi_operator_image_tag }}-apsara"
     csi_mirror_repo: "{{ csi_operator_mirror_repo | default('samzhu/alibaba-cloud-csi-operator') }}"

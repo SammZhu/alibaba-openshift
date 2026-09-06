@@ -12,8 +12,9 @@
 # — and the result is pushed straight back to the mirror under a new tag.
 #
 # Usage:
-#   ansible-playbook playbooks/08b-build-capa-image.yml \
-#     -e capa_build_ref=apsara-endpoint-support
+#   ansible-playbook playbooks/08b-build-capa-image.yml
+#   Builds capa_build_ref, which defaults to main — the Apsara support was
+#   merged there (#22), so the old apsara-endpoint-support branch is gone.
 #   The tag defaults to <capa_image_tag>-apsara (vars/images.yml), and the base
 #   layer is the currently deployed <capa_image_tag>.
 #   then set capa_image_tag to that tag and re-run 08.
@@ -26,7 +27,7 @@
     - "{{ playbook_dir }}/../vars/images.yml"
   vars:
     capi_repo: "{{ playbook_dir }}/../../../openshift-capi-alicloud"
-    capa_build_ref: ""                 # empty = build the working tree as-is
+    capa_build_ref: "main"             # the Apsara support lives on main since #22
     # Layer onto the image currently deployed, not onto a previous rebuild —
     # otherwise repeated runs stack apsara layers on top of each other.
     capa_base_tag: "{{ capa_image_tag }}"
