@@ -1001,6 +1001,35 @@
           ansible.builtin.include_tasks: ../tasks/save_state.yml
           vars:
             new_state:
+              # Records of images 08b/08c/08d built INTO the mirror.  They are
+              # cleared here and not on cluster teardown on purpose: a cluster
+              # teardown leaves the mirror standing, so the images are still
+              # there and still deployable — clearing them would force three
+              # pointless rebuilds on the next install.  A mirror teardown takes
+              # the images with it, and then these become worse than useless:
+              # 08/08e read them back and deploy a tag whose digest no longer
+              # exists, which surfaces as `oc image info` failing or a pod stuck
+              # on ImagePullBackOff, a long way from the teardown that caused it.
+              capa_image_built_tag: ''
+              capa_image_built_base_tag: ''
+              capa_image_built_sha: ''
+              capa_image_built_digest: ''
+              capa_image_built_at: ''
+              csi_image_built_tag: ''
+              csi_image_built_base_tag: ''
+              csi_image_built_sha: ''
+              csi_image_built_digest: ''
+              csi_image_built_at: ''
+              ccm_image_built_tag: ''
+              ccm_image_built_base_tag: ''
+              ccm_image_built_sha: ''
+              ccm_image_built_digest: ''
+              ccm_image_built_at: ''
+              # The unprefixed twin of ccm_image_built_digest, read by name from
+              # custom_manifests/01-alibaba-ccm.yaml.j2 and by 07.  It has never
+              # been cleared here — predates the prefixed set, and the same
+              # stale-digest failure applies to it.
+              ccm_image_digest: ''
               mirror_stack_id: ''
               mirror_vpc_id: ''
               mirror_vpc_cidr: ''
