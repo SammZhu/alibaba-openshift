@@ -25,7 +25,10 @@
 #     custom_manifests/01-alibaba-ccm.yaml.j2, gated on cloud_platform.
 #
 # Usage:
-#   ansible-playbook playbooks/08d-build-ccm-image.yml -e ccm_build_ref=apsara-response-shapes
+#   ansible-playbook playbooks/08d-build-ccm-image.yml
+#   Builds ccm_build_ref, which defaults to apsara-response-shapes.  Unlike the
+#   other two this stays a branch: the repo is a fork of an upstream project,
+#   whose master tracks upstream and should not carry these patches.
 #   then just run 08e — the tag is recorded in state.yml and read back from
 #   there, so there is nothing to pass by hand.
 - name: Build the Alibaba CCM image on the operator, push to the mirror
@@ -35,7 +38,7 @@
     - "{{ playbook_dir }}/../vars/images.yml"
   vars:
     ccm_repo: "{{ playbook_dir }}/../../../cloud-provider-alibaba-cloud"
-    ccm_build_ref: ""
+    ccm_build_ref: "apsara-response-shapes"   # a fork of an upstream project: master tracks upstream
     ccm_base_tag: "{{ ccm_image_tag }}"
     ccm_build_tag: "{{ ccm_image_tag }}-apsara"
     ccm_mirror_repo: "{{ ccm_image_mirror_repo | default('acs/cloud-controller-manager') }}"
