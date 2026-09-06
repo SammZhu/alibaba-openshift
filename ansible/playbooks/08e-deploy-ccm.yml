@@ -152,10 +152,14 @@
           {{ _ssot.ccm_image_tag }}. The tag still reads
           {{ ccm_image_tag }}, so nothing looks wrong — but the digest behind it
           is the older build. Re-run 08d, then 08e again.
+        # Deliberately NOT quiet, unlike the asserts around it: this line is
+        # the run's only statement of which build it believes it is deploying,
+        # and quiet swallows success_msg along with the rest. The equivalent
+        # line in 08 is what exposed a rebuilt image never reaching the cluster
+        # (#24) — a silent success would have hidden it just as well here.
         success_msg: >-
           CCM build current — {{ ccm_image_tag }}
           (from {{ _built.ccm_image_built_sha | default('?') }})
-        quiet: true
       when: _built is defined
 
     - name: "08e — the image tag must be one built for this platform"
