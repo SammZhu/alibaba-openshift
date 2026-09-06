@@ -44,6 +44,26 @@
     _cb_iso_epoch: "{{ (_cb_iso_present.stdout | trim) if ((_cb_iso_present.stdout | trim) is match('^[0-9]+$')) else '' }}"
     _cb_now_epoch: "{{ lookup('pipe', 'date -u +%s') }}"
 
+# Age cannot see the thing that actually invalidates an ISO.  On 2026-09-06 a
+# teardown and rebuild replaced the masters — new ENIs, new MACs, a new
+# agent-config — and the ten-hour-old ISO was still "fresh" by the age rule, so
+# it was reused.  install-config/agent-config were re-rendered at 20:31 while
+# the ISO and its asset store stayed at 10:18, and the install died in
+# openshift-install with `panic: asset.Asset is nil, not *agentconfig.AgentHosts`
+# during wait-for — a failure that names nothing resembling its cause.
+#
+# The reuse message already said "needed if the install-config / agent-config
+# changed"; it just left remembering that to whoever was running it.  Fingerprint
+# the two files instead and let the mismatch decide.
+- name: "container-build: fingerprint the configs this ISO would be built from"
+  ansible.builtin.shell: |
+    set -o pipefail
+    cat {{ install_dir }}/install-config.yaml {{ install_dir }}/agent-config.yaml \
+      2>/dev/null | sha256sum | cut -c1-64
+  args: { executable: /bin/bash }
+  register: _cb_cfg_sha
+  changed_when: false
+
 - name: "container-build: decide whether to (re)build the ISO"
   ansible.builtin.set_fact:
     _cb_iso_age_h: "{{ (((_cb_now_epoch | int) - (_cb_iso_epoch | int)) / 3600) | round(1)
@@ -51,7 +71,11 @@
     _cb_build_iso: "{{ (agent_iso_force_rebuild | default(false) | bool)
                        or ((_cb_iso_epoch | length) == 0)
                        or ((((_cb_now_epoch | int) - (_cb_iso_epoch | int)) / 3600)
-                           >= (agent_iso_max_age_hours | default(20) | float)) }}"
+                           >= (agent_iso_max_age_hours | default(20) | float))
+                       or ((_cb_cfg_sha.stdout | default('') | trim)
+                           != (agent_iso_config_sha | default(''))) }}"
+    _cb_cfg_changed: "{{ (_cb_cfg_sha.stdout | default('') | trim)
+                         != (agent_iso_config_sha | default('')) }}"
 
 - name: "container-build: the existing ISO is too old to reuse"
   ansible.builtin.debug:
@@ -64,6 +88,18 @@
     - (_cb_iso_epoch | length) > 0
     - not (agent_iso_force_rebuild | default(false) | bool)
     - _cb_build_iso | bool
+
+- name: "container-build: the configs changed since that ISO was built"
+  ansible.builtin.debug:
+    msg: >-
+      {{ _m_iso }} is only {{ _cb_iso_age_h }}h old, but install-config /
+      agent-config no longer hash to what it was built from — rebuilding.
+      Recorded {{ agent_iso_config_sha | default('(none)') }},
+      now {{ _cb_cfg_sha.stdout | default('') | trim }}.
+  when:
+    - (_cb_iso_epoch | length) > 0
+    - not (agent_iso_force_rebuild | default(false) | bool)
+    - _cb_cfg_changed | bool
 
 - name: "container-build: reuse existing ISO on mirror (skip ~30 min rebuild)"
   ansible.builtin.debug:
