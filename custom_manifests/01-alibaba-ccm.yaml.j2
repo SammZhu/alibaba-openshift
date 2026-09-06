@@ -159,7 +159,15 @@ metadata:
     k8s-app: alibaba-cloud-controller-manager
     infrastructure.openshift.io/cloud-controller-manager: AlibabaCloud
 spec:
-  replicas: 2
+  # One replica on a single node.  The pod is hostNetwork, so a second one can
+  # never be scheduled anywhere — it sits Pending on "didn't have free ports"
+  # forever, and every scheduling attempt adds a FailedScheduling event.  That
+  # is noise in exactly the place someone looks when the CCM is misbehaving.
+  #
+  # Availability is not lost: the controllers are leader-elected, so the second
+  # replica is a warm spare, and there is nowhere for it to be warm on a
+  # single-node cluster anyway.
+  replicas: {{ 1 if (cluster_topology | default('ha')) == 'sno' else 2 }}
   strategy:
     type: Recreate
   selector:
