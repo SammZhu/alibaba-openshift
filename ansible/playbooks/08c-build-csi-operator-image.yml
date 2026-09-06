@@ -41,13 +41,16 @@
         bi_mirror_repo: "{{ csi_mirror_repo }}"
         bi_base_tag: "{{ csi_base_tag }}"
         bi_build_tag: "{{ csi_build_tag }}"
+        bi_state_prefix: csi
 
     - name: "08c — next steps"
       ansible.builtin.debug:
         msg: |
-          Re-run 08 with the new tag (it also re-applies the CRD, which the
-          extraEnv field needs):
-            ansible-playbook playbooks/08-deploy-post-install.yml \
-              -e csi_operator_image_tag={{ csi_build_tag }}
+          {{ csi_build_tag }} is recorded in state.yml — just re-run 08 (it also
+          re-applies the CRD, which the extraEnv field needs), no tag to pass:
+            ansible-playbook playbooks/08-deploy-post-install.yml
           then re-run the smoke:
             ansible-playbook playbooks/13-csi-smoke.yml
+
+          08 reads both this tag and CAPA's from state, so re-running it can no
+          longer revert the component whose tag you did not think to pass.

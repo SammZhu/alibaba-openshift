@@ -226,6 +226,35 @@
   ansible.builtin.set_fact:
     bi_digest: "{{ (_bi_inspect.stdout | from_json).Digest }}"
 
+# Record what was built.  The tag is a fact this file already knows and used to
+# throw away, leaving the operator to carry it to 08 by hand as `-e` — and on
+# 2026-09-06 a run that carried only one of the two silently reverted the other
+# component to its base image, surfacing fifteen minutes later as an unrelated-
+# looking x509 error in CSI.
+#
+# base_tag and sha ride along because the tag alone cannot say whether a build
+# is still current: an `-apsara` image layered onto v0.1.13 keeps that name
+# after vars/images.yml moves to v0.1.14, and would otherwise be deployed
+# against the newer manifests.  08 compares them and refuses.
+- name: "{{ bi_name }} — record the build in state.yml"
+  ansible.builtin.include_tasks: ../tasks/save_state.yml
+#
+# The keys deliberately do NOT match the callers' own variables (08b has a play
+# var `capa_build_tag`): load_state.yml promotes every state key with set_fact,
+# which outranks play vars, so a colliding name would make the next 08b build
+# under the PREVIOUSLY recorded tag instead of re-deriving it from
+# vars/images.yml — reintroducing the staleness this is meant to catch.
+  vars:
+    new_state: >-
+      {{ {
+           bi_state_prefix ~ '_image_built_tag': bi_build_tag,
+           bi_state_prefix ~ '_image_built_base_tag': bi_base_tag,
+           bi_state_prefix ~ '_image_built_sha': (_bi_commit.stdout | trim).split() | first,
+           bi_state_prefix ~ '_image_built_digest': bi_digest,
+           bi_state_prefix ~ '_image_built_at': lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')
+         } }}
+  when: (bi_state_prefix | default('')) | length > 0
+
 - name: "{{ bi_name }} — built"
   ansible.builtin.debug:
     msg: |

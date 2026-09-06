@@ -47,15 +47,19 @@
         bi_base_tag: "{{ capa_base_tag }}"
         bi_build_tag: "{{ capa_build_tag }}"
         bi_goproxy: "{{ capa_build_goproxy }}"
+        bi_state_prefix: capa
 
     - name: "08b — next steps"
       ansible.builtin.debug:
         msg: |
-          Apply the new tag as an extra var:
-            ansible-playbook playbooks/08-deploy-post-install.yml \
-              -e capa_image_tag={{ capa_build_tag }}
+          {{ capa_build_tag }} is recorded in state.yml — just run 08, no tag to pass:
+            ansible-playbook playbooks/08-deploy-post-install.yml
             ansible-playbook playbooks/12-capa-machinedeployment.yml
 
-          NOT via group_vars: capa_image_tag comes from vars/images.yml, which 08
-          loads with vars_files — and vars_files outranks group_vars, so a value
-          set there is silently ignored.  Only -e wins.
+          Passing it by hand is what used to go wrong: 08 needs the CSI operator
+          tag too, and a run that overrode only this one reverted the CSI
+          operator to its base image.  08 now reads both from state.
+
+          To deploy something other than the recorded build, -e still wins
+          (extra vars outrank everything) — but NOT group_vars, which
+          vars/images.yml outranks and which is therefore silently ignored.
