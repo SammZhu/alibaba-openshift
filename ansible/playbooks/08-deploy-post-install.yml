@@ -217,6 +217,27 @@
           ansible.builtin.set_fact:
             capi_provider_img: "quay.io/samzhu/openshift-capi-alicloud@{{ (_capa_imginfo.stdout | from_json).digest }}"
 
+        # The CSI operator needs this for a second reason beyond air-gap
+        # immutability: 08c rebuilds under the SAME tag, and a Deployment whose
+        # spec still says `:v0.1.13-apsara` is unchanged as far as Kubernetes is
+        # concerned, so nothing rolls out and (with IfNotPresent) the node keeps
+        # serving the image it already has.  A rebuilt operator then never
+        # reaches the cluster while 08 reports success — observed 2026-09-06,
+        # where a pod stayed on the previous build for five hours across two
+        # rebuilds.  Pinning the digest makes the spec change whenever the
+        # content does, which is what triggers the rollout.
+        - name: Resolve the CSI operator image digest from the mirror
+          ansible.builtin.command:
+            argv: [oc, image, info,
+                   "{{ mirror_private_ip }}:8443/samzhu/alibaba-cloud-csi-operator:{{ csi_operator_image_tag }}",
+                   "--registry-config=/root/.dockerconfigjson", "--insecure", -o, json]
+          register: _csi_imginfo
+          changed_when: false
+
+        - name: Override csi_operator_img with the digest-pinned reference
+          ansible.builtin.set_fact:
+            csi_operator_img: "quay.io/samzhu/alibaba-cloud-csi-operator@{{ (_csi_imginfo.stdout | from_json).digest }}"
+
     # ── CAPA provider (single kustomize SSOT: provider repo config/default) ──
     # CRDs + RBAC + controller + admission webhooks all come from the provider
     # repo's config/default kustomize base — the SAME source clusterctl
@@ -338,7 +359,11 @@
     # (which has that exact digest, since the digest was resolved FROM the mirror).
     # Same digest+IDMS pattern 08a uses for the CAPI core image. No-op when the
     # mirror is disabled.
-    - name: Apply ImageDigestMirrorSet for the digest-pinned CAPA controller image
+    # Both digest-pinned images belong in the SAME IDMS object: applying two
+    # objects with the same metadata.name would leave whichever ran last, and
+    # the other image would then pull from quay.io by digest — unreachable from
+    # this VPC.
+    - name: Apply ImageDigestMirrorSet for the digest-pinned CAPA + CSI images
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
       args:
@@ -352,6 +377,9 @@
               - source: quay.io/samzhu/openshift-capi-alicloud
                 mirrors:
                   - {{ mirror_private_ip }}:8443/samzhu/openshift-capi-alicloud
+              - source: quay.io/samzhu/alibaba-cloud-csi-operator
+                mirrors:
+                  - {{ mirror_private_ip }}:8443/samzhu/alibaba-cloud-csi-operator
       register: _idms_capa_apply
       changed_when: "'unchanged' not in _idms_capa_apply.stdout"
       when: mirror_private_ip | default('') | length > 0
