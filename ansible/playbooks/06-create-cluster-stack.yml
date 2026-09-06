@@ -121,6 +121,16 @@
           - "{{ aliyun_profile }}"
       register: _abi_images_pages
       changed_when: false
+      # The ASCM gateway intermittently rejects its own signature check:
+      # 2026-09-06 this call failed with ascm.api.sign.validate.failed
+      # ("内部签名验证失败") for page 1 while page 2, issued a moment later with
+      # the same credentials, succeeded — and a DescribeDisks call minutes
+      # earlier had been fine. A read-only listing is idempotent, so retry it
+      # rather than losing the whole cluster-stack build to a one-second
+      # gateway hiccup.
+      retries: 3
+      delay: 5
+      until: _abi_images_pages.rc | default(1) == 0
       loop: [1, 2]
       when:
         - _is_abi | bool
