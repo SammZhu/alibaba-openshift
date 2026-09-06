@@ -12,9 +12,12 @@
 # exactly the state this change exists to fix.  So: apply, read back what
 # actually landed, and scale up only on a second, deliberate run.
 #
-#   ansible-playbook playbooks/08e-deploy-ccm.yml -e ccm_image_tag=v2.14.0-apsara
+#   ansible-playbook playbooks/08e-deploy-ccm.yml
 #   # read the summary, then:
-#   ansible-playbook playbooks/08e-deploy-ccm.yml -e ccm_image_tag=v2.14.0-apsara -e ccm_scale_up=true
+#   ansible-playbook playbooks/08e-deploy-ccm.yml -e ccm_scale_up=true
+#
+# No image tag to pass: 08d records what it built in state.yml and this reads
+# it back.  -e ccm_image_tag=… still overrides, for deploying something else.
 #
 # Prerequisites: 08d built the image, and cloud_env carries ENDPOINT_SLB.
 - name: Resolve the deploy host (08e runs standalone)
@@ -107,13 +110,61 @@
         quiet: true
       when: (cloud_platform | default('public')) == 'apsara'
 
+    # Deploy what 08d actually built, without anyone retyping the tag.  Same
+    # mechanism, and the same precedence, as 08: set_fact (19) beats play
+    # vars_files (14) so the recorded build wins over the SSOT base tag in
+    # vars/images.yml, while extra vars (22) beat set_fact so -e still wins.
+    - name: "08e — is there recorded build state?"
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../state.yml"
+      register: _ccm_state_stat
+      delegate_to: local
+      changed_when: false
+
+    - name: "08e — read what 08d recorded"
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../state.yml"
+        name: _built
+      when: _ccm_state_stat.stat.exists
+
+    - name: "08e — read the SSOT image tags"
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../vars/images.yml"
+        name: _ssot
+
+    - name: "08e — prefer the recorded build over the SSOT base tag"
+      ansible.builtin.set_fact:
+        ccm_image_tag: "{{ _built.ccm_image_built_tag | default(_ssot.ccm_image_tag, true) }}"
+      when: _built is defined
+
+    # This matters more for the CCM than for the other two, because the CCM is
+    # deployed by DIGEST: a stale recording is not a tag that merely looks
+    # wrong, it is an exact, confident reference to the previous build.  The tag
+    # cannot show the drift — v2.14.0-apsara is still called that after the base
+    # moves to v2.15.0 — so compare the base the build was layered on.
+    - name: "08e — the recorded build must match the current base version"
+      ansible.builtin.assert:
+        that:
+          - (_built.ccm_image_built_base_tag | default(_ssot.ccm_image_tag)) == _ssot.ccm_image_tag
+        fail_msg: >-
+          The recorded CCM image was built on {{ _built.ccm_image_built_base_tag
+          | default('(none)') }}, but vars/images.yml is now at
+          {{ _ssot.ccm_image_tag }}. The tag still reads
+          {{ ccm_image_tag }}, so nothing looks wrong — but the digest behind it
+          is the older build. Re-run 08d, then 08e again.
+        success_msg: >-
+          CCM build current — {{ ccm_image_tag }}
+          (from {{ _built.ccm_image_built_sha | default('?') }})
+        quiet: true
+      when: _built is defined
+
     - name: "08e — the image tag must be one built for this platform"
       ansible.builtin.assert:
         that: ccm_image_tag is search('-apsara')
         fail_msg: >-
           ccm_image_tag is "{{ ccm_image_tag }}".  Upstream images cannot decode
-          this gateway's LoadBalancer.Tags — run 08d and pass the tag it prints
-          (-e ccm_image_tag=v2.14.0-apsara).
+          this gateway's LoadBalancer.Tags — run 08d; it records the tag in
+          state.yml and 08e reads it back, so there is nothing to pass by hand.
         quiet: true
       when: (cloud_platform | default('public')) == 'apsara'
 

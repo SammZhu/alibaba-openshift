@@ -26,7 +26,8 @@
 #
 # Usage:
 #   ansible-playbook playbooks/08d-build-ccm-image.yml -e ccm_build_ref=apsara-response-shapes
-#   then deploy with -e ccm_image_tag=<the tag printed below>
+#   then just run 08e — the tag is recorded in state.yml and read back from
+#   there, so there is nothing to pass by hand.
 - name: Build the Alibaba CCM image on the operator, push to the mirror
   hosts: local
   gather_facts: false
@@ -53,6 +54,7 @@
         bi_mirror_repo: "{{ ccm_mirror_repo }}"
         bi_base_tag: "{{ ccm_base_tag }}"
         bi_build_tag: "{{ ccm_build_tag }}"
+        bi_state_prefix: ccm
         # The manifest runs /cloud-controller-manager, and a pod's `command`
         # replaces ENTRYPOINT rather than searching, so the path must match.
         bi_image_path: /cloud-controller-manager
@@ -63,7 +65,13 @@
 
     # Persist it so 07 can render the manifest with a digest reference long
     # before there is a cluster to ask.
-    - name: "08d — record the digest in state"
+    # bi_state_prefix above already records ccm_image_built_{tag,base_tag,sha,
+    # digest,at}.  This second write keeps the older, unprefixed key alive
+    # because the manifest template reads it by that name
+    # (custom_manifests/01-alibaba-ccm.yaml.j2), as does 07 when it renders the
+    # CCM into install-config.  Same value, kept for the readers that predate
+    # the prefixed set.
+    - name: "08d — record the digest in state (legacy key the manifest reads)"
       ansible.builtin.include_tasks: ../tasks/save_state.yml
       vars:
         new_state:
