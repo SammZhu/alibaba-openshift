@@ -116,7 +116,33 @@
       master_ip1/2/3 — check 06 resolved the stack outputs before this ran.
     quiet: true
 
-- name: "clouddns: add A records"
+# Read before writing.  AddPrivateZoneRecord only ever adds: on a re-run it
+# fails on the duplicate or leaves a second record for the same name, and it can
+# never correct a value that has to change — which is what a rebuild does to
+# *.apps when the load balancer moves.  Describe first, then add what is missing
+# and update only what differs.
+- name: "clouddns: read the records that already exist"
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", clouddns, DescribePrivateZoneRecords,
+           --ZoneId, "{{ forward_zone_id }}", --RegionId, "{{ region }}",
+           --PageSize, "100", --profile, "{{ aliyun_profile }}"]
+  register: _cd_list
+  changed_when: false
+  failed_when: (_cd_list.rc != 0) or ('"asapiSuccess":true' not in _cd_list.stdout)
+
+# name -> {id, value}.  A record carries its value in RDatas[0].Value and its
+# handle in Id; both are needed to update one.
+- name: "clouddns: index existing records by name"
+  ansible.builtin.set_fact:
+    _cd_have: >-
+      {{ dict(_cd_data | map(attribute='Name') | list
+              | zip(_cd_data | map(attribute='Id') | list
+                    | zip(_cd_data | map(attribute='RDatas') | map('first')
+                          | map(attribute='Value') | list))) }}
+  vars:
+    _cd_data: "{{ (_cd_list.stdout | from_json).Data | default([]) }}"
+
+- name: "clouddns: add the records that do not exist yet"
   ansible.builtin.command:
     argv:
       - "{{ cloud_cli }}"
@@ -140,14 +166,55 @@
       - "{{ aliyun_profile }}"
   loop: "{{ _cd_records }}"
   loop_control:
-    label: "{{ item.rr }} -> {{ item.ip }}"
-  register: _cd_recs
+    label: "add {{ item.rr }} -> {{ item.ip }}"
+  when: item.rr not in _cd_have
+  register: _cd_added
   changed_when: true
-  failed_when: (_cd_recs.rc != 0) or ('"asapiSuccess":true' not in _cd_recs.stdout)
+  failed_when: (_cd_added.rc != 0) or ('"asapiSuccess":true' not in _cd_added.stdout)
+
+- name: "clouddns: correct the records whose value changed"
+  ansible.builtin.command:
+    argv:
+      - "{{ cloud_cli }}"
+      - clouddns
+      - UpdatePrivateZoneRecord
+      - --ZoneId
+      - "{{ forward_zone_id }}"
+      - --RecordId
+      - "{{ _cd_have[item.rr][0] }}"
+      - --Name
+      - "{{ item.rr }}"
+      - --Type
+      - A
+      - --Ttl
+      - "60"
+      - --LbaStrategy
+      - ALL_RR
+      - --RDatas.1.Value
+      - "{{ item.ip }}"
+      - --LineIds
+      - '["default"]'
+      - --profile
+      - "{{ aliyun_profile }}"
+  loop: "{{ _cd_records }}"
+  loop_control:
+    label: "update {{ item.rr }}: {{ _cd_have[item.rr][1] | default('?') }} -> {{ item.ip }}"
+  when:
+    - item.rr in _cd_have
+    - _cd_have[item.rr][1] != item.ip
+  register: _cd_updated
+  changed_when: true
+  failed_when: (_cd_updated.rc != 0) or ('"asapiSuccess":true' not in _cd_updated.stdout)
 
 - name: "clouddns: private zone ready"
   ansible.builtin.debug:
     msg: |
       ✓ CloudDns PrivateZone {{ cluster_name }}.{{ base_domain }} (id={{ forward_zone_id }})
         bound VPCs : {{ _cd_bind_vpcs | join(', ') }}
-        records    : {{ _cd_records | map(attribute='rr') | zip(_cd_records | map(attribute='ip')) | map('join', ' -> ') | join(', ') }}
+        added      : {{ (_cd_added.results | default([]) | rejectattr('skipped', 'defined')
+                            | map(attribute='item.rr') | list | join(', ')) | default('(none)', true) }}
+        corrected  : {{ (_cd_updated.results | default([]) | rejectattr('skipped', 'defined')
+                            | map(attribute='item.rr') | list | join(', ')) | default('(none)', true) }}
+        now        : {{ _cd_records | map(attribute='rr')
+                            | zip(_cd_records | map(attribute='ip'))
+                            | map('join', ' -> ') | join(', ') }}
