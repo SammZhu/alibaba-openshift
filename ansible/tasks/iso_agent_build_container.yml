@@ -111,9 +111,11 @@
 - name: "container-build: reuse existing ISO on mirror (skip ~30 min rebuild)"
   ansible.builtin.debug:
     msg: >-
-      Existing {{ _m_iso }} on the mirror ECS, {{ _cb_iso_age_h }}h old —
-      skipping the container rebuild.  Set agent_iso_force_rebuild=true to
-      force a rebuild (needed if the install-config / agent-config changed).
+      Existing {{ _m_iso }} on the mirror ECS, {{ _cb_iso_age_h }}h old, built
+      from the same install-config / agent-config as now — skipping the
+      container rebuild.  A change to either rebuilds this on its own; set
+      agent_iso_force_rebuild=true only to rebuild an ISO nothing has
+      invalidated.
   when: not _cb_build_iso
 
 - name: "container-build: build + push the agent ISO"
