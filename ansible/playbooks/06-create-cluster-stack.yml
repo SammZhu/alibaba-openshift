@@ -352,12 +352,14 @@
     # ── Apsara: private DNS = CloudDns POP (apsara_ize.py stripped the ROS PVTZ
     # resources because ROS can't reach it).  Create the zone + VPC binding +
     # api/api-int/*.apps/etcd-0 records here via cloudcli clouddns.  Sets
-    # forward_zone_id.  SNO only for now (records -> single master IP).
+    # forward_zone_id.  Runs for both topologies now: the task builds its record
+    # set from cluster_topology, so HA points api/api-int at the cluster-stack
+    # CLB instead of a master and adds etcd-1/2.  It was gated to SNO while the
+    # records were hard-wired to a single master IP — correct to skip then,
+    # since an HA cluster whose API resolves to one master is HA in name only.
     - name: Apsara — provision CloudDns PrivateZone (zone + binding + records)
       ansible.builtin.include_tasks: ../tasks/apsara_privatezone.yml
-      when:
-        - (cloud_platform | default('public')) == 'apsara'
-        - (cluster_topology | default('ha')) == 'sno'
+      when: (cloud_platform | default('public')) == 'apsara'
 
     # cluster-stack's SG only admits the cluster VPC.  In peering mode the operator
     # sits in another VPC, so without this `agent wait-for` (which runs on the

@@ -65,7 +65,53 @@
   changed_when: true
   failed_when: (_cd_bind.rc != 0) or ('"asapiSuccess":true' not in _cd_bind.stdout)
 
-- name: "clouddns: add A records (api / api-int / *.apps / etcd-0 -> {{ master_ip1 }})"
+# One A record per name, so the value can differ per name.  SNO pointed all
+# four at the single master because that node WAS the API, the ingress and the
+# only etcd member.  HA has three of each, so the mapping stops being uniform:
+#
+#   api / api-int -> the CLB built by cluster-stack (api_lb_endpoint).  Pointing
+#     these at a master would install a cluster whose API dies with master-1 —
+#     an HA cluster in name only, and the reason 06 used to skip this task
+#     entirely rather than create records it knew were wrong.
+#   etcd-N        -> that master's own IP; the names are per-member by design.
+#   *.apps        -> ingress_vip, a placeholder that only has to satisfy the
+#     installer's DNS validation.  After install the ingress operator creates a
+#     real SLB through the CCM and this record is repointed at it (see the
+#     IngressVip parameter in cluster-stack.yaml).
+- name: "clouddns: record set for {{ cluster_topology | default('ha') }}"
+  ansible.builtin.set_fact:
+    _cd_records: >-
+      {{
+        ([{'rr': 'api',      'ip': master_ip1},
+          {'rr': 'api-int',  'ip': master_ip1},
+          {'rr': '*.apps',   'ip': master_ip1},
+          {'rr': 'etcd-0',   'ip': master_ip1}]
+         if (cluster_topology | default('ha')) == 'sno'
+         else
+         [{'rr': 'api',      'ip': api_lb_endpoint},
+          {'rr': 'api-int',  'ip': api_lb_endpoint},
+          {'rr': '*.apps',   'ip': ingress_vip | default(master_ip1)},
+          {'rr': 'etcd-0',   'ip': master_ip1},
+          {'rr': 'etcd-1',   'ip': master_ip2},
+          {'rr': 'etcd-2',   'ip': master_ip3}])
+      }}
+
+# Every value must be a real address before any record is written: a half-built
+# zone installs further than an empty one before failing, and fails somewhere
+# that does not name DNS.
+- name: "clouddns: every record needs an address"
+  ansible.builtin.assert:
+    that:
+      - _cd_records | rejectattr('ip', 'defined') | list | length == 0
+      - _cd_records | map(attribute='ip') | select('equalto', '') | list | length == 0
+    fail_msg: >-
+      Missing address for: {{ _cd_records | selectattr('ip', 'equalto', '')
+      | map(attribute='rr') | join(', ') }}. On HA api/api-int come from the
+      cluster-stack output ApiLBEndpoint (the CLB IP) and etcd-N from
+      master_ip1/2/3 — check 06 resolved the stack outputs before this ran.
+    quiet: true
+
+- name: "clouddns: add A records"
   ansible.builtin.command:
     argv:
       - "{{ cloud_cli }}"
@@ -74,7 +120,7 @@
       - --ZoneId
       - "{{ forward_zone_id }}"
       - --Name
-      - "{{ item }}"
+      - "{{ item.rr }}"
       - --Type
       - A
       - --Ttl
@@ -82,16 +128,14 @@
       - --LbaStrategy
       - ALL_RR
       - --RDatas.1.Value
-      - "{{ master_ip1 }}"
+      - "{{ item.ip }}"
       - --LineIds
       - '["default"]'
       - --profile
       - "{{ aliyun_profile }}"
-  loop:
-    - api
-    - api-int
-    - "*.apps"
-    - etcd-0
+  loop: "{{ _cd_records }}"
+  loop_control:
+    label: "{{ item.rr }} -> {{ item.ip }}"
   register: _cd_recs
   changed_when: true
   failed_when: (_cd_recs.rc != 0) or ('"asapiSuccess":true' not in _cd_recs.stdout)
@@ -101,4 +145,4 @@
     msg: |
       ✓ CloudDns PrivateZone {{ cluster_name }}.{{ base_domain }} (id={{ forward_zone_id }})
         bound VPCs : {{ _cd_bind_vpcs | join(', ') }}
-        records    : api, api-int, *.apps, etcd-0 -> {{ master_ip1 }}
+        records    : {{ _cd_records | map(attribute='rr') | zip(_cd_records | map(attribute='ip')) | map('join', ' -> ') | join(', ') }}
