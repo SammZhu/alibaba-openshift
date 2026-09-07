@@ -33,16 +33,23 @@
   changed_when: false
   failed_when: (_cd_zones.rc != 0) or ('"asapiSuccess":true' not in _cd_zones.stdout)
 
-- name: "clouddns: adopt the existing zone id, if any"
+# Two tasks, not two keys in one: set_fact evaluates every key against the
+# scope as it was before the task, so a key cannot see a sibling defined
+# alongside it.
+#
+# Fields are Id/Name (not ZoneId/ZoneName) and Name carries the trailing dot.
+- name: "clouddns: find zones carrying this cluster's name"
   ansible.builtin.set_fact:
-    # Fields are Id/Name (not ZoneId/ZoneName) and Name carries the trailing dot.
-    # Prefer a zone that is actually bound to a VPC: earlier runs left unbound
-    # duplicates of the same name behind, and picking one of those would write
-    # records nothing resolves against.
     _cd_zone_matches: >-
       {{ ((_cd_zones.stdout | from_json).Data | default([]))
          | selectattr('Name', 'in', [cluster_name ~ '.' ~ base_domain,
                                      cluster_name ~ '.' ~ base_domain ~ '.']) | list }}
+
+# Prefer a zone that is actually bound to a VPC: earlier runs left unbound
+# duplicates of the same name behind, and adopting one of those would write
+# records that nothing resolves against.
+- name: "clouddns: adopt the existing zone id, if any"
+  ansible.builtin.set_fact:
     _cd_existing_zone_id: >-
       {{ ((_cd_zone_matches | selectattr('RegionAndVpcs', 'defined') | list)
           or _cd_zone_matches)
