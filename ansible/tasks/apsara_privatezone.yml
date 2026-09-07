@@ -18,7 +18,49 @@
 # SNO only for now: api / api-int / *.apps / etcd-0 all resolve to the single
 # master IP (no NLB).  HA would point api/api-int at the NLB instead.
 
+# Adopt before creating.  AddPrivateZone always creates, so every re-run left a
+# SECOND zone with the same name — and since a VPC binds to only one zone per
+# name, the bind then failed with "duplicate vpc" while the new, unbound zone
+# sat there resolving nothing.  Tolerating that error would have been worse than
+# the failure: the run would go green with its records written into a zone no
+# VPC consults.
+- name: "clouddns: is there already a zone for this cluster?"
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", clouddns, DescribePrivateZones,
+           --RegionId, "{{ region }}", --PageSize, "100",
+           --profile, "{{ aliyun_profile }}"]
+  register: _cd_zones
+  changed_when: false
+  failed_when: (_cd_zones.rc != 0) or ('"asapiSuccess":true' not in _cd_zones.stdout)
+
+- name: "clouddns: adopt the existing zone id, if any"
+  ansible.builtin.set_fact:
+    # Fields are Id/Name (not ZoneId/ZoneName) and Name carries the trailing dot.
+    # Prefer a zone that is actually bound to a VPC: earlier runs left unbound
+    # duplicates of the same name behind, and picking one of those would write
+    # records nothing resolves against.
+    _cd_zone_matches: >-
+      {{ ((_cd_zones.stdout | from_json).Data | default([]))
+         | selectattr('Name', 'in', [cluster_name ~ '.' ~ base_domain,
+                                     cluster_name ~ '.' ~ base_domain ~ '.']) | list }}
+    _cd_existing_zone_id: >-
+      {{ ((_cd_zone_matches | selectattr('RegionAndVpcs', 'defined') | list)
+          or _cd_zone_matches)
+         | map(attribute='Id') | list | first | default('') }}
+
+- name: "clouddns: adopted {{ cluster_name }}.{{ base_domain }}"
+  ansible.builtin.debug:
+    msg: >-
+      existing zone {{ _cd_existing_zone_id }} — not creating a second one.
+      {{ (_cd_zone_matches | length) }} zone(s) carry this name{{
+        ' — the unbound ones are leftovers from runs that failed after creating
+        a zone; delete them (clouddns DeletePrivateZone --Id <id>) so the name
+        is unambiguous' if (_cd_zone_matches | length) > 1 else '' }}
+  when: _cd_existing_zone_id | length > 0
+  when: _cd_existing_zone_id | length > 0
+
 - name: "clouddns: create PrivateZone {{ cluster_name }}.{{ base_domain }}."
+  when: _cd_existing_zone_id | length == 0
   ansible.builtin.command:
     argv:
       - "{{ cloud_cli }}"
@@ -36,7 +78,9 @@
 
 - name: "clouddns: set forward_zone_id"
   ansible.builtin.set_fact:
-    forward_zone_id: "{{ (_cd_zone.stdout | from_json).Id }}"
+    forward_zone_id: >-
+      {{ _cd_existing_zone_id if (_cd_existing_zone_id | length > 0)
+         else (_cd_zone.stdout | from_json).Id }}
 
 # Bind the zone to every VPC that must resolve it: the cluster VPC (so the node
 # resolves api-int/*.apps to itself) and the operator VPC (so the Helper resolves
@@ -62,8 +106,14 @@
     argv: "{{ [cloud_cli, 'clouddns', 'BindZoneVpc', '--Id', forward_zone_id, '--RegionId', region]
               + _cd_vpc_argv + ['--profile', aliyun_profile] }}"
   register: _cd_bind
-  changed_when: true
-  failed_when: (_cd_bind.rc != 0) or ('"asapiSuccess":true' not in _cd_bind.stdout)
+  # Binding a VPC that is already bound is the normal state of a re-run, and the
+  # POP reports it as an error ("bind with duplicate vpc", InvalidFormatErr)
+  # rather than as a no-op.  The desired state is "bound", which it already is.
+  # Same shape as apsara_peer_vpc.yml's RouteEntryAlreadyExist.
+  changed_when: '"duplicate vpc" not in _cd_bind.stdout'
+  failed_when:
+    - (_cd_bind.rc != 0) or ('"asapiSuccess":true' not in _cd_bind.stdout)
+    - '"duplicate vpc" not in _cd_bind.stdout'
 
 # One A record per name, so the value can differ per name.  SNO pointed all
 # four at the single master because that node WAS the API, the ingress and the
