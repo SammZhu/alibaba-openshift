@@ -74,10 +74,15 @@
 #     an HA cluster in name only, and the reason 06 used to skip this task
 #     entirely rather than create records it knew were wrong.
 #   etcd-N        -> that master's own IP; the names are per-member by design.
-#   *.apps        -> ingress_vip, a placeholder that only has to satisfy the
-#     installer's DNS validation.  After install the ingress operator creates a
-#     real SLB through the CCM and this record is repointed at it (see the
-#     IngressVip parameter in cluster-stack.yaml).
+#   *.apps        -> the same load balancer, which carries :80/:443 listeners
+#     for the routers alongside the API's.  Not ingress_vip: that is a
+#     placeholder nothing listens on, and on platform=External the ingress
+#     operator does not create a load balancer of its own — the routers run
+#     hostNetwork on whichever masters they land on, so *.apps has to point at
+#     something health-checking those ports rather than at any fixed node.
+#     Observed 2026-09-07: the first HA install finished with ingress, console
+#     and authentication all degraded, canary requests timing out against the
+#     placeholder.
 - name: "clouddns: record set for {{ cluster_topology | default('ha') }}"
   ansible.builtin.set_fact:
     _cd_records: >-
@@ -90,7 +95,7 @@
          else
          [{'rr': 'api',      'ip': api_lb_endpoint},
           {'rr': 'api-int',  'ip': api_lb_endpoint},
-          {'rr': '*.apps',   'ip': ingress_vip | default(master_ip1)},
+          {'rr': '*.apps',   'ip': api_lb_endpoint},
           {'rr': 'etcd-0',   'ip': master_ip1},
           {'rr': 'etcd-1',   'ip': master_ip2},
           {'rr': 'etcd-2',   'ip': master_ip3}])

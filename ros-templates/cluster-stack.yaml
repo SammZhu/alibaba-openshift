@@ -450,6 +450,96 @@ Resources:
       ListenerPort: 22623
       ServerGroupId: !Ref McsServerGroup
 
+  # ── Ingress (*.apps) on the same load balancer ───────────────────────────
+  # The routers run with hostNetwork=true, so they listen on :80/:443 of the
+  # nodes they land on — two of the three masters, and not necessarily the same
+  # two after a reschedule.  *.apps therefore cannot point at a node: it has to
+  # point at something that tracks where the routers actually are, which is what
+  # these health-checked server groups do.
+  #
+  # SNO needs none of this — its single node is both master and router, so
+  # *.apps -> that node's IP is correct by construction.  That is why the gap
+  # only appears on HA: on 2026-09-07 the first HA install came up with ingress,
+  # console and authentication all degraded, because *.apps still pointed at the
+  # IngressVip placeholder that nothing listens on.
+  #
+  # Same balancer as the API on purpose: different ports, one address, one set
+  # of DNS records to keep straight.  Health checks are on the ingress ports
+  # themselves, so a master without a router is simply marked down.
+  IngressHttpServerGroup:
+    Type: ALIYUN::NLB::ServerGroup
+    Properties:
+      ServerGroupName: !Sub '${ClusterName}-ingress-80'
+      ServerGroupType: Instance
+      VpcId: !Ref VpcId
+      Protocol: TCP
+      Scheduler: Wrr
+      HealthCheckConfig:
+        HealthCheckEnabled: true
+        HealthCheckType: Tcp
+        HealthCheckConnectPort: 80
+        HealthCheckInterval: 10
+        HealthyThreshold: 2
+        UnhealthyThreshold: 2
+      Servers:
+        - ServerId: !Ref RendezvousInstance
+          ServerType: Ecs
+          Port: 80
+          Weight: 100
+        - ServerId: !Ref ControlPlaneInstance2
+          ServerType: Ecs
+          Port: 80
+          Weight: 100
+        - ServerId: !Ref ControlPlaneInstance3
+          ServerType: Ecs
+          Port: 80
+          Weight: 100
+
+  IngressHttpListener:
+    Type: ALIYUN::NLB::Listener
+    Properties:
+      LoadBalancerId: !Ref ApiNLB
+      ListenerProtocol: TCP
+      ListenerPort: 80
+      ServerGroupId: !Ref IngressHttpServerGroup
+
+  IngressHttpsServerGroup:
+    Type: ALIYUN::NLB::ServerGroup
+    Properties:
+      ServerGroupName: !Sub '${ClusterName}-ingress-443'
+      ServerGroupType: Instance
+      VpcId: !Ref VpcId
+      Protocol: TCP
+      Scheduler: Wrr
+      HealthCheckConfig:
+        HealthCheckEnabled: true
+        HealthCheckType: Tcp
+        HealthCheckConnectPort: 443
+        HealthCheckInterval: 10
+        HealthyThreshold: 2
+        UnhealthyThreshold: 2
+      Servers:
+        - ServerId: !Ref RendezvousInstance
+          ServerType: Ecs
+          Port: 443
+          Weight: 100
+        - ServerId: !Ref ControlPlaneInstance2
+          ServerType: Ecs
+          Port: 443
+          Weight: 100
+        - ServerId: !Ref ControlPlaneInstance3
+          ServerType: Ecs
+          Port: 443
+          Weight: 100
+
+  IngressHttpsListener:
+    Type: ALIYUN::NLB::Listener
+    Properties:
+      LoadBalancerId: !Ref ApiNLB
+      ListenerProtocol: TCP
+      ListenerPort: 443
+      ServerGroupId: !Ref IngressHttpsServerGroup
+
   # ── Private DNS ─────────────────────────────────────────────────────────
   PrivateZone:
     Type: ALIYUN::PVTZ::Zone
