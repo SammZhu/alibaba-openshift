@@ -66,6 +66,12 @@ hosts:
     # Apsara: RHCOS's DHCP client does not get a lease on this VPC, so pin a
     # STATIC address/gateway/DNS via nmstate (Alibaba Cloud Linux works via DHCP,
     # RHCOS does not).  IP is the ENI's fixed address; NIC name is ens3 on Apsara.
+    #
+    # Address, prefix and gateway all come from abi_master_net[i], because each
+    # master lives in its own vSwitch.  They used to be one address from the list
+    # plus private_subnet_cidr's prefix plus the single apsara_node_gateway — fine
+    # for SNO, and the reason masters 2 and 3 came up with an unusable next-hop
+    # the first time HA was attempted.
     networkConfig:
       interfaces:
         - name: {{ apsara_node_nic | default('eth0') }}
@@ -76,8 +82,8 @@ hosts:
             enabled: true
             dhcp: false
             address:
-              - ip: {{ abi_master_ips[loop.index0] }}
-                prefix-length: {{ (private_subnet_cidr | default('10.0.16.0/20')).split('/')[1] }}
+              - ip: {{ abi_master_net[loop.index0].ip }}
+                prefix-length: {{ abi_master_net[loop.index0].prefix }}
       dns-resolver:
         config:
           server:
@@ -87,7 +93,7 @@ hosts:
       routes:
         config:
           - destination: 0.0.0.0/0
-            next-hop-address: {{ apsara_node_gateway }}
+            next-hop-address: {{ abi_master_net[loop.index0].gw }}
             next-hop-interface: {{ apsara_node_nic | default('eth0') }}
             table-id: 254
     {% endif %}

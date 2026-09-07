@@ -261,7 +261,16 @@ apsara_node_nic:      ens3            # RHCOS NIC name on Apsara (Alibaba Linux 
 # gateway + DNS are AUTO-DISCOVERED from the mirror ECS (same VPC/subnet as the
 # nodes) during 06a — leave them unset unless you need to override.  Hard-coding
 # them is a trap: they differ per Apsara deployment and per mirror VPC.
+# Each master's subnet needs its own gateway: the static nmstate emits one
+# next-hop per host, and a next-hop outside that host's subnet is silently
+# dropped by NetworkManager — the node boots addressed but with no route, and
+# waits at the agent TUI. SNO never needs 2/3 (one master, one subnet).
+# This environment puts the gateway at .253 of the /20, not the .1 a
+# public-cloud VPC would use, so derive from that: 10.0.16.0/20 -> 10.0.31.253,
+# 10.0.32.0/20 -> 10.0.47.253, 10.0.48.0/20 -> 10.0.63.253.
 # apsara_node_gateway:  10.0.31.253
+# apsara_node_gateway2: 10.0.47.253    # for private_subnet_cidr2 (HA master-2)
+# apsara_node_gateway3: 10.0.63.253    # for private_subnet_cidr3 (HA master-3)
 # apsara_node_dns:
 #   - 10.x.x.x
 # agent_build_image:   registry.access.redhat.com/ubi9/ubi:latest   # container path base
