@@ -51,6 +51,109 @@ REMOVE_TYPES = {"DATASOURCE::ECS::Images"}
 # these dropped resources are cleaned up automatically below.
 DROP_TYPE_PREFIXES = ("ALIYUN::PVTZ::",)
 
+# ── NLB -> CLB rewrite ──────────────────────────────────────────────────────
+# Apsara's ROS has no NLB at all: `ros ListResourceTypes` on dyz7 returns 254
+# types, 11 of them ALIYUN::SLB::*, and zero NLB/ALB.  A CreateStack carrying
+# the HA template dies in validation, before any resource is made:
+#   StackValidationFailed: Unknown resource Type : ALIYUN::NLB::ServerGroup
+# SNO never hit this because cluster-stack-sno.yaml builds no load balancer at
+# all — the single master IS the API endpoint.
+#
+# The two products are not property-compatible, so this is a remap rather than
+# a rename.  Three differences carry real meaning:
+#   - NLB spreads over zones via ZoneMappings; CLB lives in ONE vSwitch.  Only
+#     the first mapping survives.  Harmless where Apsara offers a single zone
+#     (dyz7 has exactly one), and the reason this rewrite must stay Apsara-only:
+#     the public cloud keeps its multi-AZ NLB untouched.
+#   - An NLB ServerGroup is free-standing; a CLB VServerGroup belongs to a load
+#     balancer, so one has to be attached here.
+#   - NLB health-checks on the server group, CLB on the listener — so the check
+#     is carried across when the listener is converted.
+NLB_LB, NLB_SG, NLB_LSN = (
+    "ALIYUN::NLB::LoadBalancer", "ALIYUN::NLB::ServerGroup", "ALIYUN::NLB::Listener")
+
+
+def _hc_to_clb(hc):
+    """NLB HealthCheckConfig -> CLB Listener HealthCheck."""
+    if not isinstance(hc, dict):
+        return None
+    out = {"HealthCheckType": str(hc.get("HealthCheckType", "tcp")).lower()}
+    for src, dst in (("HealthCheckConnectPort", "Port"),
+                     ("HealthCheckInterval", "Interval"),
+                     ("HealthyThreshold", "HealthyThreshold"),
+                     ("UnhealthyThreshold", "UnhealthyThreshold")):
+        if src in hc:
+            out[dst] = hc[src]
+    return out
+
+
+def nlb_to_clb(res):
+    """Rewrite every NLB resource in `res` to its CLB equivalent, in place."""
+    lbs = [n for n, r in res.items() if r.get("Type") == NLB_LB]
+    if not lbs:
+        return []
+    if len(lbs) > 1:
+        # Attaching VServerGroups needs an unambiguous owner. Rather than guess,
+        # say so: a second NLB means this rewrite needs real ownership tracking.
+        sys.exit(f"apsara_ize: {len(lbs)} NLB load balancers ({', '.join(lbs)}); "
+                 "the CLB rewrite assumes exactly one. Extend it before adding another.")
+    lb_name = lbs[0]
+
+    lb = res[lb_name]
+    props = lb.get("Properties", {})
+    zm = props.get("ZoneMappings") or []
+    first = next((z for z in zm if isinstance(z, dict) and "VSwitchId" in z), None)
+    if first is None:
+        sys.exit(f"apsara_ize: {lb_name} has no usable ZoneMappings entry to take a VSwitchId from.")
+    lb["Type"] = "ALIYUN::SLB::LoadBalancer"
+    lb["Properties"] = {
+        "LoadBalancerName": props.get("LoadBalancerName"),
+        "AddressType": "intranet",          # CLB spells it lowercase
+        "VpcId": props.get("VpcId"),
+        "VSwitchId": first["VSwitchId"],
+        **({"Tags": props["Tags"]} if "Tags" in props else {}),
+    }
+
+    # Server groups: attach to the load balancer, keep the backends.
+    checks = {}
+    for name, r in res.items():
+        if r.get("Type") != NLB_SG:
+            continue
+        p = r.get("Properties", {})
+        checks[name] = _hc_to_clb(p.get("HealthCheckConfig"))
+        r["Type"] = "ALIYUN::SLB::VServerGroup"
+        r["Properties"] = {
+            "LoadBalancerId": {"Ref": lb_name},
+            "VServerGroupName": p.get("ServerGroupName"),
+            "BackendServers": [
+                {k: v for k, v in srv.items() if k in ("ServerId", "Port", "Weight")}
+                for srv in (p.get("Servers") or [])
+            ],
+        }
+
+    # Listeners: CLB needs the backend port and the health check the group lost.
+    for name, r in res.items():
+        if r.get("Type") != NLB_LSN:
+            continue
+        p = r.get("Properties", {})
+        sg = p.get("ServerGroupId")
+        sg_name = sg.get("Ref") if isinstance(sg, dict) else None
+        port = p.get("ListenerPort")
+        r["Type"] = "ALIYUN::SLB::Listener"
+        r["Properties"] = {
+            "LoadBalancerId": p.get("LoadBalancerId"),
+            "Protocol": str(p.get("ListenerProtocol", "tcp")).lower(),
+            "ListenerPort": port,
+            "BackendServerPort": port,      # NLB implies it; CLB requires it
+            "Bandwidth": -1,                # intranet CLB: unmetered
+            **({"VServerGroupId": sg} if sg else {}),
+            **({"HealthCheck": checks[sg_name]}
+               if sg_name and checks.get(sg_name) else {}),
+        }
+
+    return [lb_name]
+
+
 # Properties to strip per resource type (Apsara rejects them).
 PROP_STRIP = {"ALIYUN::PVTZ::Zone": ["Tags"]}
 
@@ -161,6 +264,38 @@ def main():
     for n in dropped_pvtz:
         del res[n]
     dropped = set(dropped_pvtz)
+
+    # 2c. NLB -> CLB.  Runs after the PVTZ drop on purpose: those records were
+    # the only other consumers of the load balancer's address, so by now the
+    # single remaining reference is the ApiLBEndpoint output, rewritten below.
+    converted_lbs = nlb_to_clb(res)
+
+    # CLB publishes an IP where NLB published a DNS name, so every GetAtt on a
+    # converted balancer has to follow.  Leaving it would validate fine and then
+    # hand ansible an empty string — the shape of failure this repo keeps
+    # meeting, so it is corrected here rather than trusted to a reader.
+    if converted_lbs:
+        # walk() descends only while fn returns None; returning the node itself
+        # counts as a replacement and stops the traversal at the root.
+        def fix_lb_attr(x):
+            if not isinstance(x, dict):
+                return None
+            ga = x.get("Fn::GetAtt")
+            if (isinstance(ga, list) and len(ga) == 2
+                    and ga[0] in converted_lbs and ga[1] == "DNSName"):
+                return {"Fn::GetAtt": [ga[0], "IpAddress"]}
+            # Descriptions travel with the value they describe: an output still
+            # calling itself a DNS name after the rewrite sends the next reader
+            # looking for a hostname that is not there.
+            desc = x.get("Description")
+            if isinstance(desc, str) and "NLB" in desc and "DNS name" in desc:
+                y = dict(x)
+                y["Description"] = desc.replace("NLB", "CLB").replace("DNS name", "IP")
+                return {k: (walk(v, fix_lb_attr) if k != "Description" else v)
+                        for k, v in y.items()}
+            return None
+        d = walk(d, fix_lb_attr)
+        res = d.get("Resources", {})
 
     # Clean DependsOn entries pointing at dropped resources.
     for r in res.values():
