@@ -265,6 +265,35 @@ def main():
         del res[n]
     dropped = set(dropped_pvtz)
 
+    # 2b-ii. Parameters carrying a substituted value need the substitution too.
+    # apply_value_subst matches on the property key, so it rewrites
+    # `SystemDiskCategory: cloud_essd` where it appears as a resource property —
+    # but a parameter block is {Type, Default, AllowedValues} under that name, so
+    # the constraint went untranslated.  ansible then passes the Apsara disk
+    # category and the template rejects the very value this script exists to
+    # substitute:
+    #   Parameter 'SystemDiskCategory' is invalid: "cloud_pperf" is not an
+    #   allowed value [cloud_essd, cloud_ssd, cloud_efficiency]
+    # SNO never hit it: cluster-stack-sno.yaml declares the parameter with no
+    # Default and no AllowedValues, so only the HA template carries the list.
+    params = d.setdefault("Parameters", {})   # re-fetch: walk() rebuilt d above
+    for pname, table in VALUE_SUBST.items():
+        spec = params.get(pname)
+        if not isinstance(spec, dict):
+            continue
+        if isinstance(spec.get("Default"), str) and spec["Default"] in table:
+            spec["Default"] = table[spec["Default"]]
+        av = spec.get("AllowedValues")
+        if isinstance(av, list):
+            seen, out = set(), []
+            for v in av:
+                v = table.get(v, v) if isinstance(v, str) else v
+                key = repr(v)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(v)
+            spec["AllowedValues"] = out
+
     # 2c. NLB -> CLB.  Runs after the PVTZ drop on purpose: those records were
     # the only other consumers of the load balancer's address, so by now the
     # single remaining reference is the ApiLBEndpoint output, rewritten below.
