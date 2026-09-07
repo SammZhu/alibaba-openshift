@@ -235,10 +235,13 @@
       - "{{ cloud_cli }}"
       - clouddns
       - UpdatePrivateZoneRecord
-      # --Id, not --RecordId: this POP names an object's own handle Id on every
-      # action (BindZoneVpc takes --Id for the zone).  Passing --RecordId got
-      # "Id is mandatory for this action" (MissingId) — the verb was right, the
-      # parameter was not.
+      # Both, and named this way.  --RecordId got "Id is mandatory for this
+      # action" (MissingId); dropping --ZoneId along with the rename then got
+      # "ZoneId is mandatory" (MissingZoneId).  This POP names an object's own
+      # handle Id — BindZoneVpc takes --Id for the zone — and still wants the
+      # parent ZoneId alongside it.
+      - --ZoneId
+      - "{{ forward_zone_id }}"
       - --Id
       - "{{ _cd_have[item.rr][0] }}"
       - --Name
