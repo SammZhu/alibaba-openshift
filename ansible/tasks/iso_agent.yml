@@ -232,6 +232,51 @@
                         | map('trim') | select() | list }}"
   when: (cloud_platform | default('public')) == 'apsara'
 
+# Each master sits in its own vSwitch, so each needs its own gateway and its own
+# prefix.  The template emitted apsara_node_gateway for every host — a value
+# whose own comment scopes it to private_subnet_cidr — and that subnet's prefix
+# for every address.  With one master the assumption is invisible; with three,
+# masters 2 and 3 get a next-hop that is not on their subnet, nmstate cannot
+# install the route, and they boot with an EMPTY gateway.  Observed 2026-09-07:
+# both stalled in the agent TUI on "no route to host" reaching the mirror, while
+# master-1 — which shares the mirror's subnet and therefore needs no gateway at
+# all — installed normally.
+#
+# Configured rather than derived: this environment's gateway is .253 of the /20,
+# not the .1 a public-cloud VPC would use, so there is no convention worth
+# guessing at. private_subnet_cidr2/3 are already configured the same way.
+- name: ABI — per-master network (ip, gateway, prefix) for the static nmstate
+  ansible.builtin.set_fact:
+    abi_master_net: >-
+      {{ [{'ip': master_ip1 | default(''),
+           'gw': apsara_node_gateway | default(''),
+           'prefix': (private_subnet_cidr | default('10.0.16.0/20')).split('/')[1]},
+          {'ip': master_ip2 | default(''),
+           'gw': apsara_node_gateway2 | default(''),
+           'prefix': (private_subnet_cidr2 | default('10.0.32.0/20')).split('/')[1]},
+          {'ip': master_ip3 | default(''),
+           'gw': apsara_node_gateway3 | default(''),
+           'prefix': (private_subnet_cidr3 | default('10.0.48.0/20')).split('/')[1]}]
+         | selectattr('ip', 'ne', '') | list }}
+  when: (cloud_platform | default('public')) == 'apsara'
+
+# Fail here rather than at boot.  A missing gateway renders as an empty
+# next-hop-address, which nmstate accepts and NetworkManager then drops — the
+# node comes up addressed, unreachable, and waiting at a TUI for a human.
+- name: ABI — every master needs a gateway for its own subnet
+  ansible.builtin.assert:
+    that: abi_master_net | selectattr('gw', 'eq', '') | list | length == 0
+    fail_msg: >-
+      No gateway for master(s)
+      {{ abi_master_net | selectattr('gw', 'eq', '') | map(attribute='ip') | join(', ') }}.
+      Each master's subnet needs its own: apsara_node_gateway for
+      private_subnet_cidr, apsara_node_gateway2 for private_subnet_cidr2,
+      apsara_node_gateway3 for private_subnet_cidr3. This environment puts the
+      gateway at .253 of the /20 (10.0.16.0/20 -> 10.0.31.253), so
+      10.0.32.0/20 -> 10.0.47.253 and 10.0.48.0/20 -> 10.0.63.253.
+    quiet: true
+  when: (cloud_platform | default('public')) == 'apsara'
+
 - name: ABI — render install-config.yaml + agent-config.yaml
   ansible.builtin.template:
     src: "../templates/{{ item }}.j2"

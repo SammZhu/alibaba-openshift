@@ -18,7 +18,56 @@
 # SNO only for now: api / api-int / *.apps / etcd-0 all resolve to the single
 # master IP (no NLB).  HA would point api/api-int at the NLB instead.
 
+# Adopt before creating.  AddPrivateZone always creates, so every re-run left a
+# SECOND zone with the same name — and since a VPC binds to only one zone per
+# name, the bind then failed with "duplicate vpc" while the new, unbound zone
+# sat there resolving nothing.  Tolerating that error would have been worse than
+# the failure: the run would go green with its records written into a zone no
+# VPC consults.
+- name: "clouddns: is there already a zone for this cluster?"
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", clouddns, DescribePrivateZones,
+           --RegionId, "{{ region }}", --PageSize, "100",
+           --profile, "{{ aliyun_profile }}"]
+  register: _cd_zones
+  changed_when: false
+  failed_when: (_cd_zones.rc != 0) or ('"asapiSuccess":true' not in _cd_zones.stdout)
+
+# Two tasks, not two keys in one: set_fact evaluates every key against the
+# scope as it was before the task, so a key cannot see a sibling defined
+# alongside it.
+#
+# Fields are Id/Name (not ZoneId/ZoneName) and Name carries the trailing dot.
+- name: "clouddns: find zones carrying this cluster's name"
+  ansible.builtin.set_fact:
+    _cd_zone_matches: >-
+      {{ ((_cd_zones.stdout | from_json).Data | default([]))
+         | selectattr('Name', 'in', [cluster_name ~ '.' ~ base_domain,
+                                     cluster_name ~ '.' ~ base_domain ~ '.']) | list }}
+
+# Prefer a zone that is actually bound to a VPC: earlier runs left unbound
+# duplicates of the same name behind, and adopting one of those would write
+# records that nothing resolves against.
+- name: "clouddns: adopt the existing zone id, if any"
+  ansible.builtin.set_fact:
+    _cd_existing_zone_id: >-
+      {{ ((_cd_zone_matches | selectattr('RegionAndVpcs', 'defined') | list)
+          or _cd_zone_matches)
+         | map(attribute='Id') | list | first | default('') }}
+
+- name: "clouddns: adopted {{ cluster_name }}.{{ base_domain }}"
+  ansible.builtin.debug:
+    msg: >-
+      existing zone {{ _cd_existing_zone_id }} — not creating a second one.
+      {{ (_cd_zone_matches | length) }} zone(s) carry this name{{
+        ' — the unbound ones are leftovers from runs that failed after creating
+        a zone; delete them (clouddns DeletePrivateZone --Id <id>) so the name
+        is unambiguous' if (_cd_zone_matches | length) > 1 else '' }}
+  when: _cd_existing_zone_id | length > 0
+  when: _cd_existing_zone_id | length > 0
+
 - name: "clouddns: create PrivateZone {{ cluster_name }}.{{ base_domain }}."
+  when: _cd_existing_zone_id | length == 0
   ansible.builtin.command:
     argv:
       - "{{ cloud_cli }}"
@@ -36,7 +85,9 @@
 
 - name: "clouddns: set forward_zone_id"
   ansible.builtin.set_fact:
-    forward_zone_id: "{{ (_cd_zone.stdout | from_json).Id }}"
+    forward_zone_id: >-
+      {{ _cd_existing_zone_id if (_cd_existing_zone_id | length > 0)
+         else (_cd_zone.stdout | from_json).Id }}
 
 # Bind the zone to every VPC that must resolve it: the cluster VPC (so the node
 # resolves api-int/*.apps to itself) and the operator VPC (so the Helper resolves
@@ -62,10 +113,93 @@
     argv: "{{ [cloud_cli, 'clouddns', 'BindZoneVpc', '--Id', forward_zone_id, '--RegionId', region]
               + _cd_vpc_argv + ['--profile', aliyun_profile] }}"
   register: _cd_bind
-  changed_when: true
-  failed_when: (_cd_bind.rc != 0) or ('"asapiSuccess":true' not in _cd_bind.stdout)
+  # Binding a VPC that is already bound is the normal state of a re-run, and the
+  # POP reports it as an error ("bind with duplicate vpc", InvalidFormatErr)
+  # rather than as a no-op.  The desired state is "bound", which it already is.
+  # Same shape as apsara_peer_vpc.yml's RouteEntryAlreadyExist.
+  changed_when: '"duplicate vpc" not in _cd_bind.stdout'
+  failed_when:
+    - (_cd_bind.rc != 0) or ('"asapiSuccess":true' not in _cd_bind.stdout)
+    - '"duplicate vpc" not in _cd_bind.stdout'
 
-- name: "clouddns: add A records (api / api-int / *.apps / etcd-0 -> {{ master_ip1 }})"
+# One A record per name, so the value can differ per name.  SNO pointed all
+# four at the single master because that node WAS the API, the ingress and the
+# only etcd member.  HA has three of each, so the mapping stops being uniform:
+#
+#   api / api-int -> the CLB built by cluster-stack (api_lb_endpoint).  Pointing
+#     these at a master would install a cluster whose API dies with master-1 —
+#     an HA cluster in name only, and the reason 06 used to skip this task
+#     entirely rather than create records it knew were wrong.
+#   etcd-N        -> that master's own IP; the names are per-member by design.
+#   *.apps        -> the same load balancer, which carries :80/:443 listeners
+#     for the routers alongside the API's.  Not ingress_vip: that is a
+#     placeholder nothing listens on, and on platform=External the ingress
+#     operator does not create a load balancer of its own — the routers run
+#     hostNetwork on whichever masters they land on, so *.apps has to point at
+#     something health-checking those ports rather than at any fixed node.
+#     Observed 2026-09-07: the first HA install finished with ingress, console
+#     and authentication all degraded, canary requests timing out against the
+#     placeholder.
+- name: "clouddns: record set for {{ cluster_topology | default('ha') }}"
+  ansible.builtin.set_fact:
+    _cd_records: >-
+      {{
+        ([{'rr': 'api',      'ip': master_ip1},
+          {'rr': 'api-int',  'ip': master_ip1},
+          {'rr': '*.apps',   'ip': master_ip1},
+          {'rr': 'etcd-0',   'ip': master_ip1}]
+         if (cluster_topology | default('ha')) == 'sno'
+         else
+         [{'rr': 'api',      'ip': api_lb_endpoint},
+          {'rr': 'api-int',  'ip': api_lb_endpoint},
+          {'rr': '*.apps',   'ip': api_lb_endpoint},
+          {'rr': 'etcd-0',   'ip': master_ip1},
+          {'rr': 'etcd-1',   'ip': master_ip2},
+          {'rr': 'etcd-2',   'ip': master_ip3}])
+      }}
+
+# Every value must be a real address before any record is written: a half-built
+# zone installs further than an empty one before failing, and fails somewhere
+# that does not name DNS.
+- name: "clouddns: every record needs an address"
+  ansible.builtin.assert:
+    that:
+      - _cd_records | rejectattr('ip', 'defined') | list | length == 0
+      - _cd_records | map(attribute='ip') | select('equalto', '') | list | length == 0
+    fail_msg: >-
+      Missing address for: {{ _cd_records | selectattr('ip', 'equalto', '')
+      | map(attribute='rr') | join(', ') }}. On HA api/api-int come from the
+      cluster-stack output ApiLBEndpoint (the CLB IP) and etcd-N from
+      master_ip1/2/3 — check 06 resolved the stack outputs before this ran.
+    quiet: true
+
+# Read before writing.  AddPrivateZoneRecord only ever adds: on a re-run it
+# fails on the duplicate or leaves a second record for the same name, and it can
+# never correct a value that has to change — which is what a rebuild does to
+# *.apps when the load balancer moves.  Describe first, then add what is missing
+# and update only what differs.
+- name: "clouddns: read the records that already exist"
+  ansible.builtin.command:
+    argv: ["{{ cloud_cli }}", clouddns, DescribePrivateZoneRecords,
+           --ZoneId, "{{ forward_zone_id }}", --RegionId, "{{ region }}",
+           --PageSize, "100", --profile, "{{ aliyun_profile }}"]
+  register: _cd_list
+  changed_when: false
+  failed_when: (_cd_list.rc != 0) or ('"asapiSuccess":true' not in _cd_list.stdout)
+
+# name -> {id, value}.  A record carries its value in RDatas[0].Value and its
+# handle in Id; both are needed to update one.
+- name: "clouddns: index existing records by name"
+  ansible.builtin.set_fact:
+    _cd_have: >-
+      {{ dict(_cd_data | map(attribute='Name') | list
+              | zip(_cd_data | map(attribute='Id') | list
+                    | zip(_cd_data | map(attribute='RDatas') | map('first')
+                          | map(attribute='Value') | list))) }}
+  vars:
+    _cd_data: "{{ (_cd_list.stdout | from_json).Data | default([]) }}"
+
+- name: "clouddns: add the records that do not exist yet"
   ansible.builtin.command:
     argv:
       - "{{ cloud_cli }}"
@@ -74,7 +208,7 @@
       - --ZoneId
       - "{{ forward_zone_id }}"
       - --Name
-      - "{{ item }}"
+      - "{{ item.rr }}"
       - --Type
       - A
       - --Ttl
@@ -82,23 +216,67 @@
       - --LbaStrategy
       - ALL_RR
       - --RDatas.1.Value
-      - "{{ master_ip1 }}"
+      - "{{ item.ip }}"
       - --LineIds
       - '["default"]'
       - --profile
       - "{{ aliyun_profile }}"
-  loop:
-    - api
-    - api-int
-    - "*.apps"
-    - etcd-0
-  register: _cd_recs
+  loop: "{{ _cd_records }}"
+  loop_control:
+    label: "add {{ item.rr }} -> {{ item.ip }}"
+  when: item.rr not in _cd_have
+  register: _cd_added
   changed_when: true
-  failed_when: (_cd_recs.rc != 0) or ('"asapiSuccess":true' not in _cd_recs.stdout)
+  failed_when: (_cd_added.rc != 0) or ('"asapiSuccess":true' not in _cd_added.stdout)
+
+- name: "clouddns: correct the records whose value changed"
+  ansible.builtin.command:
+    argv:
+      - "{{ cloud_cli }}"
+      - clouddns
+      - UpdatePrivateZoneRecord
+      # Both, and named this way.  --RecordId got "Id is mandatory for this
+      # action" (MissingId); dropping --ZoneId along with the rename then got
+      # "ZoneId is mandatory" (MissingZoneId).  This POP names an object's own
+      # handle Id — BindZoneVpc takes --Id for the zone — and still wants the
+      # parent ZoneId alongside it.
+      - --ZoneId
+      - "{{ forward_zone_id }}"
+      - --Id
+      - "{{ _cd_have[item.rr][0] }}"
+      - --Name
+      - "{{ item.rr }}"
+      - --Type
+      - A
+      - --Ttl
+      - "60"
+      - --LbaStrategy
+      - ALL_RR
+      - --RDatas.1.Value
+      - "{{ item.ip }}"
+      - --LineIds
+      - '["default"]'
+      - --profile
+      - "{{ aliyun_profile }}"
+  loop: "{{ _cd_records }}"
+  loop_control:
+    label: "update {{ item.rr }}: {{ _cd_have[item.rr][1] | default('?') }} -> {{ item.ip }}"
+  when:
+    - item.rr in _cd_have
+    - _cd_have[item.rr][1] != item.ip
+  register: _cd_updated
+  changed_when: true
+  failed_when: (_cd_updated.rc != 0) or ('"asapiSuccess":true' not in _cd_updated.stdout)
 
 - name: "clouddns: private zone ready"
   ansible.builtin.debug:
     msg: |
       ✓ CloudDns PrivateZone {{ cluster_name }}.{{ base_domain }} (id={{ forward_zone_id }})
         bound VPCs : {{ _cd_bind_vpcs | join(', ') }}
-        records    : api, api-int, *.apps, etcd-0 -> {{ master_ip1 }}
+        added      : {{ (_cd_added.results | default([]) | rejectattr('skipped', 'defined')
+                            | map(attribute='item.rr') | list | join(', ')) | default('(none)', true) }}
+        corrected  : {{ (_cd_updated.results | default([]) | rejectattr('skipped', 'defined')
+                            | map(attribute='item.rr') | list | join(', ')) | default('(none)', true) }}
+        now        : {{ _cd_records | map(attribute='rr')
+                            | zip(_cd_records | map(attribute='ip'))
+                            | map('join', ' -> ') | join(', ') }}

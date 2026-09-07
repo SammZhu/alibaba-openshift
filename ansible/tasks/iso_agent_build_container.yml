@@ -76,6 +76,13 @@
                            != (agent_iso_config_sha | default(''))) }}"
     _cb_cfg_changed: "{{ (_cb_cfg_sha.stdout | default('') | trim)
                          != (agent_iso_config_sha | default('')) }}"
+    # Each reason reports itself.  This one used to be gated on _cb_build_iso,
+    # which was the same thing while age was the only reason to rebuild — once
+    # the config fingerprint became a second reason, the age message started
+    # firing for it too and announcing "1.5h old, past the 20h reuse limit".
+    _cb_too_old: "{{ (_cb_iso_epoch | length) > 0
+                     and (((_cb_now_epoch | int) - (_cb_iso_epoch | int)) / 3600)
+                         >= (agent_iso_max_age_hours | default(20) | float) }}"
 
 - name: "container-build: the existing ISO is too old to reuse"
   ansible.builtin.debug:
@@ -87,7 +94,7 @@
   when:
     - (_cb_iso_epoch | length) > 0
     - not (agent_iso_force_rebuild | default(false) | bool)
-    - _cb_build_iso | bool
+    - _cb_too_old | bool
 
 - name: "container-build: the configs changed since that ISO was built"
   ansible.builtin.debug:
@@ -104,9 +111,11 @@
 - name: "container-build: reuse existing ISO on mirror (skip ~30 min rebuild)"
   ansible.builtin.debug:
     msg: >-
-      Existing {{ _m_iso }} on the mirror ECS, {{ _cb_iso_age_h }}h old —
-      skipping the container rebuild.  Set agent_iso_force_rebuild=true to
-      force a rebuild (needed if the install-config / agent-config changed).
+      Existing {{ _m_iso }} on the mirror ECS, {{ _cb_iso_age_h }}h old, built
+      from the same install-config / agent-config as now — skipping the
+      container rebuild.  A change to either rebuilds this on its own; set
+      agent_iso_force_rebuild=true only to rebuild an ISO nothing has
+      invalidated.
   when: not _cb_build_iso
 
 - name: "container-build: build + push the agent ISO"
