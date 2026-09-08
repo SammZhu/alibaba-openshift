@@ -384,6 +384,17 @@
       changed_when: "'unchanged' not in _idms_capa_apply.stdout"
       when: mirror_private_ip | default('') | length > 0
 
+    # An IDMS/ITMS apply is not in force until the MCO has rendered it into every
+    # node's registries.conf, and that rollout is serial. Everything below pulls
+    # images that exist ONLY on the mirror, so going ahead while a pool is still
+    # updating means those pulls escape to the public registry and fail there
+    # ("manifest unknown"). Skipped when both applies were no-ops, which is the
+    # normal case on a re-run.
+    - ansible.builtin.include_tasks: ../tasks/wait_for_mirror_config.yml
+      vars:
+        wmc_changed: "{{ _itms_apply.changed | default(false)
+                         or _idms_capa_apply.changed | default(false) }}"
+
     - name: Render CAPA deployment set from config/ kustomize (image override)
       # `oc kustomize` renders the provider repo's config/default SSOT (CRDs + RBAC
       # + controller + webhooks). The controller image is the only thing overridden:
@@ -508,6 +519,47 @@
       register: csi_relimg_env
       changed_when: "'updated' in csi_relimg_env.stdout"
 
+    # The CR below is inert without the operator: it is the operator that turns
+    # spec.disk.storageClasses into StorageClasses. Applying the CR while the
+    # operator is down SUCCEEDS, reconciles nothing, and the failure then surfaces
+    # five minutes later at the StorageClass guard — which reports a StorageClass
+    # problem and points at csi_storageclass_recreate, a remedy for drift that
+    # cannot help when nothing was ever created. That is what happened on
+    # 2026-09-08: the operator sat in ImagePullBackOff behind a registries.conf
+    # rollout that had not reached any node yet, and the guard blamed the classes.
+    # Fail here instead, where the cause is, and say what the operator is doing.
+    - name: "08 — the CSI operator must be running before its CR means anything"
+      block:
+        - name: "08 — wait for the CSI operator rollout"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n,
+                   alibaba-cloud-csi-operator-system, rollout, status,
+                   deployment/alibaba-cloud-csi-operator-controller-manager,
+                   "--timeout={{ csi_operator_rollout_timeout | default('300s') }}"]
+          changed_when: false
+      rescue:
+        - name: "08 — collect why the CSI operator is not Available"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n,
+                   alibaba-cloud-csi-operator-system, get, pods, -o, wide]
+          register: _csi_op_pods
+          changed_when: false
+          failed_when: false
+
+        - name: "08 — the CSI operator never became Available"
+          ansible.builtin.fail:
+            msg: |
+              The CSI operator deployment did not become Available, so nothing
+              downstream of it can work: the CR would apply cleanly, create no
+              StorageClasses, and provision no volumes.
+
+              {{ _csi_op_pods.stdout | default('(could not list pods)') }}
+
+              ImagePullBackOff on a {{ mirror_private_ip | default('mirror') }}
+              image usually means the IDMS/ITMS has not reached the nodes yet —
+              check `oc get mcp` for a pool still updating, and see
+              tasks/wait_for_mirror_config.yml.
+
     - name: Wait for AlibabaCloudCSIDriver CRD Established
       ansible.builtin.command:
         argv:
@@ -611,16 +663,26 @@
         - name: "08 — the disk StorageClasses do not match the CR"
           ansible.builtin.assert:
             that: false
+            # Two causes, two different remedies. Offering the drift remedy for
+            # a missing class sends the next person to delete classes that are
+            # not there and wait again on an operator that never reconciled —
+            # which is exactly the wrong move when the operator itself is down.
             fail_msg: >-
               {% if _sc_drift | length %}{{ _sc_drift | join(', ') }} still carry the
               previous disk category (parameters are immutable, so the operator
-              cannot update them in place).{% endif %}
+              cannot update them in place). Re-run with
+              csi_storageclass_recreate=true to delete them and nudge the
+              operator into recreating them.{% endif %}
               {% if _sc_missing | length %}{{ _sc_missing | join(', ') }} are declared
-              in the CR but absent from the cluster.{% endif %}
+              in the CR but absent from the cluster. The operator creates classes
+              only while reconciling the CR, so the reconcile never produced them
+              — look at the operator itself
+              (oc -n alibaba-cloud-csi-operator-system get pods, then its log)
+              before touching any class. csi_storageclass_recreate does NOT help
+              here: it deletes drifted classes, and there is nothing to
+              delete.{% endif %}
               The cluster would keep provisioning the old category, or nothing at
-              all, while every task here reports success.  Re-run with
-              csi_storageclass_recreate=true to delete the drifted classes and
-              nudge the operator into recreating them.
+              all, while every task here reports success.
           when: not (csi_storageclass_recreate | default(false) | bool)
 
         - name: "08 — delete the drifted StorageClasses (they hold no data)"

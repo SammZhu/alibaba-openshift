@@ -1,0 +1,102 @@
+---
+# Wait for the MCO to render an IDMS/ITMS change into every node's registries.conf.
+#
+# `oc apply` on an ImageDigestMirrorSet / ImageTagMirrorSet returns the moment the
+# object is stored — but the redirect it describes does not exist on any node yet.
+# The MCO renders it into /etc/containers/registries.conf and rolls that out one
+# node at a time (cordon + drain; a registries-only change needs no reboot, but it
+# is still a serial MachineConfigPool update).  Until a node carries the new
+# config, a DIGEST pull of an image we built locally and pushed only to the mirror
+# escapes to the public registry, where that digest does not exist:
+#
+#     reading manifest sha256:... in quay.io/samzhu/alibaba-cloud-csi-operator:
+#     manifest unknown            -> ErrImagePull -> ImagePullBackOff
+#
+# This only bites on the FIRST application.  Every re-run applies the same object
+# unchanged, triggers no rollout, and races nothing — which is why the gap stayed
+# invisible across months of re-runs against long-lived clusters and only surfaced
+# on the first fresh HA cluster (2026-09-08: the CSI operator sat in
+# ImagePullBackOff on a pool that was still 0/3 updated, and the failure did not
+# show up here at all — it surfaced six tasks later as 08's StorageClass guard,
+# because the operator that creates those classes had never started).
+#
+# The wait can be long, and the ITMS is why.  The MCO skips the drain for a
+# mirror that is digest-only (an IDMS), but a TAG mirror is not, so an ITMS apply
+# is calculated as a disruptive change and every node is cordoned and drained in
+# turn:
+#
+#     drain.go:301] /etc/containers/registries.conf: registry
+#     quay.io/samzhu/... has been added with mirror does not set
+#     pull-from-mirror=digest-only
+#     update.go:1064] Drain calculated for node disruption: true
+#
+# So budget for a serial drain of the whole control plane, and expect it to stall
+# on anything slow to drain: on 2026-09-08 a zombie openshift-marketplace catalog
+# pod, stuck in PodInitializing with a deletionTimestamp already set, held the
+# first master's drain for ~19 minutes (its replacement was Running elsewhere the
+# whole time).  It cleared on its own once the kubelet finished the teardown, and
+# the rollout then completed normally — so a pool sitting at 0/N is not yet a
+# reason to go force-delete anything.  The poll's verdict names the lagging pool
+# and its count
+# ("PENDING: master(0/3)"); Ansible's retry lines do not echo it, so run with -v
+# to watch it, or read it from the task result when the wait times out.  To find
+# what is holding a drain: `oc get pods -A --field-selector spec.nodeName=<node>`
+# lists what is left, and the machine-config-controller log names the pod it is
+# stuck evicting.
+#
+# Callers pass wmc_changed: skip the wait entirely when the apply was a no-op.
+#
+#   - ansible.builtin.include_tasks: ../tasks/wait_for_mirror_config.yml
+#     vars:
+#       wmc_changed: "{{ _itms_apply.changed | default(false)
+#                        or _idms_apply.changed | default(false) }}"
+
+- name: "MCO — wait for the mirror config to reach every node"
+  when: wmc_changed | default(false) | bool
+  block:
+
+    # One line per pool: "<name> <machineCount> <updatedMachineCount> <degraded>".
+    # awk collapses that to a single verdict so `until` stays a bare expression
+    # (a Jinja-wrapped until is a templated string, not a condition).
+    - name: "MCO — poll the MachineConfigPools until they carry the new config"
+      ansible.builtin.shell: |
+        set -o pipefail
+        oc --kubeconfig '{{ kubeconfig_file }}' get machineconfigpool \
+          -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.machineCount}{" "}{.status.updatedMachineCount}{" "}{.status.degradedMachineCount}{"\n"}{end}' \
+        | awk '
+            NF < 4                  { next }
+            $4 > 0                  { degraded = degraded " " $1 }
+            $2 > 0 && $3 != $2      { pending  = pending  " " $1 "(" $3 "/" $2 ")" }
+            END {
+              if (degraded != "") { print "DEGRADED:" degraded; exit 0 }
+              if (pending  != "") { print "PENDING:"  pending;  exit 0 }
+              print "CONVERGED"
+            }'
+      register: _wmc_poll
+      changed_when: false
+      retries: 120
+      delay: 20
+      until: _wmc_poll.stdout is search('CONVERGED') or _wmc_poll.stdout is search('DEGRADED')
+
+    # DEGRADED ends the loop successfully, so it needs its own check — otherwise a
+    # broken rollout reads as "waited, moved on" and every later task reports
+    # success against nodes that never got the mirror.
+    - name: "MCO — a MachineConfigPool went Degraded applying the mirror config"
+      ansible.builtin.fail:
+        msg: |
+          {{ _wmc_poll.stdout | trim }}
+
+          The MCO could not roll the IDMS/ITMS change out to these pools, so their
+          nodes still resolve mirrored images against the public registry. Every
+          image this phase builds locally will fail to pull there ("manifest
+          unknown"), and the failure will surface far from here.
+
+          Inspect with:
+            oc get mcp
+            oc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.machineconfiguration\.openshift\.io/reason}{"\n"}{end}'
+            oc logs -n openshift-machine-config-operator -l k8s-app=machine-config-daemon --tail=50
+      when: "'DEGRADED' in _wmc_poll.stdout"
+
+    - name: "MCO — mirror config applied on every node"
+      ansible.builtin.debug:
+        msg: "registries.conf converged on all MachineConfigPools ({{ _wmc_poll.stdout | trim }})"
