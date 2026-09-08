@@ -258,6 +258,13 @@
       register: _idms_apply
       changed_when: "'unchanged' not in _idms_apply.stdout"
 
+    # The digest resolved below, and the controller image deployed from it, live
+    # only on the mirror — so wait for the IDMS above to actually reach the nodes
+    # before pulling anything by digest. See tasks/wait_for_mirror_config.yml.
+    - ansible.builtin.include_tasks: ../tasks/wait_for_mirror_config.yml
+      vars:
+        wmc_changed: "{{ _idms_apply.changed | default(false) }}"
+
     - name: Resolve the CAPI core image digest from the mirror
       ansible.builtin.command:
         argv: [oc, image, info,
