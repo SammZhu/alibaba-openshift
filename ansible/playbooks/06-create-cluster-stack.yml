@@ -28,14 +28,26 @@
 
     - name: Sanity — mirror-stack outputs are in state.yml
       ansible.builtin.assert:
+        # NON-EMPTY, not merely defined.  Teardown leaves these keys in
+        # state.yml with empty values, and `is defined` is true for "" — so the
+        # run sailed past this guard and failed 30 seconds later inside ROS with
+        # "Vpc  not found in region cn-wulanchabu" and "Specified VSwitchId  is
+        # invalid", whose only clue that the value is EMPTY is the double space.
+        # Observed 2026-09-10 on the public-cloud host after its environment had
+        # been torn down.
         that:
-          - mirror_vpc_id is defined
-          - mirror_private_vsw_1 is defined
-          - mirror_private_vsw_2 is defined
-          - mirror_node_ram_role is defined
+          - (mirror_vpc_id | default('') | string | length) > 0
+          - (mirror_private_vsw_1 | default('') | string | length) > 0
+          - (mirror_private_vsw_2 | default('') | string | length) > 0
+          - (mirror_node_ram_role | default('') | string | length) > 0
         fail_msg: |
-          Required mirror-stack outputs missing from state.yml.
-          Run 03-create-mirror-stack.yml first.
+          Required mirror-stack outputs are missing or EMPTY in state.yml:
+          {% for k in ['mirror_vpc_id', 'mirror_private_vsw_1',
+                       'mirror_private_vsw_2', 'mirror_node_ram_role'] %}
+            {{ k }} = {{ lookup('vars', k, default='(undefined)') | default('(empty)', true) }}
+          {% endfor %}
+          Empty values usually mean the environment was torn down but state.yml
+          was kept. Run 03-create-mirror-stack.yml first.
 
     - name: Resolve ABI flag + the ImageId to pass this pass
       ansible.builtin.set_fact:
