@@ -277,6 +277,50 @@
     quiet: true
   when: (cloud_platform | default('public')) == 'apsara'
 
+# Split ingress workers get the same per-node treatment as the masters, and for
+# the same reason: worker-1 sits in zone1 and worker-2 in zone2, so they do not
+# share a gateway or a prefix.  Empty list in the default topology, where the
+# workers come from CAPA after install and never appear in agent-config.
+- name: ABI — per-worker network (ip, gateway, prefix) for the static nmstate
+  ansible.builtin.set_fact:
+    abi_worker_net: >-
+      {{ [{'ip': worker_ip1 | default(''),
+           'gw': apsara_node_gateway | default(''),
+           'prefix': (private_subnet_cidr | default('10.0.16.0/20')).split('/')[1]},
+          {'ip': worker_ip2 | default(''),
+           'gw': apsara_node_gateway2 | default(''),
+           'prefix': (private_subnet_cidr2 | default('10.0.32.0/20')).split('/')[1]}]
+         | selectattr('ip', 'ne', '') | list }}
+  when: (cloud_platform | default('public')) == 'apsara'
+
+# Same failure mode as the masters: an empty next-hop renders as a gateway
+# nmstate accepts and NetworkManager drops, and the node comes up addressed,
+# unreachable, and waiting at a TUI for a human.  Fail here instead.
+- name: ABI — every split worker needs a gateway for its own subnet
+  ansible.builtin.assert:
+    that: abi_worker_net | default([]) | selectattr('gw', 'eq', '') | list | length == 0
+    fail_msg: >-
+      No gateway for split worker(s)
+      {{ abi_worker_net | default([]) | selectattr('gw', 'eq', '') | map(attribute='ip') | join(', ') }}.
+      worker-1 uses apsara_node_gateway (private_subnet_cidr), worker-2 uses
+      apsara_node_gateway2 (private_subnet_cidr2) — the same two the masters in
+      those subnets use, so if the masters boot these are already set.
+    quiet: true
+  when: (cloud_platform | default('public')) == 'apsara'
+
+# The MAC list and the IP list are bound positionally in agent-config hosts[],
+# so a length mismatch silently pairs worker-1's MAC with worker-2's address.
+- name: ABI — split-worker MAC and IP lists must line up
+  ansible.builtin.assert:
+    that: (abi_worker_macs | default([]) | length) == (abi_worker_net | default([]) | length)
+    fail_msg: >-
+      {{ abi_worker_macs | default([]) | length }} split-worker MAC(s) but
+      {{ abi_worker_net | default([]) | length }} address(es). agent-config binds
+      them by position, so this would hand a worker the other one's IP. Check
+      06 resolved Worker1PrimaryNic/Worker2PrimaryNic and WorkerIp1/WorkerIp2.
+    quiet: true
+  when: (cloud_platform | default('public')) == 'apsara'
+
 - name: ABI — render install-config.yaml + agent-config.yaml
   ansible.builtin.template:
     src: "../templates/{{ item }}.j2"

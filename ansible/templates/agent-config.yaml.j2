@@ -50,28 +50,28 @@ additionalNTPSources:
   - ntp1.cloud.aliyuncs.com
   - 100.100.5.1
 {% endif %}
-# One host entry per master, count-driven by abi_master_macs (06 harvests it:
-# SNO=1, HA=3).  loop.index gives master-1, master-2, ...
-{% if (abi_master_macs | default([])) | length > 0 %}
-hosts:
-{% for mac in abi_master_macs %}
-  - hostname: {{ cluster_name }}-master-{{ loop.index }}
-    role: master
+{#- One entry per node.  Masters and split ingress workers differ only in role,
+    hostname and which net list they index — the nmstate block is identical, and
+    it encodes a rule that cost a failed HA attempt to learn (each node needs
+    ITS OWN gateway and prefix, not one shared pair).  Two copies of that means
+    the next fix lands in only one of them, so they share this macro. -#}
+{% macro host_entry(mac, role, index, net) %}  - hostname: {{ cluster_name }}-{{ role }}-{{ index }}
+    role: {{ role }}
     rootDeviceHints:
       deviceName: /dev/vda
     interfaces:
       - name: {{ apsara_node_nic | default('eth0') }}
         macAddress: "{{ mac | lower }}"
-    {% if (cloud_platform | default('public')) == 'apsara' %}
+{% if (cloud_platform | default('public')) == 'apsara' %}
     # Apsara: RHCOS's DHCP client does not get a lease on this VPC, so pin a
     # STATIC address/gateway/DNS via nmstate (Alibaba Cloud Linux works via DHCP,
     # RHCOS does not).  IP is the ENI's fixed address; NIC name is ens3 on Apsara.
     #
-    # Address, prefix and gateway all come from abi_master_net[i], because each
-    # master lives in its own vSwitch.  They used to be one address from the list
-    # plus private_subnet_cidr's prefix plus the single apsara_node_gateway — fine
-    # for SNO, and the reason masters 2 and 3 came up with an unusable next-hop
-    # the first time HA was attempted.
+    # Address, prefix and gateway all come from this node's own net entry,
+    # because each node lives in its own vSwitch.  They used to be one address
+    # from the list plus private_subnet_cidr's prefix plus the single
+    # apsara_node_gateway — fine for SNO, and the reason masters 2 and 3 came up
+    # with an unusable next-hop the first time HA was attempted.
     networkConfig:
       interfaces:
         - name: {{ apsara_node_nic | default('eth0') }}
@@ -82,21 +82,37 @@ hosts:
             enabled: true
             dhcp: false
             address:
-              - ip: {{ abi_master_net[loop.index0].ip }}
-                prefix-length: {{ abi_master_net[loop.index0].prefix }}
+              - ip: {{ net.ip }}
+                prefix-length: {{ net.prefix }}
       dns-resolver:
         config:
           server:
-      {% for ns in (apsara_node_dns | default([])) %}
+{% for ns in (apsara_node_dns | default([])) %}
             - {{ ns }}
-      {% endfor %}
+{% endfor %}
       routes:
         config:
           - destination: 0.0.0.0/0
-            next-hop-address: {{ abi_master_net[loop.index0].gw }}
+            next-hop-address: {{ net.gw }}
             next-hop-interface: {{ apsara_node_nic | default('eth0') }}
             table-id: 254
-    {% endif %}
+{% endif %}
+{%- endmacro %}
+# One host entry per master (abi_master_macs: SNO=1, HA=3), then one per split
+# ingress worker (abi_worker_macs: empty unless EnableSplitWorkers built them).
+# Both lists are bound POSITIONALLY to their net lists, which iso_agent.yml
+# asserts are the same length.
+{% if (abi_master_macs | default([])) | length > 0 %}
+hosts:
+{% for mac in abi_master_macs %}
+{{ host_entry(mac, 'master', loop.index,
+              (abi_master_net | default([]))[loop.index0]
+              if (cloud_platform | default('public')) == 'apsara' else {}) }}
+{% endfor %}
+{% for mac in (abi_worker_macs | default([])) %}
+{{ host_entry(mac, 'worker', loop.index,
+              (abi_worker_net | default([]))[loop.index0]
+              if (cloud_platform | default('public')) == 'apsara' else {}) }}
 {% endfor %}
 {% else %}
 # Fallback (no MACs harvested — e.g. ENI-first phase-1 not run): empty hosts[],
