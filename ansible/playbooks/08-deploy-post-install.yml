@@ -903,7 +903,7 @@
               If the workers were never installed, check that 06 harvested their
               MACs (abi_worker_macs in state.yml) and that agent-config carried a
               host entry per worker.
-          quiet: true
+            quiet: true
 
         - name: "08 — label the backend nodes"
           # A dedicated label, not node-role.kubernetes.io/infra: the fact being
