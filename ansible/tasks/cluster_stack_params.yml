@@ -64,12 +64,35 @@
         ParameterValue: "{{ _effective_control_plane_count | string }}"
       - ParameterKey: ControlPlaneInstanceType
         ParameterValue: "{{ control_plane_type }}"
+      # ComputeCount / EnableWorkers drive the ROS WorkerInstanceGroup.  With
+      # split_ingress_workers on, the workers come from WorkerInstance1/2
+      # instead, so BOTH are forced off here — otherwise ROS would build the
+      # InstanceGroup as well and the cluster would come up with twice the
+      # workers it was asked for.
+      #
+      # Note this deliberately diverges from install-config: that keeps
+      # _effective_compute_count (2), because the cluster really does have two
+      # workers and 07's expected_hosts must count them.  Only the ROS side
+      # goes to zero, because a different resource is creating them.
       - ParameterKey: ComputeCount
-        ParameterValue: "{{ _effective_compute_count | string }}"
+        ParameterValue: >-
+          {{ 0 if (split_ingress_workers | default(false) | bool)
+             else (_effective_compute_count | int) }}
       # Positive boolean that actually gates HasWorkers (ROS Fn::Not is broken).
       # True iff ComputeCount > 0 — normally false (workers come via CAPA phase 12).
       - ParameterKey: EnableWorkers
-        ParameterValue: "{{ 'true' if (_effective_compute_count | int > 0) else 'false' }}"
+        ParameterValue: >-
+          {{ 'false' if (split_ingress_workers | default(false) | bool)
+             else ('true' if (_effective_compute_count | int > 0) else 'false') }}
+      # Dedicated ingress workers: WorkerInstance1/2 become the *.apps backend
+      # instead of the masters, which is what stops an in-cluster caller on a
+      # master from being routed back to its own node by the CLB.
+      - ParameterKey: EnableSplitWorkers
+        ParameterValue: "{{ 'true' if (split_ingress_workers | default(false) | bool) else 'false' }}"
+      - ParameterKey: Worker1Ip
+        ParameterValue: "{{ worker1_ip | default('10.0.16.7') }}"
+      - ParameterKey: Worker2Ip
+        ParameterValue: "{{ worker2_ip | default('10.0.32.7') }}"
       - ParameterKey: ComputeInstanceType
         ParameterValue: "{{ compute_type }}"
       - ParameterKey: SystemDiskCategory
