@@ -87,6 +87,38 @@ def _hc_to_clb(hc):
     return out
 
 
+def _servers_to_backends(servers):
+    """NLB Servers -> CLB BackendServers, preserving an Fn::If wrapper.
+
+    Servers is USUALLY a plain list, but it may be an Fn::If choosing between
+    two backend sets — cluster-stack points ingress at dedicated workers when
+    EnableSplitWorkers is on and at the masters otherwise.  Handling only the
+    list case turned that dict into an iteration over its own keys and died
+    with "'str' object has no attribute 'items'".
+
+    That failure mode is the dangerous one in this repo: the public-cloud path
+    never runs this transform, so a template change can look completely fine
+    there while making every Apsara stack unbuildable (and the reverse has
+    already happened once, with !Condition short tags).  Map through the
+    condition so both branches convert.
+    """
+    if isinstance(servers, dict):
+        branches = servers.get("Fn::If")
+        if isinstance(branches, list) and len(branches) == 3:
+            cond, yes, no = branches
+            return {"Fn::If": [cond,
+                               _servers_to_backends(yes),
+                               _servers_to_backends(no)]}
+        # Some other intrinsic: pass it through untouched rather than mangle
+        # it.  A template ROS rejects loudly beats one that converts quietly
+        # wrong.
+        return servers
+    return [
+        {k: v for k, v in srv.items() if k in ("ServerId", "Port", "Weight")}
+        for srv in (servers or [])
+    ]
+
+
 def nlb_to_clb(res):
     """Rewrite every NLB resource in `res` to its CLB equivalent, in place."""
     lbs = [n for n, r in res.items() if r.get("Type") == NLB_LB]
@@ -125,10 +157,7 @@ def nlb_to_clb(res):
         r["Properties"] = {
             "LoadBalancerId": {"Ref": lb_name},
             "VServerGroupName": p.get("ServerGroupName"),
-            "BackendServers": [
-                {k: v for k, v in srv.items() if k in ("ServerId", "Port", "Weight")}
-                for srv in (p.get("Servers") or [])
-            ],
+            "BackendServers": _servers_to_backends(p.get("Servers")),
         }
 
     # Listeners: CLB needs the backend port and the health check the group lost.

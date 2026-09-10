@@ -136,6 +136,16 @@ Parameters:
       06 sets this from ComputeCount > 0.  Positive boolean because Aliyun ROS's
       Fn::Not is broken (see EnableZone3).  Note: this project normally runs
       compute_count=0 and adds workers via CAPA (phase 12), so this stays false.
+  EnableSplitWorkers:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: |
+      "true" -> create WorkerInstance1/2 as INDIVIDUAL instances (not the
+      WorkerInstanceGroup) and point the *.apps ingress ServerGroups at them
+      instead of the masters.  Default "false" keeps the masters as the ingress
+      backend, which is the public-cloud / CAPA topology and is unchanged.
+      Positive boolean because Aliyun ROS's Fn::Not is broken (see EnableZone3).
   ComputeInstanceType:
     Type: String
     Default: ecs.c7.xlarge
@@ -199,6 +209,21 @@ Parameters:
       Agent-based only.  Fixed private IP for master-3 in zone3
       (PrivateVSwitch3Id / PrivateSubnetCidr3, 10.0.48.0/20).
 
+  Worker1Ip:
+    Type: String
+    Default: 10.0.16.7
+    Description: |
+      Agent-based + EnableSplitWorkers only.  Fixed private IP for worker-1 in
+      zone1 (PrivateVSwitchId, 10.0.16.0/20).  Kept clear of the mirror ECS
+      (.4), the rendezvous node (.5) and IngressVip (.6).
+
+  Worker2Ip:
+    Type: String
+    Default: 10.0.32.7
+    Description: |
+      Agent-based + EnableSplitWorkers only.  Fixed private IP for worker-2 in
+      zone2 (PrivateVSwitch2Id, 10.0.32.0/20), alongside master-2 at .6.
+
   IngressVip:
     Type: String
     Default: 10.0.16.6
@@ -221,6 +246,7 @@ Conditions:
   # Positive boolean — Aliyun ROS's Fn::Not is broken (see EnableZone3/
   # EnableJumpHostSsh).  06 sets EnableWorkers from ComputeCount > 0.
   HasWorkers:   !Equals [!Ref EnableWorkers, "true"]
+  HasSplitWorkers: !Equals [!Ref EnableSplitWorkers, "true"]
   HasJumpHost:  !Equals [!Ref EnableJumpHostSsh, "true"]
   # Multi-AZ control plane (Agent-based): master-1/2/3 spread across zone1/2/3.
   # True only when a third zone/VSwitch is supplied — i.e. the ABI multi-AZ path.
@@ -481,19 +507,32 @@ Resources:
         HealthCheckInterval: 10
         HealthyThreshold: 2
         UnhealthyThreshold: 2
-      Servers:
-        - ServerId: !Ref RendezvousInstance
-          ServerType: Ecs
-          Port: 80
-          Weight: 100
-        - ServerId: !Ref ControlPlaneInstance2
-          ServerType: Ecs
-          Port: 80
-          Weight: 100
-        - ServerId: !Ref ControlPlaneInstance3
-          ServerType: Ecs
-          Port: 80
-          Weight: 100
+      # Ingress backends: the dedicated workers when EnableSplitWorkers is on,
+      # otherwise the three masters — the unchanged public-cloud / CAPA default.
+      # See the WorkerInstance1 comment above for why masters are the wrong
+      # backend set whenever something running on them calls *.apps.
+      Servers: !If
+        - HasSplitWorkers
+        - - ServerId: !Ref WorkerInstance1
+            ServerType: Ecs
+            Port: 80
+            Weight: 100
+          - ServerId: !Ref WorkerInstance2
+            ServerType: Ecs
+            Port: 80
+            Weight: 100
+        - - ServerId: !Ref RendezvousInstance
+            ServerType: Ecs
+            Port: 80
+            Weight: 100
+          - ServerId: !Ref ControlPlaneInstance2
+            ServerType: Ecs
+            Port: 80
+            Weight: 100
+          - ServerId: !Ref ControlPlaneInstance3
+            ServerType: Ecs
+            Port: 80
+            Weight: 100
 
   IngressHttpListener:
     Type: ALIYUN::NLB::Listener
@@ -518,19 +557,32 @@ Resources:
         HealthCheckInterval: 10
         HealthyThreshold: 2
         UnhealthyThreshold: 2
-      Servers:
-        - ServerId: !Ref RendezvousInstance
-          ServerType: Ecs
-          Port: 443
-          Weight: 100
-        - ServerId: !Ref ControlPlaneInstance2
-          ServerType: Ecs
-          Port: 443
-          Weight: 100
-        - ServerId: !Ref ControlPlaneInstance3
-          ServerType: Ecs
-          Port: 443
-          Weight: 100
+      # Ingress backends: the dedicated workers when EnableSplitWorkers is on,
+      # otherwise the three masters — the unchanged public-cloud / CAPA default.
+      # See the WorkerInstance1 comment above for why masters are the wrong
+      # backend set whenever something running on them calls *.apps.
+      Servers: !If
+        - HasSplitWorkers
+        - - ServerId: !Ref WorkerInstance1
+            ServerType: Ecs
+            Port: 443
+            Weight: 100
+          - ServerId: !Ref WorkerInstance2
+            ServerType: Ecs
+            Port: 443
+            Weight: 100
+        - - ServerId: !Ref RendezvousInstance
+            ServerType: Ecs
+            Port: 443
+            Weight: 100
+          - ServerId: !Ref ControlPlaneInstance2
+            ServerType: Ecs
+            Port: 443
+            Weight: 100
+          - ServerId: !Ref ControlPlaneInstance3
+            ServerType: Ecs
+            Port: 443
+            Weight: 100
 
   IngressHttpsListener:
     Type: ALIYUN::NLB::Listener
@@ -764,6 +816,80 @@ Resources:
         - Key: openshift-node-role
           Value: master
 
+  # ── Split workers (EnableSplitWorkers) ────────────────────────────────────
+  # Individual instances, NOT the WorkerInstanceGroup below, for exactly the
+  # reason the control plane is split: an NLB ServerGroup takes concrete
+  # ServerIds, and an InstanceGroup cannot be attached member-by-member.  Being
+  # attachable is the whole point — these are the *.apps ingress backend.
+  #
+  # Why that matters.  With ingress pinned to the three masters (the default
+  # below), every in-cluster client that resolves *.apps is itself a backend,
+  # and an Alibaba SLB backend cannot reach the SLB it belongs to.  Roughly one
+  # request in three is routed back to its own node and hangs there.  That is
+  # what made the authentication operator flap Available<->Degraded on the
+  # 2026-09-08 HA cluster: the console/oauth health probes run on masters, the
+  # routers run on masters, and the CLB round-robins across masters.  Moving
+  # ingress onto dedicated workers separates requester from backend, which is
+  # also why OpenShift puts routers on non-control-plane nodes as a matter of
+  # course.
+  #
+  # Placed in zone1 + zone2 (the two vSwitches that always exist) so ingress
+  # survives losing either AZ.
+  WorkerInstance1:
+    Type: ALIYUN::ECS::Instance
+    Condition: HasSplitWorkers
+    Properties:
+      InstanceName: !Sub '${ClusterName}-worker-1'
+      HostName: !If [IsAgentBased, !Sub '${ClusterName}-worker-1', !Ref 'ALIYUN::NoValue']
+      InstanceType: !Ref ComputeInstanceType
+      ImageId: !Ref ImageId
+      SecurityGroupId: !Ref WorkerSecurityGroup
+      VSwitchId: !Ref PrivateVSwitchId
+      SystemDiskCategory: !Ref SystemDiskCategory
+      SystemDiskSize: !Ref SystemDiskSize
+      DiskMappings: !If
+        - IsAgentBased
+        - !Ref 'ALIYUN::NoValue'
+        - - Category: !Ref SystemDiskCategory
+            Size: !Ref InstallDiskSize
+            DiskName: !Sub '${ClusterName}-worker-1-install'
+      AllocatePublicIP: false
+      PrivateIpAddress: !If [IsAgentBased, !Ref Worker1Ip, !Ref 'ALIYUN::NoValue']
+      RamRoleName: !Ref NodeRamRoleName
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+        - Key: openshift-node-role
+          Value: worker
+
+  WorkerInstance2:
+    Type: ALIYUN::ECS::Instance
+    Condition: HasSplitWorkers
+    DependsOn: WorkerInstance1
+    Properties:
+      InstanceName: !Sub '${ClusterName}-worker-2'
+      HostName: !If [IsAgentBased, !Sub '${ClusterName}-worker-2', !Ref 'ALIYUN::NoValue']
+      InstanceType: !Ref ComputeInstanceType
+      ImageId: !Ref ImageId
+      SecurityGroupId: !Ref WorkerSecurityGroup
+      VSwitchId: !Ref PrivateVSwitch2Id
+      SystemDiskCategory: !Ref SystemDiskCategory
+      SystemDiskSize: !Ref SystemDiskSize
+      DiskMappings: !If
+        - IsAgentBased
+        - !Ref 'ALIYUN::NoValue'
+        - - Category: !Ref SystemDiskCategory
+            Size: !Ref InstallDiskSize
+            DiskName: !Sub '${ClusterName}-worker-2-install'
+      AllocatePublicIP: false
+      PrivateIpAddress: !If [IsAgentBased, !Ref Worker2Ip, !Ref 'ALIYUN::NoValue']
+      RamRoleName: !Ref NodeRamRoleName
+      Tags:
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+        - Key: openshift-node-role
+          Value: worker
+
   WorkerInstanceGroup:
     Type: ALIYUN::ECS::InstanceGroup
     Condition: HasWorkers
@@ -828,6 +954,27 @@ Outputs:
   Master3PrimaryNic:
     Condition: IsAgentBased
     Value: !GetAtt ControlPlaneInstance3.PrimaryNetworkInterfaceId
+  # Same ENI-first harvest for the split workers: 06 resolves these to MACs and
+  # feeds agent-config hosts[] so the workers get real names (cluster-worker-N)
+  # instead of the MAC-derived fallback, exactly as the masters do.
+  Worker1PrimaryNic:
+    Condition: HasSplitWorkers
+    Value: !GetAtt WorkerInstance1.PrimaryNetworkInterfaceId
+  Worker2PrimaryNic:
+    Condition: HasSplitWorkers
+    Value: !GetAtt WorkerInstance2.PrimaryNetworkInterfaceId
+  WorkerInstance1Id:
+    Condition: HasSplitWorkers
+    Value: !Ref WorkerInstance1
+  WorkerInstance2Id:
+    Condition: HasSplitWorkers
+    Value: !Ref WorkerInstance2
+  WorkerIp1:
+    Condition: HasSplitWorkers
+    Value: !GetAtt WorkerInstance1.PrivateIp
+  WorkerIp2:
+    Condition: HasSplitWorkers
+    Value: !GetAtt WorkerInstance2.PrivateIp
   InstallConfig:
     Description: install-config.yaml (paste into Red Hat console or save for agent-create)
     Value: !Sub |
