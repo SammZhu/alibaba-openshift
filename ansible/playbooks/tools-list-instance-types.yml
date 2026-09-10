@@ -1,0 +1,87 @@
+---
+# Read-only: what instance types can this environment actually sell, and how big
+# are they.
+#
+# Picking a type here is guesswork without this.  The Apsara catalogue shares no
+# shapes with public cloud (no g7/c7 at all — the local family is g7x-k25-cNmM),
+# availability is per-zone, and a wrong pick fails deep inside CreateStack with
+# "Instance type ... is invalid now", which reads like the type does not exist
+# rather than "not sellable here today".  compute_type sat at the public-cloud
+# default ecs.g7.xlarge on the Apsara operator host for months precisely because
+# nothing had ever used it (compute_count=0; workers came from CAPA).
+#
+# Builds nothing: DescribeAvailableResource + DescribeInstanceTypes only.
+#
+#   ansible-playbook -i inventory.yml playbooks/tools-list-instance-types.yml
+#   ansible-playbook -i inventory.yml playbooks/tools-list-instance-types.yml -e min_cores=4
+
+- name: List sellable instance types per zone
+  hosts: local
+  gather_facts: false
+  vars:
+    min_cores: 0
+  tasks:
+    - ansible.builtin.include_tasks: ../tasks/load_state.yml
+
+    - name: Zones to query
+      ansible.builtin.set_fact:
+        _zones: "{{ [zone | default(''), zone2 | default(''), zone3 | default('')]
+                    | reject('equalto', '') | unique | list }}"
+
+    - name: Announce
+      ansible.builtin.debug:
+        msg: "region={{ region }} zones={{ _zones }} min_cores={{ min_cores }}"
+
+    - name: Query sellable types + their sizes
+      ansible.builtin.shell: |
+        set -o pipefail
+        python3 - <<'PYEOF'
+        import json, subprocess, sys
+
+        CLI = "{{ cloud_cli }}"
+        PROFILE = "{{ aliyun_profile }}"
+        REGION = "{{ region }}"
+        ZONES = {{ _zones | to_json }}
+        MIN = int("{{ min_cores }}")
+
+        def run(*args):
+            r = subprocess.run([CLI, *args, "--profile", PROFILE],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                sys.stderr.write(r.stderr)
+                sys.exit(r.returncode)
+            return json.loads(r.stdout)
+
+        # Sizes for every type the region knows about.
+        sizes = {}
+        d = run("ecs", "DescribeInstanceTypes", "--RegionId", REGION)
+        for t in d.get("InstanceTypes", {}).get("InstanceType", []):
+            sizes[t.get("InstanceTypeId")] = (
+                t.get("CpuCoreCount"), t.get("MemorySize"), t.get("NvmeSupport", "?"))
+
+        for z in ZONES:
+            d = run("ecs", "DescribeAvailableResource", "--RegionId", REGION,
+                    "--ZoneId", z, "--DestinationResource", "InstanceType",
+                    "--InstanceChargeType", "PostPaid")
+            rows = []
+            for az in d.get("AvailableZones", {}).get("AvailableZone", []):
+                for r in az.get("AvailableResources", {}).get("AvailableResource", []):
+                    for x in r.get("SupportedResources", {}).get("SupportedResource", []):
+                        tid, status = x.get("Value"), x.get("Status")
+                        cores, mem, nvme = sizes.get(tid, (None, None, "?"))
+                        if cores is None or cores < MIN:
+                            continue
+                        rows.append((cores, mem, tid, status, nvme))
+            print("")
+            print("== %s : %d sellable type(s) with cores >= %d ==" % (z, len(rows), MIN))
+            print("   %-34s %5s %8s %-10s %s" % ("type", "vCPU", "mem(GiB)", "status", "nvme"))
+            for cores, mem, tid, status, nvme in sorted(set(rows)):
+                print("   %-34s %5s %8s %-10s %s" % (tid, cores, mem, status, nvme))
+        PYEOF
+      register: _types
+      changed_when: false
+      environment: "{{ cloud_env | default({}) }}"
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "{{ _types.stdout_lines }}"

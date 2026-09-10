@@ -17,6 +17,14 @@ repos:
         files: ^ros-templates/.*\.yaml$
         pass_filenames: false
         args: [ros-templates/]
+      - id: ros-template-params
+        name: ROS templates — every parameter ansible sends must be declared by BOTH cluster templates
+        entry: scripts/lint-ros-params.py
+        language: system
+        # Either side can break the pairing: a new ParameterKey in the task, or
+        # a template that does not keep up.  Watch both.
+        files: ^(ros-templates/cluster-stack.*\.yaml|ansible/tasks/cluster_stack_params\.yml)$
+        pass_filenames: false
       - id: ansible-shell-quote-balance
         name: ansible.builtin.shell heredoc — single-quote balance
         entry: scripts/lint-ansible-quotes.py

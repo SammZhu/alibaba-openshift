@@ -28,14 +28,26 @@
 
     - name: Sanity — mirror-stack outputs are in state.yml
       ansible.builtin.assert:
+        # NON-EMPTY, not merely defined.  Teardown leaves these keys in
+        # state.yml with empty values, and `is defined` is true for "" — so the
+        # run sailed past this guard and failed 30 seconds later inside ROS with
+        # "Vpc  not found in region cn-wulanchabu" and "Specified VSwitchId  is
+        # invalid", whose only clue that the value is EMPTY is the double space.
+        # Observed 2026-09-10 on the public-cloud host after its environment had
+        # been torn down.
         that:
-          - mirror_vpc_id is defined
-          - mirror_private_vsw_1 is defined
-          - mirror_private_vsw_2 is defined
-          - mirror_node_ram_role is defined
+          - (mirror_vpc_id | default('') | string | length) > 0
+          - (mirror_private_vsw_1 | default('') | string | length) > 0
+          - (mirror_private_vsw_2 | default('') | string | length) > 0
+          - (mirror_node_ram_role | default('') | string | length) > 0
         fail_msg: |
-          Required mirror-stack outputs missing from state.yml.
-          Run 03-create-mirror-stack.yml first.
+          Required mirror-stack outputs are missing or EMPTY in state.yml:
+          {% for k in ['mirror_vpc_id', 'mirror_private_vsw_1',
+                       'mirror_private_vsw_2', 'mirror_node_ram_role'] %}
+            {{ k }} = {{ lookup('vars', k, default='(undefined)') | default('(empty)', true) }}
+          {% endfor %}
+          Empty values usually mean the environment was torn down but state.yml
+          was kept. Run 03-create-mirror-stack.yml first.
 
     - name: Resolve ABI flag + the ImageId to pass this pass
       ansible.builtin.set_fact:
@@ -274,6 +286,10 @@
         rendezvous_instance_id: "{{ (_cs_outputs | selectattr('OutputKey','equalto','RendezvousInstanceId') | list | first | default({})).OutputValue | default('') }}"
         master_ip2:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp2')           | first).OutputValue }}"
         master_ip3:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','MasterIp3')           | first).OutputValue }}"
+        # Split ingress workers: present only when EnableSplitWorkers was on, so
+        # these use the tolerant form and stay empty in the default topology.
+        worker_ip1:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','WorkerIp1')            | list | first | default({})).OutputValue | default('') }}"
+        worker_ip2:       "{{ (_cs_outputs | selectattr('OutputKey','equalto','WorkerIp2')            | list | first | default({})).OutputValue | default('') }}"
         # Tolerant lookups: on Apsara apsara_ize.py drops the PVTZ ReverseZone
         # resources AND their ReverseZoneId outputs, so these are absent there.
         reverse_zone_id1: "{{ (_cs_outputs | selectattr('OutputKey','equalto','ReverseZoneId1')      | list | first | default({})).OutputValue | default('') }}"
@@ -330,6 +346,66 @@
         master_mac1: "{{ abi_master_macs[0] | default('') }}"
         master_mac2: "{{ abi_master_macs[1] | default('') }}"
         master_mac3: "{{ abi_master_macs[2] | default('') }}"
+      when: _is_abi | bool
+
+    # Same ENI-first harvest for the split ingress workers.  Without a MAC the
+    # agent-config cannot bind a host entry, and a worker with no entry boots
+    # with the MAC-derived fallback name — the very thing the HostName work
+    # removed for masters.  Two instances, so the loop is a literal 1..2 rather
+    # than a count: WorkerInstance1/2 are individual resources by design (an NLB
+    # ServerGroup cannot attach an InstanceGroup member-by-member).
+    - name: ABI — collect worker primary-NIC ids from stack outputs
+      ansible.builtin.set_fact:
+        _abi_worker_nic_ids: >-
+          {{ _abi_worker_nic_ids | default([])
+             + [ (_cs_outputs | selectattr('OutputKey','equalto', 'Worker' ~ item ~ 'PrimaryNic')
+                  | map(attribute='OutputValue') | first) ] }}
+      loop: [1, 2]
+      when:
+        - _is_abi | bool
+        - split_ingress_workers | default(false) | bool
+
+    - name: ABI — resolve each worker primary NIC to its MAC
+      ansible.builtin.command:
+        argv:
+          - "{{ cloud_cli }}"
+          - ecs
+          - DescribeNetworkInterfaces
+          - --RegionId
+          - "{{ region }}"
+          - --NetworkInterfaceId.1
+          - "{{ item }}"
+          - --profile
+          - "{{ aliyun_profile }}"
+      register: _abi_worker_nic_desc
+      changed_when: false
+      loop: "{{ _abi_worker_nic_ids | default([]) }}"
+      when:
+        - _is_abi | bool
+        - split_ingress_workers | default(false) | bool
+
+    - name: ABI — set worker MAC list (ordered, parallel to worker_ip1/2)
+      ansible.builtin.set_fact:
+        abi_worker_macs: >-
+          {{ _abi_worker_nic_desc.results
+             | map(attribute='stdout') | map('from_json')
+             | map(attribute='NetworkInterfaceSets.NetworkInterfaceSet')
+             | map('first') | map(attribute='MacAddress') | list }}
+      when:
+        - _is_abi | bool
+        - split_ingress_workers | default(false) | bool
+
+    # Persisted unconditionally as [] in the default topology, so a state file
+    # written by a split run and then reused by a normal one cannot leave stale
+    # worker MACs behind for agent-config to bind hosts that do not exist.
+    - name: ABI — persist split-worker MACs + IPs to state
+      ansible.builtin.include_tasks: ../tasks/save_state.yml
+      vars:
+        new_state:
+          abi_worker_macs: "{{ abi_worker_macs | default([]) }}"
+          worker_ip1: "{{ worker_ip1 | default('') }}"
+          worker_ip2: "{{ worker_ip2 | default('') }}"
+          split_ingress_workers: "{{ split_ingress_workers | default(false) | bool }}"
       when: _is_abi | bool
 
     - name: ABI — persist MACs + placeholder image to state (consumed by 06a / 06b)

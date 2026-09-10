@@ -99,6 +99,32 @@ Parameters:
     Type: String
     Default: "false"
     AllowedValues: ["true", "false"]
+  # Declared but unused here.  The ansible layer sends ONE parameter list to both
+  # cluster templates (tasks/cluster_stack_params.yml has no per-topology
+  # filtering), so a parameter the HA template defines and this one does not is
+  # rejected outright: "The Parameter (EnableSplitWorkers) was not defined in
+  # template" — which fails every SNO deploy on both platforms, not just the one
+  # the parameter was added for.
+  #
+  # SNO has a single node and no ingress ServerGroup at all, so there is nothing
+  # for these to switch on.  They exist to keep the two templates' parameter sets
+  # identical.  scripts/lint-ros-params.py enforces that.
+  EnableSplitWorkers:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: |
+      Unused in SNO (no separate workers, no ingress ServerGroup). Present so
+      the shared parameter list applies to this template too.
+  Worker1Ip:
+    Type: String
+    Default: 10.0.16.7
+    Description: Unused in SNO. See EnableSplitWorkers.
+  Worker2Ip:
+    Type: String
+    Default: 10.0.32.7
+    Description: Unused in SNO. See EnableSplitWorkers.
+
   ComputeInstanceType:
     Type: String
     Default: ""

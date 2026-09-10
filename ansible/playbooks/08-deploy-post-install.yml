@@ -860,6 +860,110 @@
         - oadp_enabled | default(false) | bool
         - oadp_oss_access_key_id | default('') | length == 0
 
+    # ── Pin ingress to the nodes the load balancer actually forwards to ───────
+    # The *.apps CLB's backend set is fixed when the stack is created:
+    # WorkerInstance1/2 with EnableSplitWorkers, the three masters without.  The
+    # routers must run on exactly those nodes, because the CLB forwards 80/443
+    # there and nowhere else.
+    #
+    # Nothing enforces that by itself.  Once phase 12 adds CAPA workers the
+    # cluster has a third class of node — schedulable, labelled worker, and NOT
+    # in the ServerGroup — and a router that lands on one is invisible to the
+    # load balancer: the CLB keeps forwarding to the install-time workers, finds
+    # no router, and returns 503 for a share of requests.  Pin before phase 12
+    # runs, not after.
+    #
+    # Skipped entirely on the default topology, where the masters are the backend
+    # set and are also the only nodes: pinning to a label nothing carries would
+    # make every router unschedulable and take ingress down.
+    - name: "08 — pin ingress to the load balancer's backend nodes"
+      when: split_ingress_workers | default(false) | bool
+      block:
+        - name: "08 — find the install-time workers"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", get, nodes,
+                   -o, 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}']
+          register: _ing_nodes
+          changed_when: false
+
+        - name: "08 — the backend nodes must exist before anything is pinned to them"
+          vars:
+            _want: "{{ [cluster_name ~ '-worker-1', cluster_name ~ '-worker-2'] }}"
+            _have: "{{ _ing_nodes.stdout_lines | map('trim') | select | list }}"
+          ansible.builtin.assert:
+            that: _want | difference(_have) | length == 0
+            fail_msg: |
+              {{ _want | difference(_have) | join(', ') }} is not in the cluster,
+              but split_ingress_workers is on and the CLB forwards *.apps to it.
+
+              Pinning ingress to nodes that do not exist makes every router
+              unschedulable and takes ingress down, so this stops here instead.
+
+              Nodes present: {{ _have | join(', ') }}
+              If the workers were never installed, check that 06 harvested their
+              MACs (abi_worker_macs in state.yml) and that agent-config carried a
+              host entry per worker.
+            quiet: true
+
+        - name: "08 — label the backend nodes"
+          # A dedicated label, not node-role.kubernetes.io/infra: the fact being
+          # recorded is "the load balancer forwards to this node", which is not
+          # what the infra role means, and infra carries subscription and taint
+          # semantics this does not implement.
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", label, node,
+                   "{{ item }}", "openshift-ingress-backend=true", --overwrite]
+          loop: "{{ [cluster_name ~ '-worker-1', cluster_name ~ '-worker-2'] }}"
+          register: _ing_label
+          changed_when: "'labeled' in (_ing_label.stdout | default(''))"
+
+        - name: "08 — pin the default IngressController to them"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n,
+                   openshift-ingress-operator, patch, ingresscontroller, default,
+                   --type, merge, -p,
+                   '{"spec":{"nodePlacement":{"nodeSelector":{"matchLabels":{"openshift-ingress-backend":"true"}}}}}']
+          register: _ing_patch
+          changed_when: "'no change' not in (_ing_patch.stdout | default(''))"
+
+        - name: "08 — wait for the routers to move"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, openshift-ingress,
+                   rollout, status, deploy/router-default, --timeout=300s]
+          changed_when: false
+
+        # The patch reporting success proves only that the object was accepted.
+        # Confirm the routers are actually ON the backend nodes -- otherwise this
+        # whole block is another "green but did nothing", and the symptom would be
+        # intermittent 503s that look like a load balancer fault.
+        - name: "08 — read back where the routers are running"
+          ansible.builtin.command:
+            argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", -n, openshift-ingress,
+                   get, pods, -l, "ingresscontroller.operator.openshift.io/deployment-ingresscontroller=default",
+                   -o, 'jsonpath={range .items[*]}{.spec.nodeName}{"\n"}{end}']
+          register: _ing_where
+          changed_when: false
+
+        - name: "08 — every router must be on a backend node"
+          vars:
+            _want: "{{ [cluster_name ~ '-worker-1', cluster_name ~ '-worker-2'] }}"
+            _on: "{{ _ing_where.stdout_lines | map('trim') | select | list | unique }}"
+          ansible.builtin.assert:
+            that:
+              - _on | length > 0
+              - _on | difference(_want) | length == 0
+            fail_msg: >-
+              Routers are running on {{ _on | join(', ') | default('(none)', true) }},
+              which is not the load balancer's backend set
+              ({{ _want | join(', ') }}). The CLB forwards *.apps only to the
+              backend nodes, so requests reaching a router elsewhere never
+              arrive and requests to a backend without a router return 503.
+            quiet: true
+
+        - name: "08 — ingress pinned"
+          ansible.builtin.debug:
+            msg: "routers on {{ _ing_where.stdout_lines | map('trim') | select | list | unique | join(', ') }} (the CLB backend set)"
+
     - name: Phase 08 done
       ansible.builtin.debug:
         msg: |
