@@ -312,12 +312,35 @@
 # so a length mismatch silently pairs worker-1's MAC with worker-2's address.
 - name: ABI — split-worker MAC and IP lists must line up
   ansible.builtin.assert:
-    that: (abi_worker_macs | default([]) | length) == (abi_worker_net | default([]) | length)
-    fail_msg: >-
-      {{ abi_worker_macs | default([]) | length }} split-worker MAC(s) but
-      {{ abi_worker_net | default([]) | length }} address(es). agent-config binds
-      them by position, so this would hand a worker the other one's IP. Check
-      06 resolved Worker1PrimaryNic/Worker2PrimaryNic and WorkerIp1/WorkerIp2.
+    # Equality alone passes vacuously at 0 == 0, which is exactly the case worth
+    # catching: harvest both lists empty and agent-config renders the three
+    # masters and no workers, the ISO is built happily, and the two worker nodes
+    # boot unbound -- MAC-derived names and, on Apsara, no address at all,
+    # because RHCOS gets no DHCP lease on this VPC. That surfaces as two nodes
+    # stuck in the agent TUI an hour later. Require the count split mode
+    # promises, not merely that the two lists agree with each other.
+    that:
+      - (abi_worker_macs | default([]) | length) == (abi_worker_net | default([]) | length)
+      - not (split_ingress_workers | default(false) | bool)
+        or (abi_worker_macs | default([]) | length) == 2
+    fail_msg: |
+      split_ingress_workers is on, so agent-config needs a MAC and an address
+      for each of the two workers. It has
+      {{ abi_worker_macs | default([]) | length }} MAC(s) and
+      {{ abi_worker_net | default([]) | length }} address(es).
+
+      {% if (abi_worker_macs | default([]) | length) == 0 and (abi_worker_net | default([]) | length) == 0 %}
+      Both are empty: 06 harvested nothing. The ISO would be built with the
+      three masters and no workers, and the two worker nodes would boot with
+      MAC-derived names and no address at all (RHCOS gets no DHCP lease on this
+      VPC), ending up stuck in the agent TUI.
+      {% else %}
+      agent-config binds the two lists BY POSITION, so a mismatch hands a
+      worker the other one's address.
+      {% endif %}
+
+      Check that 06 resolved Worker1PrimaryNic / Worker2PrimaryNic to MACs and
+      that WorkerIp1 / WorkerIp2 came back from the stack outputs.
     quiet: true
   when: (cloud_platform | default('public')) == 'apsara'
 
