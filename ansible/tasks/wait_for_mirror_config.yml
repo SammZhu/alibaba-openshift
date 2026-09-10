@@ -58,6 +58,51 @@
     # One line per pool: "<name> <machineCount> <updatedMachineCount> <degraded>".
     # awk collapses that to a single verdict so `until` stays a bare expression
     # (a Jinja-wrapped until is a templated string, not a condition).
+    # Phase 1 — wait for the MCO to PICK THE CHANGE UP, before asking whether it
+    # finished.
+    #
+    # `oc apply` returns as soon as the object is stored; the MCO then has to
+    # notice it, render a new MachineConfig, and start rolling.  Poll for
+    # "finished" inside that window and every pool truthfully reports itself
+    # fully updated -- on the OLD config -- so the wait returns CONVERGED
+    # immediately and guards nothing.  The failure is silent and lands
+    # downstream as the ImagePullBackOff this whole file exists to prevent.
+    #
+    # Timing out here is a legitimate outcome, not an error: a change can render
+    # to an identical MachineConfig, in which case there is no rollout to wait
+    # for.  Either way phase 2 then checks the real state.
+    - name: "MCO — wait for the MachineConfigPools to pick the change up"
+      ansible.builtin.shell: |
+        set -o pipefail
+        oc --kubeconfig '{{ kubeconfig_file }}' get machineconfigpool \
+          -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.machineCount}{" "}{.status.updatedMachineCount}{" "}{.status.degradedMachineCount}{"\n"}{end}' \
+        | awk '
+            NF < 4             { next }
+            $4 > 0             { degraded = degraded " " $1 }
+            $2 > 0 && $3 != $2 { rolling  = rolling  " " $1 "(" $3 "/" $2 ")" }
+            END {
+              if (degraded != "") { print "DEGRADED:" degraded; exit 0 }
+              if (rolling  != "") { print "ROLLING:"  rolling;  exit 0 }
+              print "NOT-STARTED"
+            }'
+      register: _wmc_start
+      changed_when: false
+      failed_when: false
+      retries: "{{ mco_pickup_retries | default(8) }}"
+      delay: 15
+      until: _wmc_start.stdout is search('ROLLING') or _wmc_start.stdout is search('DEGRADED')
+
+    - name: "MCO — what the pools are doing"
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'rollout started: ' ~ (_wmc_start.stdout | trim)
+             if (_wmc_start.stdout | default('') is search('ROLLING|DEGRADED'))
+             else 'no rollout observed in ' ~ ((mco_pickup_retries | default(8) | int) * 15) ~ 's — either it
+                  finished faster than the poll, or the change rendered to an identical
+                  MachineConfig. Phase 2 checks the real state either way.' }}
+
+    # Phase 2 — now that the rollout is under way (or provably absent), wait for
+    # it to finish.
     - name: "MCO — poll the MachineConfigPools until they carry the new config"
       ansible.builtin.shell: |
         set -o pipefail
