@@ -84,3 +84,14 @@ jobs:
 
       - name: Run ansible-lint
         run: ansible-lint -q ansible/
+
+      - name: ROS template parameter contract
+        run: python3 scripts/lint-ros-params.py
+
+      - name: Apsara template transform smoke
+        run: |
+          set -euo pipefail
+          for t in ros-templates/*.yaml; do
+            echo "== $t"
+            python3 scripts/apsara/apsara_ize.py "$t" "$RUNNER_TEMP/$(basename "$t").apsara"
+          done
