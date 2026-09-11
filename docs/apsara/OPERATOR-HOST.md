@@ -253,6 +253,61 @@ curl -sI --max-time 10 https://quay.io              | head -1   # direct path
 Then, and only then, `scripts/apsara/probe-endpoints.sh <domain-suffix>` has
 somewhere to run, and the environment survey can start.
 
+## Writing this environment's `all.yml`
+
+Start from a **working** environment's `all.yml`, not from `all.yml.example`.
+The example is a generic template; a file that has carried a cluster to green
+has months of iteration in its structure and comments — which keys a private
+cloud actually needs, and what constrains each value.
+
+Copying it wholesale is the trap. A half-updated `all.yml` is worse than a blank
+one: it looks complete while still pointing at the other environment's stacks,
+VPC and mirror, so a playbook runs the new environment's credentials against the
+old environment's resources.
+
+```sh
+scripts/apsara/adapt-all-yml.sh <reference all.yml> [output]
+```
+
+Run it on the target Helper. It reads the target's identity from the metadata
+service, rewrites what it can determine, blanks what it cannot to
+`CHANGEME-<key>`, and — the point of the exercise — **refuses to emit anything
+if a single reference-environment value survives**.
+
+Endpoints are derived by taking the shapes the reference environment actually
+uses and swapping the environment name, then checking DNS. That beats guessing
+naming conventions, because there are none to guess: one Apsara deployment
+carries `ros.cloud.X`, `ecs-internal.cloud.X`, `ram-vpc.cloud.X`,
+`dns-control.pop.cloud.X` and `oss-<region>-a.cloud.X` side by side. On ste2 all
+six of dyz7's shapes resolved on the first try.
+
+What it cannot fill divides in two:
+
+| Needs a human | Needs credentials first |
+| --- | --- |
+| `AK` / `SK`, `ORG_ID` / `RG_ID` | `zone` / `zone2` / `zone3` (`DescribeZones`) |
+| `oss_bucket` (pre-created, same account) | the four instance types |
+| `mirror_init_password` | `system_disk_category`, `apsara_image_id` |
+
+So it is two passes: run it, fill the left column, then resolve the right one
+with `playbooks/tools-list-instance-types.yml` and `DescribeZones`.
+
+### What it structurally cannot find
+
+The script substitutes values for keys the reference file already has. A
+capability the **target** has and the reference does not will not appear, because
+nothing tells it the key exists.
+
+That is not hypothetical. dyz7 has no NAS, so its `all.yml` carries no
+`ENDPOINT_NAS` line at all — and ste2's candidate came out without one, even
+though ste2's NAS is live. Its endpoint is
+`nas-pub.<region>.cloud.<env>`, a shape no other service on that deployment
+uses (`ecs-pub`, `vpc-pub`, `ros-pub`, `slb-pub` all fail DNS), so neither the
+shape-reuse pass nor a naming guess would have reached it.
+
+After running the script, check what the target environment actually offers
+against what the reference did, and add the difference by hand.
+
 ## Two Apsara quirks worth knowing before you touch anything
 
 **`--DryRun` is not honoured.** The asapi gateway really performs the operation.
