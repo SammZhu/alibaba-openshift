@@ -292,6 +292,22 @@ What it cannot fill divides in two:
 So it is two passes: run it, fill the left column, then resolve the right one
 with `playbooks/tools-list-instance-types.yml` and `DescribeZones`.
 
+### What it structurally cannot find
+
+The script substitutes values for keys the reference file already has. A
+capability the **target** has and the reference does not will not appear, because
+nothing tells it the key exists.
+
+That is not hypothetical. dyz7 has no NAS, so its `all.yml` carries no
+`ENDPOINT_NAS` line at all — and ste2's candidate came out without one, even
+though ste2's NAS is live. Its endpoint is
+`nas-pub.<region>.cloud.<env>`, a shape no other service on that deployment
+uses (`ecs-pub`, `vpc-pub`, `ros-pub`, `slb-pub` all fail DNS), so neither the
+shape-reuse pass nor a naming guess would have reached it.
+
+After running the script, check what the target environment actually offers
+against what the reference did, and add the difference by hand.
+
 ## Two Apsara quirks worth knowing before you touch anything
 
 **`--DryRun` is not honoured.** The asapi gateway really performs the operation.
