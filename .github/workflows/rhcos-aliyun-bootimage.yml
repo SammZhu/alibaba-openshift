@@ -17,7 +17,9 @@ jobs:
       # flaky (OpenSSL SSL_ERROR_SYSCALL).  fetch-depth:1 minimises the clone, and
       # the provenance write-back below retries.  A rare checkout SSL drop just
       # needs a workflow re-run.
-      - uses: actions/checkout@v4
+      # checkout@v4 runs on Node 20, which GitHub already force-upgrades to
+      # Node 24 with a deprecation warning on every run; v5 targets Node 24.
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
       - name: Bake every RHCOS from the floor up (skip already baked)
