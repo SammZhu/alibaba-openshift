@@ -308,6 +308,39 @@ shape-reuse pass nor a naming guess would have reached it.
 After running the script, check what the target environment actually offers
 against what the reference did, and add the difference by hand.
 
+## Driving the phases with `sudo`
+
+The playbooks install `oc` and `openshift-install` into `/usr/local/bin` and
+then invoke them by name — about 114 `argv: [oc, ...]` call sites across the
+phases. That works when ansible runs as root with a normal login PATH.
+
+`sudo ansible-playbook` is not that. RHEL-family sudoers ships
+
+```
+Defaults secure_path = /sbin:/bin:/usr/sbin:/usr/bin
+```
+
+with no `/usr/local/bin`, so every one of those calls fails to resolve. The
+first symptom is 00a reporting `oc MISSING` while `oc` sits exactly where 00a
+installed it — a check that is now fixed, but the 114 call sites behind it are
+not, and they fail later and less clearly.
+
+Pick one, once:
+
+```sh
+# make sudo's PATH match what the phases expect
+sudo sed -i 's|^\(Defaults[[:space:]]\+secure_path.*\)$|\1:/usr/local/bin|' /etc/sudoers
+sudo visudo -c
+```
+
+```sh
+# or use a root login shell, which already has the wider PATH
+sudo -i
+```
+
+This comes up when the repos live outside root's home (see below), because then
+reaching for `sudo` is the natural thing to do.
+
 ## If the checkout is not owned by the user running ansible
 
 Keeping the repos somewhere other than root's home — a shared path, an operator

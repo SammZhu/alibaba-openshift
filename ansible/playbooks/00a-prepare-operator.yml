@@ -239,7 +239,22 @@
         mode: "0755"
 
     # ── 8. verify + summarise ────────────────────────────────────────────────
+    # PATH is explicit because this task checks for tools THIS playbook installed
+    # into /usr/local/bin, and it must not depend on the caller's PATH happening
+    # to include it. `sudo ansible-playbook` does not: RHEL's sudoers ships
+    # `Defaults secure_path = /sbin:/bin:/usr/sbin:/usr/bin`, so oc and
+    # openshift-install come back MISSING while sitting exactly where step 4 put
+    # them. Running as root directly (`sudo -i`, a root login) has the wider PATH
+    # and never showed this.
+    #
+    # Only the CHECK is fixed here. The ~114 `argv: [oc, ...]` call sites across
+    # the phases still resolve through PATH, and rightly so -- they assume a root
+    # environment that can find what 00a installed. If you drive the phases with
+    # `sudo`, put /usr/local/bin in secure_path once rather than teaching every
+    # playbook about it; see docs/apsara/OPERATOR-HOST.md.
     - name: "operator: verify the toolchain"
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
       ansible.builtin.shell: |
         for t in git curl jq tar skopeo podman oc{{ '' if (operator_oc_only | default(false) | bool) else ' openshift-install' }}{{ ' go' if _op_apsara else '' }}; do
           if command -v "$t" >/dev/null 2>&1; then
