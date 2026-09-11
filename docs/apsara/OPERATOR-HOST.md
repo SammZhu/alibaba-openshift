@@ -20,16 +20,35 @@ be discovered until this box exists.
 
 ## Sizing
 
-| | Documented minimum | Observed on a completed dyz7 environment |
+| | Documented minimum | Measured on the completed dyz7 Helper |
 | --- | --- | --- |
-| vCPU | — | 8 |
-| RAM | — | 16 GB (15 GiB usable) |
-| Disk | ~60 GB **free** for the mirror build | **200 GB total, 93 GB used** after a full run; `~/.oc-mirror` alone was 22 GB |
-| OS | dnf-based (00a uses `ansible.builtin.package`) | RHEL 9.8 |
+| Instance type | — | **`ecs.s7-k-c1m2.2xlarge`** (8 vCPU / 16 GB) |
+| Disk | ~60 GB **free** for the mirror build | **200 GB system disk, 93 GB used** after a full run; `~/.oc-mirror` alone 22 GB |
+| Image | dnf-based (00a uses `ansible.builtin.package`) | `redhat_9_4_x86_64_20G_alibase_20240711.vhd` |
 
-The 60 GB figure is what `mirror-build.yml` needs to complete. It is not what a
-worked-through environment ends up consuming — plan for the 200 GB that is known
-to be enough rather than the 60 GB that is known to be the floor.
+Three things that table does not say on its own.
+
+**The system disk must be set at creation.** That image ships a 20 GB disk — the
+`20G` in its name. dyz7's Helper runs on 200 GB because it was expanded when the
+instance was created. Accept the default and the mirror build dies partway
+through with no space.
+
+**60 GB is the floor, not the plan.** It is what `mirror-build.yml` needs to
+*complete*. A worked-through environment consumed 93 GB. Size for the 200 GB
+that is known to be enough.
+
+**The instance type will differ per environment.** `ecs.s7-k-c1m2.2xlarge` is
+what dyz7 offers; ste3 and the public cloud share none of its shapes. What
+transfers is the *size* — 8 vCPU / 16 GB — so pick whatever the new environment
+sells at that size. On a brand-new environment you have to read the console for
+this, because `playbooks/tools-list-instance-types.yml` needs a working Helper
+and `cloudcli` to run, which is the thing you are trying to create. Use it for
+the *cluster* node types later, once this box is up.
+
+Note the Helper is a plain RHEL box, not a cluster node, so the constraint that
+binds the masters — `NvmeSupport` must not be `required`, because the RHCOS
+agent image is virtio-only — does not apply here. The choice is wider than it is
+for `control_plane_type`.
 
 ## Network
 
@@ -53,8 +72,9 @@ supported shapes (see DEPLOY.md §2):
 
 - **Option B (default intent)** — the Helper keeps its own VPC and phase 03 peers
   the mirror VPC to it via a Router Interface pair. Set
-  `apsara_peer_operator_vpc_id`. On dyz7 the Helper sits in `192.168.33.0/24`
-  while the cluster VPC is `10.0.0.0/16`, peered.
+  `apsara_peer_operator_vpc_id`. On dyz7 the Helper's VPC is `192.168.0.0/16`
+  (its vSwitch `192.168.33.0/24`) while the cluster VPC is `10.0.0.0/16` — two
+  non-overlapping ranges, which peering requires.
 - **Option A (BYO-VPC)** — the mirror ECS is created inside the Helper's existing
   VPC. Set `existing_vpc_id` + `existing_vswitch_id`.
 
