@@ -22,6 +22,8 @@ set -uo pipefail
 
 REF="${1:?用法: $0 <参考 all.yml> [输出路径]}"
 OUT="${2:-./all.yml.candidate}"
+# 目标仓库根:从本脚本位置推出来(scripts/apsara/ 的上两级)
+TGT_REPO=$(cd "$(dirname "$0")/../.." && pwd)
 [ -r "$REF" ] || { echo "读不到参考文件: $REF" >&2; exit 1; }
 
 M=http://100.100.100.200/latest/meta-data
@@ -52,9 +54,9 @@ echo
 # 没有可推导的规律;但这些形状本身是这家厂商部署里真实存在的,套到新环境
 # 上的命中率远高于凭空构造。套完逐个验 DNS,不解析的标成 CHANGEME。
 
-python3 - "$REF" "$OUT" "$REF_ENV" "$TGT_ENV" "$REF_REGION" "$TGT_REGION" "$TGT_VPC" "$TGT_VPC_CIDR" > /tmp/.adapt.$$ <<'PY'
+python3 - "$REF" "$OUT" "$REF_ENV" "$TGT_ENV" "$REF_REGION" "$TGT_REGION" "$TGT_VPC" "$TGT_VPC_CIDR" "$TGT_REPO" > /tmp/.adapt.$$ <<'PY'
 import re, subprocess, sys
-ref, out, refenv, tgtenv, refreg, tgtreg, vpc, vpccidr = sys.argv[1:9]
+ref, out, refenv, tgtenv, refreg, tgtreg, vpc, vpccidr, tgtrepo = sys.argv[1:10]
 src = open(ref).read().splitlines(keepends=True)
 BLANK = {'AK':'CHANGEME-access-key-id','SK':'CHANGEME-access-key-secret',
          'ORG_ID':'CHANGEME-org-id','RG_ID':'CHANGEME-resource-group-id',
@@ -77,6 +79,13 @@ for line in src:
     if key in BLANK: new=BLANK[key]; notes.append((key,'需人工填'))
     elif key in DEFER: new=DEFER[key]; notes.append((key,'待凭据就绪'))
     elif key in DIRECT: new=DIRECT[key]
+    elif val and re.search(r'(/root|/home/[^/]+|/opt|/srv)/[A-Za-z0-9._-]*alibaba-openshift', val):
+        # 绝对路径绑死了参考环境的目录布局。这类值不含环境名也不含 region,
+        # 残留扫描看不出来,但在目标机器上要么不存在(报 No such file),要么
+        # ——更糟——碰巧存在于一份过期的旧检出里,于是静默用错文件。
+        # 实例:cloud_cli / oss_cli 指向 /root/alibaba-openshift/scripts/...
+        new = re.sub(r'(/root|/home/[^/]+|/opt|/srv)/[A-Za-z0-9._-]*alibaba-openshift', tgtrepo, val)
+        notes.append((key, f'路径重写 -> {new}'))
     elif val and (refenv in val or refreg in val):
         cand=val.replace(refreg,tgtreg).replace(refenv,tgtenv)
         if probe(cand): new=cand; notes.append((key,f'探测 ok: {cand}'))
@@ -90,7 +99,13 @@ echo
 
 # ── 最后一道闸:参考环境的标识绝不能残留 ──────────────────────────────────
 echo "== 残留扫描 =="
+# 除了环境名/region,还要扫指向别处仓库的绝对路径——它们不含环境标识,
+# 是第二类残留(见上面的路径重写)。
 leak=$(grep -nE "$REF_ENV|$REF_REGION" "$OUT" | grep -vE "^\s*[0-9]+:\s*#" | grep -v CHANGEME)
+stray=$(grep -nE "(/root|/home/[^/ ]+|/opt|/srv)/[A-Za-z0-9._-]*alibaba-openshift" "$OUT" \
+        | grep -vE "^\s*[0-9]+:\s*#" | grep -v "$TGT_REPO")
+[ -n "$stray" ] && leak="$leak
+$stray"
 if [ -n "$leak" ]; then
   echo "  ✗ 仍有 $REF_ENV 的值残留 —— 拒绝交付:"
   echo "$leak" | sed 's/^/      /'

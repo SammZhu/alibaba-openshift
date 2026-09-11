@@ -308,6 +308,25 @@ shape-reuse pass nor a naming guess would have reached it.
 After running the script, check what the target environment actually offers
 against what the reference did, and add the difference by hand.
 
+A second kind of leftover is easier to miss, because it does not look
+environment-specific at all: an **absolute path into the reference environment's
+layout**. `cloud_cli` and `oss_cli` are full paths to binaries in the repo, and
+on a host where the repo lives somewhere else they point at nothing — or worse,
+at a stale checkout that happens to exist. They carry no environment name or
+region, so the residue scan cannot see them as residue.
+
+The script now rewrites paths containing `.../alibaba-openshift` to the repo it
+is running from, and the residue scan flags any that still point elsewhere. The
+failure it prevents:
+
+```
+fatal: [local]: FAILED! => "[Errno 2] No such file or directory:
+  b'/root/alibaba-openshift/scripts/apsara/cloudcli'"
+```
+
+Loud here, because the path did not exist. It would have been silent on a host
+that still had an old checkout at that path.
+
 ## Driving the phases with `sudo`
 
 The playbooks install `oc` and `openshift-install` into `/usr/local/bin` and
