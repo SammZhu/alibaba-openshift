@@ -31,6 +31,11 @@ bucket's SNI is rejected). Then set `oss_bucket` to it.
 
 ## 1. Prepare the operator host (automated)
 
+> Standing up the box itself — sizing, the three separate network requirements,
+> and what to obtain from whoever hands over the environment — is in
+> [OPERATOR-HOST.md](OPERATOR-HOST.md). Start there on a new Apsara environment;
+> nothing here can run until that machine exists.
+
 On a brand-new box, one manual step installs git + ansible; everything else is a
 playbook (`playbooks/00a-prepare-operator.yml`): OS packages (git/curl/jq/tar/
 skopeo/podman/golang), the SSH keypair, the Apsara Go tools, and bootstrap
