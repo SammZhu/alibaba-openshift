@@ -769,7 +769,7 @@
           apiVersion: storage.k8s.io/v1
           kind: StorageClass
           metadata:
-            name: alicloud-nas-performance
+            name: "alicloud-nas-{{ nas_storage_type | default('Performance') | lower }}"
           provisioner: nasplugin.csi.alibabacloud.com
           reclaimPolicy: Delete
           allowVolumeExpansion: true
@@ -778,7 +778,7 @@
           parameters:
             volumeAs: filesystem
             fileSystemType: standard
-            storageType: Performance
+            storageType: "{{ nas_storage_type | default('Performance') }}"
             regionId: "{{ region }}"
             zoneId: "{{ nas_zone_id }}"
             vpcId: "{{ nas_vpc_id }}"

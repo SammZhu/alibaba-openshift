@@ -36,6 +36,16 @@ all:
       {{ not ((cloud_platform | default('public')) == 'apsara'
               and (cloud_env.ENDPOINT_NAS | default('')) | length == 0) }}
 
+    # Which NAS file-system type this environment can actually sell.  Not a
+    # free choice: `DescribeZones` returns a Protocol list per type, and a type
+    # whose list is empty is not provisionable even though it is listed.  ste2
+    # offers NFS only under `Capacity` (`Performance` -> []), so it sets
+    # `nas_storage_type: Capacity` in all.yml.  Public cloud keeps Performance,
+    # which is what the StorageClass has always been created with.  Feeds both
+    # the StorageClass `storageType` (08) and its name, so 13 finds it.
+    # See docs/apsara/NAS.md.
+    nas_storage_type: Performance
+
   hosts:
     local:
       ansible_connection: local

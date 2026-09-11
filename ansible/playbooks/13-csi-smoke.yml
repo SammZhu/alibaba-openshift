@@ -13,8 +13,9 @@
 #                volumeDevices sees a raw block device
 #   [snapshot]   VolumeSnapshot of the disk-fs PVC → ReadyToUse → restore a new PVC
 #                from it → the file written before the snapshot survives
-#   [nas-rwx]    RWX PVC on alicloud-nas-performance → two Pods mount it → one
-#                writes, the other reads the same file (shared, for live migration).
+#   [nas-rwx]    RWX PVC on the NAS StorageClass (alicloud-nas-<storage type>) →
+#                two Pods mount it → one writes, the other reads the same file
+#                (shared, for live migration).
 #                SOFT check — 08 applies a filesystem-mode NAS StorageClass from the
 #                cluster vpc/vSwitch/zone (state.yml); if those were absent when 08
 #                ran the SC is skipped and the PVC stays Pending. Reported but does
@@ -71,7 +72,7 @@
     csi_smoke_image: "image-registry.openshift-image-registry.svc:5000/openshift/tools:latest"
     disk_fs_sc: alicloud-disk-essd
     disk_block_sc: alicloud-disk-essd-block
-    nas_sc: alicloud-nas-performance
+    nas_sc: "alicloud-nas-{{ nas_storage_type | default('Performance') | lower }}"
     snap_class: alibaba-cloud-disk-snapclass
     pvc_size: 20Gi
     wait_timeout: 300s
