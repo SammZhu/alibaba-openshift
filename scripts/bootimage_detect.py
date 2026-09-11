@@ -72,13 +72,42 @@ def load_ai_versions(path, include_prereleases):
     return minors, max_z
 
 
-def fetch_stream_for_minor(branch, retries=4, backoff=2.0):
+def _confirm_404(url, times, delay):
+    """Re-request `url` and report whether it 404s every time.
+
+    A 404 is the signal that STOPS the scan, so unlike every other response it
+    is acted on rather than retried — which makes it the one answer a single
+    hiccup can turn into a silent truncation.  Anything that is not another 404
+    (a 200, a 5xx, a dropped connection) means "not confirmed": the caller
+    should keep retrying instead of believing the branch is absent.
+    """
+    for _ in range(times):
+        time.sleep(delay)
+        try:
+            with urllib.request.urlopen(url, timeout=30):
+                return False
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                return False
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
+            return False
+    return True
+
+
+def fetch_stream_for_minor(branch, retries=4, backoff=2.0,
+                           confirm_404=1, confirm_delay=3.0):
     """Fetch the installer rhcos.json for a release-X.Y branch; None on 404.
 
     Transient network failures (connection reset / TLS handshake drop / timeout /
     429 / 5xx) are retried with exponential backoff — a flaky runner network
-    must not fail the whole detection. A real 404 still returns None, other 4xx
-    still raise immediately.
+    must not fail the whole detection. Other 4xx still raise immediately.
+
+    A 404 means "this minor has no release branch yet", which is what stops
+    `enumerate_minors`. That makes it the one response where a single bad
+    reply is indistinguishable from the real answer, and getting it wrong is
+    invisible: the scan truncates and the job still reports "nothing to bake".
+    So a 404 is confirmed by re-requesting before it is believed. The cost is
+    one extra request per run (every scan ends on a 404 by construction).
     """
     url = INSTALLER_RHCOS.format(branch=branch)
     last = None
@@ -88,10 +117,16 @@ def fetch_stream_for_minor(branch, retries=4, backoff=2.0):
                 return json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                return None
-            if e.code not in (429, 500, 502, 503, 504):
+                if _confirm_404(url, confirm_404, confirm_delay):
+                    return None
+                sys.stderr.write(
+                    f"[detect] {url} 404 not reproducible — treating it as a "
+                    f"transient error, not as an absent branch\n")
+                last = e
+            elif e.code not in (429, 500, 502, 503, 504):
                 raise
-            last = e
+            else:
+                last = e
         except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
             last = e
         if attempt < retries - 1:
@@ -119,6 +154,9 @@ def enumerate_minors(floor_minor, cap=40):
         branch = f"{major}.{m}"
         stream = fetch_stream_for_minor(branch)
         if stream is None:
+            sys.stderr.write(
+                f"[detect] release-{branch}: no rhcos.json (404 confirmed) — "
+                f"scan stops here\n")
             break
         yield branch, stream
         m += 1
