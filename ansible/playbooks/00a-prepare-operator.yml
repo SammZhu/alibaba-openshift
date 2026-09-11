@@ -160,19 +160,30 @@
     # ── 5. Apsara Go tools ───────────────────────────────────────────────────
     # apsara-oss is built STATIC (CGO_ENABLED=0): phase 04 pushes this same binary
     # to the mirror ECS, which runs a different OS/glibc.
+    # -buildvcs=false: `go build` stamps the binary with VCS metadata, which means
+    # running `git status` in the checkout. When ansible runs as root against a
+    # checkout owned by someone else, git refuses ("detected dubious ownership")
+    # and the build dies on `error obtaining VCS status: exit status 128` — after
+    # the module downloads have already succeeded, so it reads like a Go problem
+    # rather than a git-ownership one.
+    #
+    # These are internal helper tools; nothing consumes a VCS stamp on them. The
+    # host-level fix (git config --global --add safe.directory <path>) is still
+    # required for the checkout generally — 08b/08c fetch and check out in the
+    # sibling repos — but there is no reason for THIS build to depend on it.
     - name: "operator: build apsara-rpc + apsara-oss"
       when: _op_apsara
       block:
         - name: "operator: go build apsara-rpc"
           ansible.builtin.command:
-            cmd: go build -o apsara-rpc .
+            cmd: go build -buildvcs=false -o apsara-rpc .
             chdir: "{{ _op_repo }}/scripts/apsara/apsara-rpc"
           environment: "{{ _op_go_env }}"
           changed_when: true
 
         - name: "operator: go build apsara-oss (static)"
           ansible.builtin.command:
-            cmd: go build -o apsara-oss .
+            cmd: go build -buildvcs=false -o apsara-oss .
             chdir: "{{ _op_repo }}/scripts/apsara/apsara-oss"
           environment: "{{ _op_go_env | combine({'CGO_ENABLED': '0'}) }}"
           changed_when: true

@@ -308,6 +308,40 @@ shape-reuse pass nor a naming guess would have reached it.
 After running the script, check what the target environment actually offers
 against what the reference did, and add the difference by hand.
 
+## If the checkout is not owned by the user running ansible
+
+Keeping the repos somewhere other than root's home — a shared path, an operator
+account's home — works, but git will not let root operate on a checkout it does
+not own:
+
+```
+fatal: detected dubious ownership in repository at '<path>'
+```
+
+Grant it once per repo, for the account that runs the playbooks:
+
+```sh
+sudo git config --global --add safe.directory <parent>/alibaba-openshift
+sudo git config --global --add safe.directory <parent>/openshift-capi-alicloud
+sudo git config --global --add safe.directory <parent>/alibaba-cloud-csi-operator
+```
+
+This is a prerequisite of the layout, not a workaround for one task. `08b` and
+`08c` fetch and check out inside the sibling repos, so they hit the same wall —
+and later, where the cause is further from the symptom.
+
+The failure it produces first is the least obvious one. `go build` stamps
+binaries with VCS metadata, so it runs `git status`; refused, it exits with
+
+```
+error obtaining VCS status: exit status 128
+    Use -buildvcs=false to disable VCS stamping.
+```
+
+after the module downloads have already succeeded — which reads as a Go problem.
+00a now passes `-buildvcs=false` for its own two tools, but that does not cover
+the git operations in 08b/08c.
+
 ## Two Apsara quirks worth knowing before you touch anything
 
 **`--DryRun` is not honoured.** The asapi gateway really performs the operation.
