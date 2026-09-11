@@ -24,7 +24,8 @@ be discovered until this box exists.
 | --- | --- | --- |
 | Instance type | — | **`ecs.s7-k-c1m2.2xlarge`** (8 vCPU / 16 GB) |
 | Disk | ~60 GB **free** for the mirror build | **200 GB system disk, 93 GB used** after a full run; `~/.oc-mirror` alone 22 GB |
-| Image | dnf-based (00a uses `ansible.builtin.package`) | `redhat_9_4_x86_64_20G_alibase_20240711.vhd` |
+| OS | any dnf-based distro | `redhat_9_4_x86_64_20G_alibase_20240711.vhd` |
+| ansible-core | see below | 2.14.18 (el9), Python 3.9.25 |
 
 Three things that table does not say on its own.
 
@@ -36,6 +37,27 @@ through with no space.
 **60 GB is the floor, not the plan.** It is what `mirror-build.yml` needs to
 *complete*. A worked-through environment consumed 93 GB. Size for the 200 GB
 that is known to be enough.
+
+**Any RHEL 9-family distro works — but match the ansible version.**
+`bootstrap-operator.sh` detects `dnf`/`yum`/`apt-get`/`zypper` and falls back to
+pip when ansible is not packaged, and 00a installs through the generic
+`ansible.builtin.package`. CentOS Stream 9, Rocky and Alma carry every package
+00a needs (`skopeo`, `podman`, `golang`) under the same names.
+
+The catch is version drift, not packaging. dyz7 runs **ansible-core 2.14.18 on
+Python 3.9**, and that is what every playbook here has been exercised against.
+CentOS Stream tracks ahead of RHEL 9, so it may hand you 2.17+ — and this repo
+still has `until` conditions wrapped in `{{ }}`, which newer ansible-core
+treats progressively less kindly. A failure from that looks like a problem with
+the new environment and is not one.
+
+If you take Stream, check `ansible-playbook --version` before the first run and
+clear those `until` templates first. On a new environment there are already
+enough unknowns without adding the automation's own runtime to the list.
+
+(`docs/E2E-RUNBOOK.md` claims ansible-core 2.16+. The working Helper runs
+2.14.18, so treat that as a floor nobody has verified rather than a real
+requirement.)
 
 **The instance type will differ per environment.** `ecs.s7-k-c1m2.2xlarge` is
 what dyz7 offers; ste3 and the public cloud share none of its shapes. What
