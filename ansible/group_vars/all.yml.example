@@ -65,6 +65,13 @@ cloud_env:           {}         # apsara -> { CLOUD_PLATFORM: apsara, AK: .., SK
                                 # here to immunise the run:
                                 #   HTTP_PROXY: ""
                                 #   HTTPS_PROXY: ""
+# NAS file-system type the StorageClass provisions with.  Leave at Performance
+# for public cloud.  On Apsara, run DescribeZones first: a type whose Protocol
+# list comes back empty is listed but not sellable, and ste2 offers NFS only
+# under Capacity.  The value also names the StorageClass
+# (alicloud-nas-<lowercase>), so 08 and 13 stay in agreement.
+# nas_storage_type:  Capacity
+
 # apsara only: explicit image id (apsara_ize turns the DataSource image lookups
 # into MirrorImageId/JumpHostImageId params).  DescribeImages -> ImageId (== the
 # .vhd name on ste3), e.g. aliyun_4_x86_64_20G_alibase_20260407.vhd

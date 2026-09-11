@@ -79,12 +79,26 @@ zone (all three masters sit on three different vSwitches yet report
 is present but unsellable — which for our purposes is the same answer as "not
 deployed".
 
+Read it per type, not per zone: a type that is *listed* can still carry an
+**empty protocol list**, and an empty list means that type is not sellable in
+that zone. Measured on ste2 (`nas-pub.cn-wulan-ste2-d01.cloud.ste2.com`,
+2026-09-11):
+
+| zone | `Performance.Protocol` | `Capacity.Protocol` |
+|---|---|---|
+| `cn-wulan-ste2-amtest11001-a` | `[]` | `["SMB", "NFS"]` |
+
+So on ste2 `Capacity` is the only workable choice — `Performance` would be
+accepted as a parameter value and then fail to serve NFS. Run `DescribeZones`
+on each new deployment and pick the type whose `Protocol` list actually
+contains `NFS`; do not carry this answer over from another environment.
+
 ### CreateFileSystem
 
 | Parameter | Required | Value |
 |---|---|---|
 | `ProtocolType` | yes | `NFS` (what RWX needs; `SMB` also exists) |
-| `StorageType` | yes | `Performance` or `Capacity` |
+| `StorageType` | yes | whichever of `Performance` / `Capacity` lists `NFS` in `DescribeZones` — on ste2 that is `Capacity` only |
 | `ZoneId` | no | set it, and to the ECS's zone — cross-zone adds latency |
 | `EncryptType` | no | the guide states it is **not supported** |
 
