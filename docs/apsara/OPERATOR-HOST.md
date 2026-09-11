@@ -59,8 +59,40 @@ enough unknowns without adding the automation's own runtime to the list.
 2.14.18, so treat that as a floor nobody has verified rather than a real
 requirement.)
 
-**The instance type will differ per environment.** `ecs.s7-k-c1m2.2xlarge` is
-what dyz7 offers; ste3 and the public cloud share none of its shapes. What
+**A CentOS Stream image will fail `dnf` on first use, and it looks like "no
+internet".** Alibaba's CentOS Stream 9 image ships repos pointing at
+`mirrors.cloud.aliyuncs.com` — the *public cloud's* internal mirror. No Apsara
+deployment provides that host (dyz7 resolves it to 100.100.2.148 and then times
+out on TCP 80, same as everywhere else). The symptom:
+
+```
+Errors during downloading metadata for repository 'baseos':
+  - Curl error (28): Timeout was reached for
+    http://mirrors.cloud.aliyuncs.com/centos-stream/9-stream/...
+```
+
+`Connection timed out`, not `Could not resolve host` — DNS answered, the route
+did not. Easy to read as a missing EIP and go hunting in the wrong place.
+
+The fix is one word apart:
+
+```sh
+sudo sed -i 's|mirrors.cloud.aliyuncs.com|mirrors.aliyun.com|g' /etc/yum.repos.d/*.repo
+sudo dnf clean all
+```
+
+`mirrors.aliyun.com` is the public mirror and needs ordinary egress;
+`mirrors.cloud.aliyuncs.com` is public-cloud-internal and has none here. A
+subscribed RHEL image sidesteps this entirely by using `cdn.redhat.com`.
+
+**The instance type will differ per environment.** Three Helpers, three
+families, all 8 vCPU / 16 GB:
+
+| dyz7 | ste3 | ste2 |
+| --- | --- | --- |
+| `ecs.s7-k-c1m2.2xlarge` | `ecs.s7-hg-k-c1m2.2xlarge` | `ecs.g6x-hg-k10-c1m2.2xlarge` |
+
+The public cloud shares none of these shapes either. What
 transfers is the *size* — 8 vCPU / 16 GB — so pick whatever the new environment
 sells at that size. On a brand-new environment you have to read the console for
 this, because `playbooks/tools-list-instance-types.yml` needs a working Helper
@@ -106,6 +138,27 @@ Option B needs the AK/SK to hold `vpc:CreateRouterInterface`,
 
 **4. Inbound SSH** for whoever operates it.
 
+### Egress differs per environment — measure it, do not assume
+
+Three environments, three different answers. Measured 2026-09-11:
+
+| | dyz7 | ste3 | ste2 |
+| --- | --- | --- | --- |
+| `quay.io` | ✓ | ✓ | ✓ |
+| `mirror.openshift.com` | ✓ | ✓ | ✓ |
+| `goproxy.cn` | ✓ | ✓ | ✓ |
+| **`github.com`** | ✓ | **0 of 7 attempts** | **1 of 13** |
+| `proxy.golang.org` | — | blocked | blocked |
+
+Everything `00a` needs works everywhere: the `oc` clients come from
+`mirror.openshift.com`, and `GOPROXY` already defaults to `goproxy.cn` because
+`proxy.golang.org` is Google-hosted and unreachable from China.
+
+**Only `git clone` breaks**, and only on some environments. Sample it several
+times before concluding either way — a single probe told us `mirror.openshift.com`
+was blocked on ste2 when it answers `302` reliably, and told us GitHub worked
+there when it succeeds once in thirteen tries.
+
 ## Obtain from whoever hands over the environment
 
 - [ ] The ECS itself, sized as above, with a dnf repo it can reach
@@ -138,10 +191,10 @@ SNI is rejected before anything else happens.
 One manual step, then a playbook.
 
 ```sh
-# 1. git + ansible only
+# 1. git + ansible only   (drop PROXY= entirely where egress is direct)
 PROXY=http://<squid>:3128 ./scripts/bootstrap-operator.sh
 
-# 2. the repo (00a configures git for the proxy; the first clone predates it)
+# 2. the repo -- see the note below: `git clone` does not work everywhere
 export https_proxy=http://<squid>:3128
 git clone <repo-url> /root/alibaba-openshift
 
@@ -155,6 +208,33 @@ ansible-playbook -i inventory.yml playbooks/00a-prepare-operator.yml \
 skopeo podman` plus `golang` on Apsara, generates the SSH keypair, builds the
 Apsara Go tools (`apsara-rpc`, `apsara-oss`), and fetches `oc` /
 `openshift-install`. It is idempotent.
+
+### Getting the repo in where GitHub is unreachable
+
+On ste2 and ste3 `git clone` is not an option (see the table above). The repo,
+and the sibling repos the playbooks reach for, have to be delivered from a
+machine that can see both GitHub and the Helper.
+
+Note **which** repos: `08`, `08b`, `08c` and `08d` resolve their sources as
+`{{ playbook_dir }}/../../../<repo>` — the *parent* of alibaba-openshift. So the
+working set is four directories side by side, not one:
+
+```
+<parent>/alibaba-openshift
+<parent>/openshift-capi-alicloud
+<parent>/alibaba-cloud-csi-operator
+<parent>/cloud-provider-alibaba-cloud      # CCM, needed by 08d
+```
+
+Exclude each repo's `bin/` when copying: those are build tools a Makefile
+downloaded for the *copying* machine's architecture. Including them shipped 723
+MB of darwin/arm64 binaries where 45 MB of source was wanted.
+
+That leaves one thing unsolved on a GitHub-less Helper: `make build` wants to
+download `controller-gen` and friends into `bin/` itself. Copy a populated
+`bin/` from a Helper that could, or arrange another source.
+
+### Client downloads
 
 `mirror.openshift.com` is slow from China and the installer archive is much the
 larger of the two. `-e operator_oc_only=true` fetches only `oc`; 06a extracts a
