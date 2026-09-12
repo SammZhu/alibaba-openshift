@@ -221,6 +221,52 @@
     - (_abi_cfg_gateway | length > 0 and _abi_disc_gateway | length > 0 and _abi_cfg_gateway != _abi_disc_gateway)
       or (_abi_cfg_dns | length > 0 and _abi_disc_dns | length > 0 and _abi_cfg_dns != _abi_disc_dns)
 
+# The warning above fired on ste2 on 2026-09-12, named the problem, and printed
+# the working resolvers — and the ISO was built anyway, because a debug message
+# in a 200-task log is not a guard. Five nodes then registered and sat at
+# "0 hosts ready, 5 hosts not validated" for an hour: with no usable resolver a
+# node cannot resolve api-int or the mirror, so every validation that needs a
+# name fails at once.
+#
+# Mismatch alone is not the test — a deployment may legitimately pin resolvers
+# the mirror does not use, as long as they answer. So ask the only question that
+# matters: do THESE resolvers answer for THIS cluster's api-int, from inside the
+# node VPC? The probe runs on the mirror ECS for that vantage point, and speaks
+# raw UDP DNS because dig/nslookup are not guaranteed to be installed there.
+- name: ABI — the node resolvers must actually resolve this cluster's api-int
+  ansible.builtin.shell: >-
+    {{ _ssh_root_mirror }} "echo {{ lookup('file', playbook_dir ~ '/../../scripts/apsara/dns-probe.py') | b64encode }}
+    | base64 -d > /tmp/dns-probe.py; python3 /tmp/dns-probe.py
+    api-int.{{ cluster_name }}.{{ base_domain }} {{ apsara_node_dns | join(' ') }}"
+  register: _abi_dnsprobe
+  changed_when: false
+  failed_when: false
+  when:
+    - (cloud_platform | default('public')) == 'apsara'
+    - (apsara_node_dns | default([])) | length > 0
+
+- name: ABI — fail on resolvers that answer nothing (before an ISO is built on them)
+  ansible.builtin.assert:
+    that: (_abi_dnsprobe.rc | default(0) | int) == 0
+    fail_msg: |
+      None of the configured node resolvers answered from inside the node VPC:
+
+      {{ _abi_dnsprobe.stdout | default('(no output)') }}
+      These get baked into agent-config as the nodes' ONLY resolvers, so the
+      nodes would boot unable to resolve api-int or the mirror, register with
+      the rendezvous, and then sit at "0 hosts ready, N hosts not validated"
+      until someone kills the install.
+
+      configured : {{ apsara_node_dns | join(', ') }}
+      mirror ECS : {{ _abi_disc_dns | default([]) | join(', ') or '(none reported)' }}
+
+      Fix apsara_node_dns in group_vars/all.yml — or unset it to take the
+      mirror's own resolvers, which are in the same VPC as the nodes.
+    quiet: true
+  when:
+    - (cloud_platform | default('public')) == 'apsara'
+    - (apsara_node_dns | default([])) | length > 0
+
 - name: ABI — show the node network that will be baked into agent-config
   ansible.builtin.debug:
     msg: "nic={{ apsara_node_nic | default('eth0') }} gateway={{ apsara_node_gateway }} dns={{ apsara_node_dns }} ntp={{ apsara_node_ntp | default([]) }}"

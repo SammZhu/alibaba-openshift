@@ -278,6 +278,13 @@ apsara_node_nic:      ens3            # RHCOS NIC name on Apsara (Alibaba Linux 
 # apsara_node_gateway:  10.0.31.253
 # apsara_node_gateway2: 10.0.47.253    # for private_subnet_cidr2 (HA master-2)
 # apsara_node_gateway3: 10.0.63.253    # for private_subnet_cidr3 (HA master-3)
+# Node resolvers. Leave UNSET to take the mirror ECS's own — the mirror sits in
+# the node VPC, so its resolvers are the ones the nodes can reach. Pin these
+# only for a deployment whose nodes need a resolver the mirror does not use,
+# and never carry the value over from another Apsara deployment: these become
+# the nodes' ONLY resolvers, and a resolver that does not answer leaves every
+# node registered but stuck at "not validated". 06a probes them from the mirror
+# before building the ISO and fails if none answer.
 # apsara_node_dns:
 #   - 10.x.x.x
 # agent_build_image:   registry.access.redhat.com/ubi9/ubi:latest   # container path base
