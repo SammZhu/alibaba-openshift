@@ -65,13 +65,36 @@
   failed_when: false
   retries: 3
   delay: 20
-  until: _bi_fetch.rc == 0
+  # Retrying a flaky github.com is the point; retrying a refusal to trust the
+  # checkout just spends a minute arriving at the same answer, so stop on it.
+  until: _bi_fetch.rc == 0 or (_bi_fetch.stderr | default('')) is search('dubious ownership')
 
 # github.com is reachable from here only intermittently, and a failed fetch must
 # not quietly build whatever the clone happens to hold — that is how a "fix" got
 # deployed once without being in the image.  Stop, unless told explicitly to
 # build offline, and then say which commit is being built so the choice is made
 # with the facts.
+# git reports "dubious ownership" when the checkout belongs to another user —
+# the normal shape here, where a sync drops the repos in a user's tree and root
+# runs the playbooks. It is not a network failure and retrying never fixes it,
+# but it arrives through the same non-zero rc, so without this it was reported
+# as "retry when the network is back" and the reader waits for a network that
+# was never down. Offline mode is no escape either: `git log` needs the same
+# trust, so the build would fail again one task later.
+- name: "{{ bi_name }} — git does not trust this checkout"
+  ansible.builtin.assert:
+    that: not ((_bi_fetch.stderr | default('')) is search('dubious ownership'))
+    fail_msg: >-
+      git refuses to work in {{ bi_repo | realpath }}: it is owned by another
+      user ("detected dubious ownership"). This is not a network problem and
+      {{ bi_name }}_allow_offline will not get past it. Register the checkout
+      once, as the user running this playbook:
+      git config --global --add safe.directory {{ bi_repo | realpath }}
+      00a does this for the repos it clones; a repo that arrived another way
+      (a sync, a manual clone) needs it too.
+    quiet: true
+  when: bi_ref | length > 0
+
 - name: "{{ bi_name }} — could not reach the remote"
   ansible.builtin.assert:
     that: (_bi_fetch.rc | default(0)) == 0
