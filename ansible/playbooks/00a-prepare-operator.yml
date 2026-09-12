@@ -157,6 +157,38 @@
         label: "{{ item.item }}"
       when: item.failed | default(false)
 
+    # ── 4c. git ownership across the checkouts ───────────────────────────────
+    # The playbooks run as root; the checkouts need not be root's. That is the
+    # normal shape here — a sync drops the repos in a user's tree and root runs
+    # tests from them — and git refuses to work in a repo it does not trust
+    # ("detected dubious ownership"), which is not a permissions problem git can
+    # explain away: `git fetch`, `git status` and `git log` all fail.
+    #
+    # It has now cost two separate debugging sessions. First 00a's `go build`
+    # (VCS stamping runs `git status`), worked around with -buildvcs=false —
+    # a workaround, not a fix, as the comment below says. Then 08b's `git fetch`,
+    # which cannot be worked around: the whole point of that fetch is to build
+    # the commit the remote has.
+    #
+    # Register the exact paths, never `*` — a global opt-out would also trust a
+    # repo someone else drops in this host's tree later.
+    - name: "operator: git safe.directory already registered?"
+      ansible.builtin.command:
+        argv: [git, config, --global, --get-all, safe.directory]
+      register: _op_safedirs
+      changed_when: false
+      failed_when: false          # rc=1 simply means none are registered yet
+
+    - name: "operator: trust this checkout and its siblings (git safe.directory)"
+      ansible.builtin.command:
+        argv: [git, config, --global, --add, safe.directory, "{{ item }}"]
+      loop: "{{ [_op_repo | realpath] + (_op_companions.results | default([])
+                | map(attribute='item') | map('basename')
+                | map('regex_replace', '\\.git$', '')
+                | map('regex_replace', '^', ((_op_repo ~ '/..') | realpath) ~ '/') | list) }}"
+      when: item not in (_op_safedirs.stdout_lines | default([]))
+      changed_when: true
+
     # ── 5. Apsara Go tools ───────────────────────────────────────────────────
     # apsara-oss is built STATIC (CGO_ENABLED=0): phase 04 pushes this same binary
     # to the mirror ECS, which runs a different OS/glibc.
