@@ -111,6 +111,31 @@
           into the instance, it watches what the CAPA controller does with it.
         quiet: true
 
+    # 09 redeploys the controller with capa_smoke_image, whose default comes
+    # from vars/images.yml — a BARE tag. state.yml's -apsara tag does not win
+    # here the way it does in 08, so on 2026-09-13 this play replaced a working
+    # controller with quay.io/samzhu/openshift-capi-alicloud:v0.1.24 and the
+    # cluster lost its CAPA provider until 08 was re-run.
+    #
+    # The base image does not know the Apsara endpoint keys in the alibaba-creds
+    # Secret, so it composed the public-cloud name ecs.<region>.aliyuncs.com,
+    # which does not resolve there. The symptom was 30 retries of "wait until
+    # CAPA boots the ECS" — a timeout, not an image error. 08 already refuses
+    # this for exactly this reason; 09 did not.
+    - name: "09 — on Apsara the smoke image must be one built for this platform"
+      ansible.builtin.assert:
+        that: capa_smoke_image is search('-apsara')
+        fail_msg: >-
+          capa_smoke_image is "{{ capa_smoke_image }}". On Apsara the controller
+          must be an image built by 08b: an upstream one does not read the
+          Apsara endpoints from the alibaba-creds Secret and falls back to
+          ecs.<region>.aliyuncs.com, which does not exist here — and since this
+          play REPLACES the running controller, the cluster is left without a
+          working CAPA provider until 08 is re-run. Run 08b, or pass one
+          deliberately with -e capa_smoke_image=<image>.
+        quiet: true
+      when: (cloud_platform | default('public')) == 'apsara'
+
     - name: Add the jump host (carry smoke inputs as host vars)
       ansible.builtin.add_host:
         name: jumphost
