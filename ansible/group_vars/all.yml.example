@@ -72,6 +72,12 @@ cloud_env:           {}         # apsara -> { CLOUD_PLATFORM: apsara, AK: .., SK
 # (alicloud-nas-<lowercase>), so 08 and 13 stay in agreement.
 # nas_storage_type:  Capacity
 
+# Force the libguestfs appliance (phase 10's RHCOS re-stamp) to software
+# emulation. Leave unset: 10 probes the host and only falls back when the KVM
+# appliance does not boot — TCG is minutes where KVM is seconds. Set it true to
+# skip the probe on a host known to need it, false to insist on KVM.
+# bootimage_force_tcg: true
+
 # apsara only: explicit image id (apsara_ize turns the DataSource image lookups
 # into MirrorImageId/JumpHostImageId params).  DescribeImages -> ImageId (== the
 # .vhd name on ste3), e.g. aliyun_4_x86_64_20G_alibase_20260407.vhd
