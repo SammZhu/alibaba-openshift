@@ -1045,8 +1045,10 @@
         set -o pipefail
         export KUBECONFIG='{{ kubeconfig_file }}'
         nodes=$(oc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
-        # jq, not jsonpath: oc's jsonpath has no null literal, so a filter for
-        # "not yet decided" CSRs errors out and quietly selects nothing.
+        # jq, not jsonpath: the jsonpath in oc has no null literal, so a filter
+        # for "not yet decided" CSRs errors out and quietly selects nothing.
+        # (The apostrophe that used to be in this comment was itself an odd
+        #  single quote — it broke ansible arg parsing and both lint jobs.)
         pending=$(oc get csr -o json | jq -r '.items[]
           | select((.status.conditions // []) | length == 0)
           | [.metadata.name, .spec.signerName, .spec.username] | @tsv')
