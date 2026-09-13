@@ -443,6 +443,15 @@
     # Rendezvous Host" while the node is perfectly healthy.
     - name: Apsara — open the cluster SG to the operator VPC (peering mode)
       ansible.builtin.include_tasks: ../tasks/apsara_cluster_sg_peer_ingress.yml
+      vars:
+        # The split ingress workers sit in their own security group, so the
+        # rendezvous master alone does not reveal every group the stack made.
+        csg_extra_instance_ids: >-
+          {{ [(_cs_outputs | selectattr('OutputKey','equalto','WorkerInstance1Id')
+                | map(attribute='OutputValue') | first | default('')),
+              (_cs_outputs | selectattr('OutputKey','equalto','WorkerInstance2Id')
+                | map(attribute='OutputValue') | first | default(''))]
+             | reject('equalto', '') | list }}
       when:
         - (cloud_platform | default('public')) == 'apsara'
         - (apsara_peer_operator_vpc_id | default('')) | length > 0
