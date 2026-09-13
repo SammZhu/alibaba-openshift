@@ -963,6 +963,18 @@
     # description tried, including that one, so it is only validated in
     # combination and this deployment documents no rule for it. Description is
     # optional and buys nothing, so it goes rather than being guessed at.
+    # Exact name match, not a substring of the raw JSON: "cluster1-nas" appears
+    # inside "cluster1-nas-old" too, and a group called "x-cluster1-nas" would
+    # have suppressed creation of the one we actually need.
+    - name: "08 — is a group of that exact name already there?"
+      ansible.builtin.set_fact:
+        _nas_ag_existing: >-
+          {{ ((_nas_ag_q.stdout | default('{}') | from_json).AccessGroups | default({})).AccessGroup | default([])
+             | selectattr('AccessGroupName', 'equalto', nas_access_group_name) | list }}
+      when:
+        - (cloud_platform | default('public')) == 'apsara'
+        - nas_available | default(true) | bool
+
     - name: "08 — create the NAS access group when it is missing"
       ansible.builtin.command:
         argv: ["{{ cloud_cli }}", nas, CreateAccessGroup, --RegionId, "{{ region }}",
@@ -976,7 +988,7 @@
       when:
         - (cloud_platform | default('public')) == 'apsara'
         - nas_available | default(true) | bool
-        - nas_access_group_name not in (_nas_ag_q.stdout | default(''))
+        - (_nas_ag_existing | default([])) | length == 0
 
     # Record it ONLY when this run actually created it. 08 skips creation when a
     # group of that name already exists, which on a shared deployment may well be
@@ -994,6 +1006,56 @@
       when:
         - (cloud_platform | default('public')) == 'apsara'
         - _nas_ag_new.changed | default(false)
+
+    # A pre-existing group of the same name is NOT automatically ours, and
+    # adopting it silently means mounting this cluster's volumes under rules
+    # nobody here wrote — too permissive is a security problem, too narrow is a
+    # mount that hangs, and neither says anything. So look at the rules before
+    # accepting it, and be explicit about what was decided.
+    - name: "08 — read the rules of the group we would be adopting"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", nas, DescribeAccessRules, --RegionId, "{{ region }}",
+               --AccessGroupName, "{{ nas_access_group_name }}",
+               --profile, "{{ aliyun_profile }}"]
+      register: _nas_ag_rules
+      changed_when: false
+      failed_when: false
+      delegate_to: local
+      environment: "{{ cloud_env | default({}) }}"
+      when:
+        - (cloud_platform | default('public')) == 'apsara'
+        - nas_available | default(true) | bool
+        - (_nas_ag_existing | default([])) | length > 0
+
+    - name: "08 — an adopted group must actually admit this cluster"
+      ansible.builtin.assert:
+        that:
+          - ((_nas_ag_rules.stdout | default('{}') | from_json).AccessRules | default({})).AccessRule | default([])
+            | selectattr('SourceCidrIp', 'equalto', (mirror_vpc_cidr | default(vpc_cidr)))
+            | selectattr('RWAccess', 'equalto', 'RDWR') | list | length > 0
+        fail_msg: >-
+          A NAS access group named {{ nas_access_group_name }} already exists, but none
+          of its rules gives {{ mirror_vpc_cidr | default(vpc_cidr) }} RDWR access, so
+          mounting under it would hang rather than fail. It is not ours to change —
+          on a shared deployment a name like this can belong to anyone, and nothing on
+          the object says who made it. Either point nas_access_group_name at a name
+          this cluster owns, or have whoever owns that group add the rule.
+        quiet: true
+      when:
+        - (cloud_platform | default('public')) == 'apsara'
+        - nas_available | default(true) | bool
+        - (_nas_ag_existing | default([])) | length > 0
+
+    - name: "08 — adopting a pre-existing access group"
+      ansible.builtin.debug:
+        msg: >-
+          Using the existing NAS access group {{ nas_access_group_name }}: its rules
+          admit {{ mirror_vpc_cidr | default(vpc_cidr) }} RDWR. This run did not create
+          it, so teardown will NOT delete it.
+      when:
+        - (cloud_platform | default('public')) == 'apsara'
+        - nas_available | default(true) | bool
+        - (_nas_ag_existing | default([])) | length > 0
 
     # A group with no rule denies every client. Scope it to the cluster VPC.
     - name: "08 — allow the cluster VPC to mount (access rule)"
