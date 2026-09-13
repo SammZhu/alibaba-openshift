@@ -285,6 +285,49 @@
           changed_when: false
           failed_when: false
 
+        # Every read-back here goes through the kubelet's serving endpoint. When
+        # that endpoint is broken the exec returns nothing, and a check that only
+        # looks at its own stdout calls a healthy volume a storage failure.
+        #
+        # That happened on ste2 on 2026-09-13: cluster1-worker-2's kubelet-serving
+        # certificate had rotated and nobody approves those CSRs for ABI nodes, so
+        # `oc exec` answered `remote error: tls: internal error` and disk-fs,
+        # snapshot and nas-rwx all reported FAIL against PVCs that were Bound.
+        # The report sent the reader to the CSI driver; the fault was a
+        # certificate two layers away.
+        #
+        # So ask the node whether it can talk at all before blaming storage.
+        - name: "[kubelet] can the node running the smoke pods serve exec?"
+          ansible.builtin.shell: |
+            set -o pipefail
+            export KUBECONFIG='{{ kubeconfig_file }}'
+            node=$(oc -n '{{ ns }}' get pod disk-fs-writer -o jsonpath='{.spec.nodeName}' 2>/dev/null)
+            [ -z "$node" ] && { echo "node=unknown"; exit 0; }
+            if oc get --raw "/api/v1/nodes/$node/proxy/healthz" >/dev/null 2>&1; then
+              echo "node=$node kubelet=ok"
+            else
+              echo "node=$node kubelet=unreachable"
+            fi
+          args:
+            executable: /bin/bash
+          register: _kubelet_probe
+          changed_when: false
+          failed_when: false
+
+        - name: "[kubelet] record whether exec is even possible"
+          ansible.builtin.set_fact:
+            _kubelet_ok: "{{ 'kubelet=unreachable' not in (_kubelet_probe.stdout | default('')) }}"
+            _kubelet_node: "{{ (_kubelet_probe.stdout | default('')) | regex_replace('^node=([^ ]*).*$', '\\1') | trim }}"
+
+        - name: "[kubelet] a broken kubelet is not a storage result"
+          ansible.builtin.debug:
+            msg: >-
+              kubelet on {{ _kubelet_node }} is not serving, so exec-based
+              read-backs cannot run and the checks below say nothing about
+              storage. Pending kubelet-serving CSRs are the usual cause on ABI
+              nodes — `oc get csr` and see 08's approval step.
+          when: not (_kubelet_ok | bool)
+
         - name: "[disk-fs] record result"
           ansible.builtin.set_fact:
             r_disk_fs: "{{ (_diskfs_wait.rc == 0) and ('csi-smoke-disk-fs' in _diskfs_cat.stdout) }}"
@@ -487,7 +530,12 @@
         - name: CSI live smoke report
           ansible.builtin.debug:
             msg: |
-              ===== CSI storage live smoke =====
+              ===== CSI storage live smoke ====={{ ''
+                if (_kubelet_ok | default(true) | bool)
+                else ('\n!! kubelet on ' ~ (_kubelet_node | default('the smoke node'))
+                      ~ ' is not serving — exec-based read-backs could not run.'
+                      ~ '\n!! The verdicts below are INCONCLUSIVE, not storage failures.'
+                      ~ '\n!! Usual cause on ABI nodes: pending kubelet-serving CSRs (see 08).') }}
               [disk-fs]    RWO Filesystem PVC + write/read ....... {{ 'PASS' if r_disk_fs | default(false) else 'FAIL' }}   (required)
               [disk-block] Block volumeMode raw device ........... {{ 'PASS' if r_disk_block | default(false) else 'FAIL' }}   (required)
               [snapshot]   VolumeSnapshot → restore → data kept .. {{ 'PASS' if r_snapshot | default(false) else ('SKIP' if not (csi_smoke_snapshot | default(true) | bool) else 'FAIL') }}   {{ '(required)' if (csi_smoke_snapshot | default(true) | bool) else '(disabled — known upstream defect)' }}
