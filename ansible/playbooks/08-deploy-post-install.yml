@@ -949,6 +949,57 @@
         - nas_available | default(true) | bool
         - _nas_ag_new.changed | default(false)
 
+    # StorageClass parameters are immutable, and this class is applied here
+    # rather than by the operator — so it is outside csi_storageclass_recreate's
+    # drift handling, which only covers the disk classes the CR renders. Adding
+    # accessGroupName to an existing class therefore failed with the raw
+    #
+    #   The StorageClass "alicloud-nas-capacity" is invalid:
+    #   parameters: Forbidden: updates to parameters are forbidden.
+    #
+    # which says what the API refused but not what to do about it. Compare first,
+    # and either recreate deliberately or say plainly what is stale and why.
+    - name: "08 — read the live NAS StorageClass parameters"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", get, storageclass,
+               "alicloud-nas-{{ nas_storage_type | default('Performance') | lower }}",
+               -o, "jsonpath={.parameters.accessGroupName}|{.parameters.storageType}"]
+      register: _nas_sc_live
+      changed_when: false
+      failed_when: false
+
+    - name: "08 — does it match what this run would apply?"
+      ansible.builtin.set_fact:
+        _nas_sc_drift: >-
+          {{ (_nas_sc_live.rc | default(1)) == 0
+             and (_nas_sc_live.stdout | default('')) !=
+                 ((nas_access_group_name if (cloud_platform | default('public')) == 'apsara' else '')
+                  ~ '|' ~ (nas_storage_type | default('Performance'))) }}
+
+    - name: "08 — a stale NAS StorageClass cannot be updated in place"
+      ansible.builtin.assert:
+        that: not (_nas_sc_drift | bool) or (csi_storageclass_recreate | default(false) | bool)
+        fail_msg: >-
+          alicloud-nas-{{ nas_storage_type | default('Performance') | lower }} exists with
+          parameters "{{ _nas_sc_live.stdout | default('') }}" but this run would apply
+          "{{ (nas_access_group_name if (cloud_platform | default('public')) == 'apsara' else '') }}|{{ nas_storage_type | default('Performance') }}"
+          (accessGroupName|storageType). StorageClass parameters are immutable, so it
+          has to be deleted and recreated — a StorageClass holds no data and existing
+          PVs keep working. Re-run with csi_storageclass_recreate=true.
+        quiet: true
+      when:
+        - nas_available | default(true) | bool
+        - nas_vpc_id | default('') | length > 0
+
+    - name: "08 — delete the stale NAS StorageClass so it can be recreated"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", delete, storageclass,
+               "alicloud-nas-{{ nas_storage_type | default('Performance') | lower }}"]
+      changed_when: true
+      when:
+        - _nas_sc_drift | bool
+        - csi_storageclass_recreate | default(false) | bool
+
     - name: Apply NAS StorageClass (filesystem-mode, dynamic provisioning)
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
