@@ -1021,6 +1021,56 @@
           ansible.builtin.debug:
             msg: "routers on {{ _ing_where.stdout_lines | map('trim') | select | list | unique | join(', ') }} (the CLB backend set)"
 
+    # ── kubelet serving certificates ─────────────────────────────────────────
+    # kubelet rotates its serving certificate and the new one only takes effect
+    # once its CSR is approved. OpenShift's machine-approver approves those only
+    # for nodes backed by a machine.openshift.io Machine — which ABI-installed
+    # nodes are not. The CAPA fork approves its own CAPI machines' CSRs, so the
+    # caworkers nodes are fine and the ABI ones are not, which is exactly the
+    # split observed on ste2 on 2026-09-13: 56 pending CSRs, and
+    # cluster1-worker-2's kubelet answering `remote error: tls: internal error`
+    # to every exec and log request.
+    #
+    # Nothing reports this as a certificate problem. It surfaces as whatever
+    # happened to need exec — there, three CSI smoke checks "failed" against
+    # volumes that were healthy and Bound.
+    #
+    # Scope: only kubernetes.io/kubelet-serving CSRs whose requester is
+    # system:node:<name> for a node THIS cluster already has. That is the same
+    # judgement machine-approver makes for the nodes it does cover — the node is
+    # already a member, this is its rotation — and it is narrower than approving
+    # by signer alone, which would also sign for names that are not nodes here.
+    - name: "08 — approve pending kubelet-serving CSRs for nodes this cluster has"
+      ansible.builtin.shell: |
+        set -o pipefail
+        export KUBECONFIG='{{ kubeconfig_file }}'
+        nodes=$(oc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+        # jq, not jsonpath: oc's jsonpath has no null literal, so a filter for
+        # "not yet decided" CSRs errors out and quietly selects nothing.
+        pending=$(oc get csr -o json | jq -r '.items[]
+          | select((.status.conditions // []) | length == 0)
+          | [.metadata.name, .spec.signerName, .spec.username] | @tsv')
+        approved=0
+        while read -r name signer user; do
+          [ -z "$name" ] && continue
+          [ "$signer" = "kubernetes.io/kubelet-serving" ] || continue
+          case "$user" in system:node:*) node=${user#system:node:} ;; *) continue ;; esac
+          printf '%s\n' "$nodes" | grep -qxF "$node" || continue
+          oc adm certificate approve "$name" >/dev/null && approved=$((approved+1))
+        done <<< "$pending"
+        echo "approved=$approved"
+      args:
+        executable: /bin/bash
+      register: _csr_approve
+      changed_when: "'approved=0' not in _csr_approve.stdout"
+
+    - name: "08 — kubelet serving certs"
+      ansible.builtin.debug:
+        msg: >-
+          {{ _csr_approve.stdout | trim }} pending kubelet-serving CSR(s) approved.
+          An ABI node whose serving cert has rotated cannot serve exec or logs
+          until this happens, and the symptom is never a certificate error.
+
     - name: Phase 08 done
       ansible.builtin.debug:
         msg: |
