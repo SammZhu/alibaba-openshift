@@ -81,12 +81,35 @@
     - name: Resolve AK/SK (cloud_env on apsara, aliyun config on public) — for the #27 out-of-band ECS delete
       ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
 
+    # The throwaway ECS is never logged into — this test watches the CAPA
+    # controller's lifecycle behaviour, not the guest. So any bootable public
+    # image will do, and pinning one distro makes the test depend on a catalogue
+    # that is per-deployment. ste2 offers 44 public Linux images and not one
+    # Rocky among them, so the old rockylinux_9.*x64 match came back empty and
+    # `first` raised "No first item, sequence was empty" — pointing at a Jinja
+    # line rather than saying no image matched.
     - name: Compute smoke inputs
       ansible.builtin.set_fact:
         _smoke_sg: "{{ smoke_sg | default((_sg_q.stdout | from_json).SecurityGroups.SecurityGroup[0].SecurityGroupId) }}"
         _smoke_img: >-
-          {{ smoke_image | default(((_img_q.stdout | from_json).Images.Image
-             | selectattr('ImageId','search','rockylinux_9.*x64') | map(attribute='ImageId') | first)) }}
+          {{ smoke_image | default(
+               (((_img_q.stdout | from_json).Images.Image | map(attribute='ImageId')
+                 | select('search', smoke_image_pattern
+                          | default('rockylinux_9.*x64|^aliyun_3_x86_64_20G_alibase'))
+                 | list) + ['']) | first) }}
+
+    - name: The smoke test needs some public image to boot
+      ansible.builtin.assert:
+        that: (_smoke_img | default('')) | length > 0
+        fail_msg: >-
+          No public image in {{ region }} matched
+          "{{ smoke_image_pattern | default('rockylinux_9.*x64|^aliyun_3_x86_64_20G_alibase') }}".
+          The public image catalogue is per-deployment, and this one offers
+          {{ ((_img_q.stdout | from_json).Images.Image | default([])) | length }}
+          Linux images. Pass one with -e smoke_image=<ImageId>, or widen
+          smoke_image_pattern. Any bootable image works: this test never logs
+          into the instance, it watches what the CAPA controller does with it.
+        quiet: true
 
     - name: Add the jump host (carry smoke inputs as host vars)
       ansible.builtin.add_host:
