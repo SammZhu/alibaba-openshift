@@ -840,6 +840,12 @@
       register: _nas_ag_q
       changed_when: false
       failed_when: false
+      # Cloud calls run on the operator host, never on the jump host: cloud_env
+      # and the apsara-rpc shim live there. Without this, cloudcli sees no
+      # CLOUD_PLATFORM, falls back to the public-cloud path, and dies on
+      # `execvp("aliyun")` — a jump host has no aliyun CLI.
+      delegate_to: local
+      environment: "{{ cloud_env | default({}) }}"
       when:
         - (cloud_platform | default('public')) == 'apsara'
         - nas_available | default(true) | bool
@@ -853,6 +859,8 @@
                --profile, "{{ aliyun_profile }}"]
       register: _nas_ag_new
       changed_when: true
+      delegate_to: local
+      environment: "{{ cloud_env | default({}) }}"
       when:
         - (cloud_platform | default('public')) == 'apsara'
         - nas_available | default(true) | bool
@@ -868,6 +876,8 @@
                --profile, "{{ aliyun_profile }}"]
       register: _nas_rule_new
       changed_when: true
+      delegate_to: local
+      environment: "{{ cloud_env | default({}) }}"
       failed_when:
         - _nas_rule_new.rc != 0
         - "'AlreadyExist' not in (_nas_rule_new.stderr | default('') ~ _nas_rule_new.stdout | default(''))"
