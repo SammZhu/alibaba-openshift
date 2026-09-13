@@ -300,7 +300,7 @@
             name: smoke-test-worker
             namespace: {{ ns }}
           spec:
-            instanceType: ecs.t6-c1m1.large
+            instanceType: {{ smoke_instance_type | default('ecs.t6-c1m1.large') }}
             imageID: {{ smoke_image }}
             regionID: {{ smoke_region }}
             zoneID: {{ smoke_zone }}
@@ -385,14 +385,52 @@
               -p "{\"metadata\":{\"ownerReferences\":[{\"apiVersion\":\"cluster.x-k8s.io/v1beta2\",\"kind\":\"Machine\",\"name\":\"smoke-machine\",\"uid\":\"$MU\",\"controller\":true,\"blockOwnerDeletion\":true}]}}"
           changed_when: true
 
+        # Wait on the instance id, but stop the moment the controller says it
+        # cannot make one. A bare `until instanceID is set` cannot tell "still
+        # booting" from "will never boot", and on 2026-09-13 the same 30 blind
+        # retries stood in for two unrelated root causes — a controller talking
+        # to the wrong endpoint, and an instance type this deployment does not
+        # have. Both read as a slow cloud. The reason was in the CR the whole
+        # time, in status.conditions[Ready].
         - name: (setup) wait until CAPA boots the ECS (status.instanceID set)
-          ansible.builtin.command:
-            argv: [oc, "--kubeconfig", /root/kubeconfig, -n, "{{ ns }}", get, alibabacloudmachine, smoke-test-worker, -o, "jsonpath={.status.instanceID}"]
+          ansible.builtin.shell: |
+            set -o pipefail
+            id=$(oc --kubeconfig /root/kubeconfig -n '{{ ns }}' get alibabacloudmachine \
+                   smoke-test-worker -o jsonpath='{.status.instanceID}' 2>/dev/null)
+            if [ -n "$id" ]; then echo "$id"; exit 0; fi
+            reason=$(oc --kubeconfig /root/kubeconfig -n '{{ ns }}' get alibabacloudmachine \
+                       smoke-test-worker \
+                       -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null)
+            if [ "$reason" = "InstanceReconcileError" ]; then
+              oc --kubeconfig /root/kubeconfig -n '{{ ns }}' get alibabacloudmachine \
+                 smoke-test-worker \
+                 -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' >&2
+              echo "TERMINAL" >&2
+            fi
+            exit 1
+          args:
+            executable: /bin/bash
           register: _iid
           retries: 30
           delay: 10
-          until: _iid.stdout | trim | length > 0
+          until: _iid.stdout | trim | length > 0 or 'TERMINAL' in (_iid.stderr | default(''))
+          failed_when: false
           changed_when: false
+
+        - name: (setup) the controller cannot create the instance
+          ansible.builtin.assert:
+            that: (_iid.stdout | trim | length) > 0
+            fail_msg: >-
+              CAPA reported InstanceReconcileError instead of booting the smoke
+              instance, so this is not a slow cloud and retrying will not help:
+
+              {{ _iid.stderr | default('(no message)') | replace('TERMINAL', '') | trim }}
+
+              InvalidInstanceType.ValueNotSupported means this deployment does
+              not offer {{ smoke_instance_type | default('ecs.t6-c1m1.large') }}
+              — the catalogue is per-deployment. Pass one it has with
+              -e smoke_instance_type=<type>.
+            quiet: true
 
         - name: Record the booted instance id
           ansible.builtin.set_fact:
