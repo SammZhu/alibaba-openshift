@@ -46,6 +46,14 @@ all:
     # See docs/apsara/NAS.md.
     nas_storage_type: Performance
 
+    # The access group CreateMountTarget needs. Public cloud pre-creates
+    # DEFAULT_VPC_GROUP_NAME for every account and the driver defaults to it, so
+    # nothing here changes there. An Apsara deployment may pre-create nothing —
+    # ste2 had zero access groups, and every NAS provision failed with "The
+    # specified AccessGroup does not exist" — so 08 creates this one, scoped to
+    # the cluster VPC, and names it in the StorageClass.
+    nas_access_group_name: "{{ cluster_name }}-nas"
+
   hosts:
     local:
       ansible_connection: local
