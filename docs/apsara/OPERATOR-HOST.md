@@ -413,13 +413,26 @@ treated as one. The cost is rarely an error message; it is usually a wait.
 
 Phase 10 re-stamps `ignition.platform.id=aliyun` into the RHCOS boot partition
 with `guestfish`, and every guestfish call boots a small appliance VM. On the
-RHEL8 runner that takes seconds. On ste2's host — Alibaba Cloud Linux 4, kernel
-6.6, AMD — the appliance never finishes booting:
+RHEL8 runner that takes seconds. On ste2's host it never finishes booting:
 
 ```
 supermin: internal insmod ata_piix.ko
 supermin: internal insmod virtio_blk.ko      <- stops here, then spins at 100% CPU
 ```
+
+**The dividing line is the host CPU.** dyz7 is Intel; ste2 is Hygon — a
+Chinese AMD-Zen derivative that reports `vendor_id: AuthenticAMD`, `cpu family
+24` (Dhyana) and loads `kvm_amd`:
+
+```
+model name : Hygon C86 7285 32-core Processor
+```
+
+libguestfs launches the appliance with `-cpu max`, which hands the guest every
+feature bit the host advertises. That is the plausible mechanism here, and it
+is why "which distro / which kernel" is the wrong thing to look at — check the
+CPU vendor first. (Whether a narrower `-cpu` keeps KVM's speed on Hygon is
+untested; TCG was enough to get moving.)
 
 Nothing upstream is broken, which is what makes it expensive to diagnose:
 `/dev/kvm` is present, the CPU carries the virtualisation flags, `kvm_amd` shows
