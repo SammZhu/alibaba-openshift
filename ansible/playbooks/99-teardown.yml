@@ -652,36 +652,6 @@
           failed_when: false
           when: mirror_vpc_id is defined and mirror_vpc_id | length > 0
 
-        # 08 creates a NAS access group for this cluster (<cluster>-nas) because
-        # this deployment ships none and CreateMountTarget requires one. Nothing
-        # removed it: the sweep above deals in filesystems, and the group is not
-        # part of any ROS stack. Tearing ste2 down on 2026-09-13 left
-        # cluster1-nas behind — harmless to the bill, but it accumulates one per
-        # cluster name and the next install would adopt a group whose rules
-        # nobody reviewed.
-        #
-        # Named after the cluster, so this deletes only ours. A group still
-        # referenced by a mount target cannot be deleted, and that is the right
-        # outcome: it means a filesystem survived the sweep above.
-        - name: Delete this cluster's NAS access group
-          ansible.builtin.command:
-            argv: ["{{ cloud_cli }}", nas, DeleteAccessGroup, --RegionId, "{{ region }}",
-                   --AccessGroupName, "{{ nas_access_group_name | default(cluster_name ~ '-nas') }}",
-                   --profile, "{{ aliyun_profile }}"]
-          register: _td_nas_ag
-          changed_when: _td_nas_ag.rc == 0
-          failed_when: false
-          when: (cloud_platform | default('public')) == 'apsara'
-
-        - name: "NAS access group"
-          ansible.builtin.debug:
-            msg: >-
-              {{ nas_access_group_name | default(cluster_name ~ '-nas') }}:
-              {{ 'deleted' if _td_nas_ag.rc | default(1) == 0
-                 else ('nothing to delete' if 'NotFound' in (_td_nas_ag.stderr | default('') ~ _td_nas_ag.stdout | default(''))
-                       else 'NOT deleted — ' ~ ((_td_nas_ag.stderr | default('')) | trim | truncate(120))) }}
-          when: (cloud_platform | default('public')) == 'apsara'
-
         # Phase 12's ensure_vswitch creates capa-worker-<zone> vSwitches INSIDE the
         # mirror stack's VPC. They are NOT stack-managed, so once site-post's 12 has
         # run, DeleteStack on the mirror stack fails (the VPC still has vSwitches) —
@@ -1164,6 +1134,36 @@
     #                               else expect ≤ 2 (1 system + 1 data)
     #   - any target:               SnapshotForImage orphans for our
     #                               cluster_name must be 0
+    # OUTSIDE the mirror-stack block on purpose. That block is gated on
+    # mirror_stack_id still having a value, so it is skipped once the stack is
+    # gone — and an access group left behind by a teardown that ran before this
+    # cleanup existed could then never be reached by re-running teardown. The
+    # group's existence does not depend on the stack's, so neither should its
+    # removal. ste2 on 2026-09-13 is exactly that case: torn down first, the
+    # cleanup written afterwards.
+    - name: Delete this cluster's NAS access group
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", nas, DeleteAccessGroup, --RegionId, "{{ region }}",
+               --AccessGroupName, "{{ nas_access_group_name | default(cluster_name ~ '-nas') }}",
+               --profile, "{{ aliyun_profile }}"]
+      register: _td_nas_ag
+      changed_when: _td_nas_ag.rc == 0
+      failed_when: false
+      when:
+        - (cloud_platform | default('public')) == 'apsara'
+        - teardown_target in ['mirror', 'both']
+
+    - name: "NAS access group"
+      ansible.builtin.debug:
+        msg: >-
+          {{ nas_access_group_name | default(cluster_name ~ '-nas') }}:
+          {{ 'deleted' if _td_nas_ag.rc | default(1) == 0
+             else ('nothing to delete' if 'NotFound' in (_td_nas_ag.stderr | default('') ~ _td_nas_ag.stdout | default(''))
+                   else 'NOT deleted — ' ~ ((_td_nas_ag.stderr | default('')) | trim | truncate(120))) }}
+      when:
+        - (cloud_platform | default('public')) == 'apsara'
+        - teardown_target in ['mirror', 'both']
+
     - name: Post-teardown sanity — query actual cloud state
       block:
         - name: Audit — ROS stacks still bearing this cluster's names
