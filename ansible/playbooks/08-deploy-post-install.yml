@@ -36,6 +36,43 @@
     - name: Resolve Alibaba AK/SK (cloud_env on apsara, aliyun config on public)
       ansible.builtin.include_tasks: ../tasks/resolve_ak_sk.yml
 
+    # ── operator -> node reachability ────────────────────────────────────────
+    # 06 authorizes the operator VPC on the cluster security groups, but only at
+    # create time and only for the instances it knew about. A live cluster gains
+    # nodes (CAPA workers) and can drift, and re-running 06 is not an option:
+    # it would UpdateStack ImageId back to the phase-1 PLACEHOLDER image and
+    # reimage the masters. So re-assert it here, where it is safe to re-run, and
+    # discover the instances from the NODES rather than from state — that covers
+    # every node the cluster actually has, including ones 06 never saw.
+    #
+    # Why it matters: nothing during install needs a worker directly (the agent
+    # API, the Kube API and the machine-config server are all on the masters),
+    # so a missing rule stays invisible until someone on the operator tries to
+    # reach a worker — and then a dropped packet looks exactly like a slow host.
+    - name: "08 — instance ids of the nodes this cluster has"
+      ansible.builtin.shell: |
+        set -o pipefail
+        oc --kubeconfig '{{ kubeconfig_file | default(install_dir ~ "/auth/kubeconfig") }}' \
+          get nodes -o jsonpath='{range .items[*]}{.spec.providerID}{"\n"}{end}' \
+          | sed -n 's|.*[./]\(i-[a-z0-9]*\)$|\1|p' | sort -u
+      args:
+        executable: /bin/bash
+      register: _sgnodes
+      changed_when: false
+      failed_when: false
+      when:
+        - (cloud_platform | default('public')) == 'apsara'
+        - (apsara_peer_operator_vpc_id | default('')) | length > 0
+
+    - name: "08 — re-assert operator ingress on every node's security group"
+      ansible.builtin.include_tasks: ../tasks/apsara_cluster_sg_peer_ingress.yml
+      vars:
+        csg_instance_ids: "{{ _sgnodes.stdout_lines | default([]) }}"
+      when:
+        - (cloud_platform | default('public')) == 'apsara'
+        - (apsara_peer_operator_vpc_id | default('')) | length > 0
+        - (_sgnodes.stdout_lines | default([])) | length > 0
+
     - name: Add the jump host to the inventory (carry creds as host vars)
       ansible.builtin.add_host:
         name: jumphost

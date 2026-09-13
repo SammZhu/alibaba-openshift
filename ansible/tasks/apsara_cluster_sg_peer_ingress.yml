@@ -29,21 +29,48 @@
          if ((apsara_peer_operator_cidr | default('')) | length > 0)
          else (_csg_vpc.stdout | from_json).Vpcs.Vpc[0].CidrBlock }}
 
-- name: "cluster-sg: find the control-plane security group (via the master instance)"
+# One instance can only reveal one security group, and this used to look at the
+# rendezvous master alone. The split-worker topology (EnableSplitWorkers) puts
+# the ingress workers in a SECOND security group, which therefore never learned
+# about the operator — masters admitted 192.168.0.0/16 and workers did not.
+#
+# Nothing during install noticed: the agent API, the Kube API and the
+# machine-config server all live on the masters, so `agent wait-for` was happy
+# and the cluster came up. It surfaces later, when something on the operator
+# needs a worker directly — on ste2 on 2026-09-13 an ssh to a worker to bounce
+# its kubelet simply hung, with no indication that a firewall was the reason.
+#
+# So collect the security groups of EVERY instance the cluster stack made, not
+# of one of them.
+- name: "cluster-sg: which instances to cover"
+  ansible.builtin.set_fact:
+    _csg_instance_ids: >-
+      {{ (csg_instance_ids | default([])
+          if (csg_instance_ids | default([])) | length > 0
+          else ([rendezvous_instance_id | default('')] + (csg_extra_instance_ids | default([]))))
+         | select('string') | reject('equalto', '') | list | unique }}
+
+- name: "cluster-sg: read their security groups"
   ansible.builtin.command:
     argv: ["{{ cloud_cli }}", ecs, DescribeInstances, --RegionId, "{{ region }}",
-           --InstanceIds, '["{{ rendezvous_instance_id }}"]', --profile, "{{ aliyun_profile }}"]
+           --InstanceIds, '["{{ item }}"]', --profile, "{{ aliyun_profile }}"]
   register: _csg_inst
   changed_when: false
+  loop: "{{ _csg_instance_ids }}"
 
-- name: "cluster-sg: security group id fact"
+- name: "cluster-sg: security group ids fact"
   ansible.builtin.set_fact:
-    _csg_id: "{{ (_csg_inst.stdout | from_json).Instances.Instance[0].SecurityGroupIds.SecurityGroupId[0] }}"
+    _csg_ids: >-
+      {{ _csg_inst.results
+         | map(attribute='stdout') | map('from_json')
+         | map(attribute='Instances.Instance') | select() | map('first')
+         | map(attribute='SecurityGroupIds.SecurityGroupId') | map('first')
+         | select('string') | list | unique }}
 
-- name: "cluster-sg: allow the operator CIDR ({{ _csg_cidr }}) into {{ _csg_id }}"
+- name: "cluster-sg: allow the operator CIDR ({{ _csg_cidr }}) into {{ _csg_ids | join(', ') }}"
   ansible.builtin.command:
     argv: ["{{ cloud_cli }}", ecs, AuthorizeSecurityGroup, --RegionId, "{{ region }}",
-           --SecurityGroupId, "{{ _csg_id }}",
+           --SecurityGroupId, "{{ item }}",
            --IpProtocol, all, --PortRange, "-1/-1",
            --SourceCidrIp, "{{ _csg_cidr }}",
            --Priority, "1",
@@ -55,9 +82,10 @@
     - _csg_auth.rc != 0
     - "'AlreadyExist' not in (_csg_auth.stderr | default(''))"
     - "'already exist' not in (_csg_auth.stderr | default('') | lower)"
+  loop: "{{ _csg_ids }}"
 
 - name: "cluster-sg: done"
   ansible.builtin.debug:
     msg: >-
-      Cluster SG {{ _csg_id }} now admits {{ _csg_cidr }} — the operator can reach
+      Cluster SGs {{ _csg_ids | join(', ') }} now admit {{ _csg_cidr }} — the operator can reach
       the nodes (agent API 8090, api 6443, machine-config 22623) over the peering.
