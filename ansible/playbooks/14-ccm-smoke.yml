@@ -265,7 +265,12 @@
             {{ cloud_cli }} slb SetLoadBalancerModificationProtection --LoadBalancerId {{ lb }} --ModificationProtectionStatus NonProtection --RegionId {{ region }}
             {{ cloud_cli }} slb DeleteLoadBalancer --LoadBalancerId {{ lb }} --RegionId {{ region }}
           {% endfor %}
-          (export ENDPOINT_SLB={{ cloud_env.ENDPOINT_SLB | default('<slb endpoint>') }} first)
+          cloudcli needs the WHOLE cloud_env — CLOUD_PLATFORM, AK, SK, ORG_ID,
+          RG_ID, REGION and the endpoints — not just ENDPOINT_SLB. Without
+          CLOUD_PLATFORM it takes the public-cloud path and dies on
+          execvp("aliyun"), which reads as a broken host rather than a missing
+          variable. Export cloud_env from ansible/group_vars/all.yml first, the
+          way the playbooks do, then run the commands above.
         quiet: true
 
     - name: "14 — fail if the Service never got an address"

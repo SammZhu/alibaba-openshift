@@ -411,6 +411,7 @@ treated as one. The cost is rarely an error message; it is usually a wait.
 | kubelet serving certs | three CSI checks "failed" against healthy volumes | 08 approves the CSRs; 13 says when a verdict is inconclusive |
 | NAS access group | PVC Pending: "The specified AccessGroup does not exist" | 08 creates the group and its VPC rule |
 | NAS StorageClass parameters | `Forbidden: updates to parameters are forbidden` | 08 compares first, recreates under csi_storageclass_recreate |
+| SLB tag service | CCM could neither claim nor delete its own CLB, and leaked one | CCM fork falls back to `Slb DescribeTags` on `InvalidAction.NotFound` |
 
 ### Nobody approves an ABI node's kubelet certificates
 
