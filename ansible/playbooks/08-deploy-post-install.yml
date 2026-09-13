@@ -908,12 +908,17 @@
         - (cloud_platform | default('public')) == 'apsara'
         - nas_available | default(true) | bool
 
+    # No --Description. "openshift cluster1" was rejected with
+    # InvalidParameter.Description, and the rule behind that could not be
+    # isolated: with AccessGroupName omitted the gateway accepts every
+    # description tried, including that one, so it is only validated in
+    # combination and this deployment documents no rule for it. Description is
+    # optional and buys nothing, so it goes rather than being guessed at.
     - name: "08 — create the NAS access group when it is missing"
       ansible.builtin.command:
         argv: ["{{ cloud_cli }}", nas, CreateAccessGroup, --RegionId, "{{ region }}",
                --AccessGroupName, "{{ nas_access_group_name }}",
                --AccessGroupType, Vpc,
-               --Description, "openshift {{ cluster_name }}",
                --profile, "{{ aliyun_profile }}"]
       register: _nas_ag_new
       changed_when: true
