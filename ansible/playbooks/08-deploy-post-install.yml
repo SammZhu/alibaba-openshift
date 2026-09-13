@@ -818,6 +818,64 @@
         - (cloud_platform | default('public')) == 'apsara'
         - ccm_enabled | default(false) | bool
         - ccm_static_credentials | default(true) | bool
+    # ── NAS access group ─────────────────────────────────────────────────────
+    # CreateMountTarget requires an access group, and the driver defaults to
+    # DEFAULT_VPC_GROUP_NAME — a group the PUBLIC cloud pre-creates for every
+    # account. This Apsara deployment pre-creates nothing: DescribeAccessGroups
+    # on ste2 returns zero groups, so every NAS provision failed with
+    #
+    #   The specified AccessGroup does not exist.
+    #
+    # and the PVC sat Pending with that message buried in an event. An access
+    # group with no rules also denies everything, so the rule matters as much as
+    # the group: without it the filesystem is created, the mount target is
+    # created, and the mount then hangs.
+    #
+    # Public cloud keeps the driver default untouched — these tasks are apsara-
+    # only, and the StorageClass omits accessGroupName there exactly as before.
+    - name: "08 — does this deployment have the NAS access group?"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", nas, DescribeAccessGroups, --RegionId, "{{ region }}",
+               --profile, "{{ aliyun_profile }}"]
+      register: _nas_ag_q
+      changed_when: false
+      failed_when: false
+      when:
+        - (cloud_platform | default('public')) == 'apsara'
+        - nas_available | default(true) | bool
+
+    - name: "08 — create the NAS access group when it is missing"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", nas, CreateAccessGroup, --RegionId, "{{ region }}",
+               --AccessGroupName, "{{ nas_access_group_name }}",
+               --AccessGroupType, Vpc,
+               --Description, "openshift {{ cluster_name }}",
+               --profile, "{{ aliyun_profile }}"]
+      register: _nas_ag_new
+      changed_when: true
+      when:
+        - (cloud_platform | default('public')) == 'apsara'
+        - nas_available | default(true) | bool
+        - nas_access_group_name not in (_nas_ag_q.stdout | default(''))
+
+    # A group with no rule denies every client. Scope it to the cluster VPC.
+    - name: "08 — allow the cluster VPC to mount (access rule)"
+      ansible.builtin.command:
+        argv: ["{{ cloud_cli }}", nas, CreateAccessRule, --RegionId, "{{ region }}",
+               --AccessGroupName, "{{ nas_access_group_name }}",
+               --SourceCidrIp, "{{ mirror_vpc_cidr | default(vpc_cidr) }}",
+               --RWAccessType, RDWR, --UserAccessType, no_squash, --Priority, "1",
+               --profile, "{{ aliyun_profile }}"]
+      register: _nas_rule_new
+      changed_when: true
+      failed_when:
+        - _nas_rule_new.rc != 0
+        - "'AlreadyExist' not in (_nas_rule_new.stderr | default('') ~ _nas_rule_new.stdout | default(''))"
+      when:
+        - (cloud_platform | default('public')) == 'apsara'
+        - nas_available | default(true) | bool
+        - _nas_ag_new.changed | default(false)
+
     - name: Apply NAS StorageClass (filesystem-mode, dynamic provisioning)
       ansible.builtin.command:
         argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
@@ -835,6 +893,8 @@
           parameters:
             volumeAs: filesystem
             fileSystemType: standard
+            {{ ('accessGroupName: "' ~ nas_access_group_name ~ '"')
+               if (cloud_platform | default('public')) == 'apsara' else '' }}
             storageType: "{{ nas_storage_type | default('Performance') }}"
             regionId: "{{ region }}"
             zoneId: "{{ nas_zone_id }}"
