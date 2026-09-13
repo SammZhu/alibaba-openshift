@@ -408,6 +408,34 @@ treated as one. The cost is rarely an error message; it is usually a wait.
 | Checkout ownership | `git fetch` refused, reported as a network failure | 00a registers `safe.directory` for each checkout |
 | libguestfs appliance | phase 10 at 100% CPU, no output, forever | 10 probes it (below) |
 | OperatorHub catalogs | every MCO drain wedged for 40 minutes | 08 disables them when the mirror carries no catalog |
+| kubelet serving certs | three CSI checks "failed" against healthy volumes | 08 approves the CSRs; 13 says when a verdict is inconclusive |
+| NAS access group | PVC Pending: "The specified AccessGroup does not exist" | 08 creates the group and its VPC rule |
+| NAS StorageClass parameters | `Forbidden: updates to parameters are forbidden` | 08 compares first, recreates under csi_storageclass_recreate |
+
+### Nobody approves an ABI node's kubelet certificates
+
+kubelet rotates its serving certificate and the new one takes effect only once
+its CSR is approved. `machine-approver` approves those only for nodes backed by
+a `machine.openshift.io` Machine — which ABI-installed nodes are not — and the
+CAPA fork approves only its own CAPI machines. So on a 3+2 ABI cluster the
+`cluster1-*` nodes accumulate pending CSRs and the `caworkers-*` ones do not.
+
+The failure does not look like a certificate. When the cert expires, `oc exec`
+and `oc logs` to that node return `remote error: tls: internal error`, and
+whatever needed exec reports its own kind of failure instead. On ste2 that was
+three CSI smoke checks reporting FAIL against PVCs that were Bound and healthy
+— the same file read back fine the moment the CSRs were approved.
+
+```bash
+# is anything waiting?  (oc jsonpath has no null literal; use jq)
+oc get csr -o json | jq '[.items[] | select((.status.conditions // []) | length == 0)] | length'
+# can the API reach that kubelet at all?
+oc get --raw "/api/v1/nodes/<node>/proxy/healthz"
+```
+
+08 approves them as its first task — before anything it applies or waits on,
+since the MCO waits and readiness checks below it all depend on reaching a
+kubelet.
 
 ### The libguestfs appliance may not boot at all
 

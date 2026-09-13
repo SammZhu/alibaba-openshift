@@ -61,6 +61,14 @@ comment already anticipates the answer: where NAS exists at all it answers on
 the shared POP/ASCM gateway, routed by Product, the same shape as CloudDns.
 Point `ENDPOINT_NAS` at that gateway.
 
+## Status: proven on ste2
+
+`[nas-rwx]` in `13-csi-smoke.yml` reported SKIP from the day the Apsara work
+started, because dyz7 has no NAS. On 2026-09-13 it returned **PASS** on ste2:
+an RWX PVC bound against `alicloud-nas-capacity`, two Pods on different nodes
+mounted it, one wrote and the other read the same file. Everything below is the
+path that got there, and every trap on it was found the hard way.
+
 ## Then: is it actually usable?
 
 A reachable endpoint is not the same as a usable service.
@@ -101,6 +109,29 @@ contains `NFS`; do not carry this answer over from another environment.
 | `StorageType` | yes | whichever of `Performance` / `Capacity` lists `NFS` in `DescribeZones` — on ste2 that is `Capacity` only |
 | `ZoneId` | no | set it, and to the ECS's zone — cross-zone adds latency |
 | `EncryptType` | no | the guide states it is **not supported** |
+
+### The access group is not there either
+
+`AccessGroupName` is required, and the CSI driver defaults to
+`DEFAULT_VPC_GROUP_NAME` — a group the **public cloud** pre-creates for every
+account. ste2 pre-creates nothing: `DescribeAccessGroups` returned zero groups,
+so every provision failed with
+
+```
+The specified AccessGroup does not exist.
+```
+
+buried in a PVC event while the StorageClass, the storage type and the driver
+were all correct. 08 now creates the group (`<cluster>-nas`) and, just as
+importantly, a rule for the cluster VPC — a group with no rules denies every
+client, which would let the filesystem and the mount target both be created and
+then hang the mount, a worse failure because it looks like networking.
+
+One note for reading errors from this gateway: `CreateAccessGroup` rejected
+`Description: "openshift cluster1"` with `InvalidParameter.Description`, and the
+rule behind that could not be isolated — with `AccessGroupName` omitted the
+gateway accepts every description, including that one. Description is optional,
+so it is simply not sent.
 
 ### CreateMountTarget
 
