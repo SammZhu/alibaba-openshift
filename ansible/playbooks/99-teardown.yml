@@ -1144,7 +1144,7 @@
     - name: Delete this cluster's NAS access group
       ansible.builtin.command:
         argv: ["{{ cloud_cli }}", nas, DeleteAccessGroup, --RegionId, "{{ region }}",
-               --AccessGroupName, "{{ nas_access_group_name | default(cluster_name ~ '-nas') }}",
+               --AccessGroupName, "{{ nas_access_group_created }}",
                --profile, "{{ aliyun_profile }}"]
       register: _td_nas_ag
       changed_when: _td_nas_ag.rc == 0
@@ -1152,14 +1152,19 @@
       when:
         - (cloud_platform | default('public')) == 'apsara'
         - teardown_target in ['mirror', 'both']
+        - (nas_access_group_created | default('')) | length > 0
 
     - name: "NAS access group"
       ansible.builtin.debug:
         msg: >-
-          {{ nas_access_group_name | default(cluster_name ~ '-nas') }}:
-          {{ 'deleted' if _td_nas_ag.rc | default(1) == 0
-             else ('nothing to delete' if 'NotFound' in (_td_nas_ag.stderr | default('') ~ _td_nas_ag.stdout | default(''))
-                   else 'NOT deleted — ' ~ ((_td_nas_ag.stderr | default('')) | trim | truncate(120))) }}
+          {{ ('no access group recorded as created by us — nothing deleted, and a
+              group of the expected name is left alone because nothing proves it
+              is ours')
+             if (nas_access_group_created | default('')) | length == 0
+             else (nas_access_group_created ~ ': ' ~
+                   ('deleted' if _td_nas_ag.rc | default(1) == 0
+                    else ('nothing to delete' if 'NotFound' in (_td_nas_ag.stderr | default('') ~ _td_nas_ag.stdout | default(''))
+                          else 'NOT deleted — ' ~ ((_td_nas_ag.stderr | default('')) | trim | truncate(120))))) }}
       when:
         - (cloud_platform | default('public')) == 'apsara'
         - teardown_target in ['mirror', 'both']
