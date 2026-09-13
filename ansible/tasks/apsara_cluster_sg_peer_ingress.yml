@@ -13,8 +13,16 @@
 #
 # Gated by the caller on: cloud_platform == apsara AND peering mode
 # (apsara_peer_operator_vpc_id set).
+#
+# Every cloud call below carries `environment: cloud_env` itself rather than
+# relying on the caller's play to provide it. 06 happens to set it play-wide;
+# 08 does not, and the only symptom was cloudcli taking the public-cloud branch
+# and dying on execvp("aliyun") — a traceback that names a missing `aliyun`
+# binary and says nothing about a missing variable. A task file that reaches
+# for the cloud should carry what the cloud calls need.
 
 - name: "cluster-sg: resolve the operator VPC CIDR"
+  environment: "{{ cloud_env | default({}) }}"
   ansible.builtin.command:
     argv: ["{{ cloud_cli }}", vpc, DescribeVpcs, --RegionId, "{{ region }}",
            --VpcId, "{{ apsara_peer_operator_vpc_id }}", --profile, "{{ aliyun_profile }}"]
@@ -51,6 +59,7 @@
          | select('string') | reject('equalto', '') | list | unique }}
 
 - name: "cluster-sg: read their security groups"
+  environment: "{{ cloud_env | default({}) }}"
   ansible.builtin.command:
     argv: ["{{ cloud_cli }}", ecs, DescribeInstances, --RegionId, "{{ region }}",
            --InstanceIds, '["{{ item }}"]', --profile, "{{ aliyun_profile }}"]
@@ -68,6 +77,7 @@
          | select('string') | list | unique }}
 
 - name: "cluster-sg: allow the operator CIDR ({{ _csg_cidr }}) into {{ _csg_ids | join(', ') }}"
+  environment: "{{ cloud_env | default({}) }}"
   ansible.builtin.command:
     argv: ["{{ cloud_cli }}", ecs, AuthorizeSecurityGroup, --RegionId, "{{ region }}",
            --SecurityGroupId, "{{ item }}",
