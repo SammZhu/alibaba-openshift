@@ -39,6 +39,11 @@
     teardown_confirmed: false
     teardown_preserves_ai: false    # mirror teardown — preserve AI cluster + infra-env + ECS image?
     delete_mirror_snapshots: false  # also delete mirror snapshots?
+    # Delete NAS filesystems that have no mount target at all?  Such a filesystem
+    # cannot be shown to belong to this cluster, and on a SHARED deployment it may
+    # well belong to someone else.  Only turn this on where the account is known to
+    # be exclusively ours.
+    teardown_sweep_orphan_nas: false
     cluster_includes_ai: false      # cluster teardown — also tear down AI cluster + infra-env + ECS image?
                                     # Use for OCP version changes: mirror preserved, AI cluster must
                                     # be rebuilt (AI v2 API does not allow PATCHing openshift_version
@@ -583,6 +588,7 @@
             python3 - <<'PY'
             import os, json, subprocess, time
             vpc = os.environ["VPC"]; R = os.environ["R"]; P = os.environ["P"]
+            SWEEP_ORPHANS = os.environ.get("SWEEP_ORPHANS", "") == "true"
             q = subprocess.run(["{{ cloud_cli }}", "nas", "DescribeFileSystems", "--RegionId", R,
                                 "--PageSize", "100", "--profile", P],
                                capture_output=True, text=True)
@@ -594,6 +600,20 @@
                 other_mts = [m for m in all_mts if m.get("VpcId") != vpc]
                 # Mount targets in a DIFFERENT VPC -> belongs to another cluster, leave it.
                 if other_mts:
+                    continue
+                # No mount targets at all proves nothing about ownership. It can be
+                # our own leak (a CSI DeleteVolume that removed the mount target and
+                # leaked the filesystem), or it can be someone else's filesystem that
+                # simply has no mount target right now. On a shared deployment the
+                # second reading is real: ste2 on 2026-09-13 carried a filesystem
+                # created 2026-08-28 -- two weeks before this cluster's VPC existed
+                # -- with no mount targets, and this sweep would have deleted it.
+                # Requires an explicit opt-in, and says what it skipped either way.
+                if not all_mts and not SWEEP_ORPHANS:
+                    print("skipping NAS filesystem", fsid,
+                          "- no mount target, so it cannot be shown to be ours;",
+                          "re-run with teardown_sweep_orphan_nas=true on a dedicated account",
+                          flush=True)
                     continue
                 # Delete this cluster's mount targets (they block DeleteVSwitch / the
                 # mirror DeleteStack with DependencyViolation.Nas).
@@ -627,6 +647,7 @@
             VPC: "{{ mirror_vpc_id }}"
             R: "{{ region }}"
             P: "{{ aliyun_profile }}"
+            SWEEP_ORPHANS: "{{ teardown_sweep_orphan_nas | default(false) | bool | lower }}"
           changed_when: true
           failed_when: false
           when: mirror_vpc_id is defined and mirror_vpc_id | length > 0
