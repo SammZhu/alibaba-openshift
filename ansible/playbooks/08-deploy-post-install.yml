@@ -295,6 +295,63 @@
       changed_when: true
       failed_when: false
 
+    # ── OperatorHub default catalogs on a mirrored cluster ───────────────────
+    # The four default CatalogSources (certified-operators, community-operators,
+    # redhat-marketplace, redhat-operators) pull their catalog images from
+    # registry.redhat.io. A mirrored cluster carries no operator catalogs at all
+    # (docs/MIRROR.md: "无内置 operator catalog"), so those pulls can never
+    # succeed and the pods sit in Init:1/2 forever.
+    #
+    # Idle broken pods would be tolerable. These are not: a pod that never
+    # started cannot be torn down either, so it hangs in Terminating, and a
+    # drain that has to evict it never finishes. The next MachineConfig change
+    # then wedges — which is exactly what the ITMS applied a few lines below
+    # does. Observed on ste2 2026-09-12: master-2's drain retried for 40 minutes
+    # against certified-operators-5tdsg (phase=Pending, PodInitializing) while
+    # 08 sat in the MCO wait, and the same four pods were queued on the two
+    # remaining masters. Every future MachineConfig change would have hit it
+    # again.
+    #
+    # So disable them. This is not a workaround for the wait — it is the correct
+    # end state for a cluster with no catalog to serve. Gated on oadp_enabled:
+    # OADP is the one thing here that subscribes from redhat-operators, and a
+    # deployment that turns it on has mirrored a catalog to match.
+    - name: "08 — disable the default OperatorHub catalogs (no catalog is mirrored)"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", patch, operatorhub, cluster,
+               --type, merge, -p, '{"spec":{"disableAllDefaultSources":true}}']
+      register: _ohub_off
+      changed_when: "'no change' not in (_ohub_off.stdout | default(''))"
+      when:
+        - mirror_enabled | default(false) | bool
+        - not (oadp_enabled | default(false) | bool)
+
+    # Disabling the sources deletes the CatalogSources, and OLM deletes their
+    # pods — but a pod stuck in Pending was never started, so kubelet has no
+    # sandbox to tear down and the delete hangs exactly as before. Clear those
+    # explicitly.
+    #
+    # Scoped by BOTH the catalog label and the phase. Phase alone is not safe:
+    # a server dry-run of `--field-selector status.phase=Pending` while master-1
+    # was draining matched marketplace-operator itself, which had just been
+    # rescheduled and was legitimately Pending — this task would have force-
+    # deleted a healthy workload. marketplace-operator carries only
+    # name/pod-template-hash, so the label keeps it out of range. If OLM ever
+    # stops setting olm.catalogSource the selector matches nothing and this
+    # becomes a no-op, which is the right direction to fail in.
+    - name: "08 — clear catalog pods that never started (they block every drain)"
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", delete, pods,
+               -n, openshift-marketplace, -l, olm.catalogSource,
+               --field-selector, status.phase=Pending,
+               --force, --grace-period=0]
+      register: _ohub_pods
+      changed_when: "'No resources found' not in (_ohub_pods.stderr | default('') ~ _ohub_pods.stdout | default(''))"
+      failed_when: false
+      when:
+        - mirror_enabled | default(false) | bool
+        - not (oadp_enabled | default(false) | bool)
+
     # Air-gap: the install-config emits only an ImageDigestMirrorSet
     # (imageDigestSources), which redirects pulls BY DIGEST. But our CAPA and CSI
     # manifests pin images BY TAG (capa :{{ capa_image_tag }}, csi :v1.35.3), so a
