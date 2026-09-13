@@ -49,10 +49,22 @@
     # API, the Kube API and the machine-config server are all on the masters),
     # so a missing rule stays invisible until someone on the operator tries to
     # reach a worker — and then a dropped packet looks exactly like a slow host.
+    # Play 1 runs on the operator, where neither kubeconfig_file (a play-2 var)
+    # nor install_dir (only present when state carries it) is guaranteed — the
+    # first version of this task defaulted one to the other and both were
+    # undefined, which fails at TEMPLATING time, before failed_when can soften
+    # anything. The chain now ends in a literal built from cluster_name, which
+    # all.yml always defines, and a missing file is a skip rather than an error.
     - name: "08 — instance ids of the nodes this cluster has"
+      vars:
+        _sg_kubeconfig: >-
+          {{ kubeconfig_file
+             | default(kubeconfig_path
+               | default('/root/openshift-install/' ~ cluster_name ~ '/auth/kubeconfig', true), true) }}
       ansible.builtin.shell: |
         set -o pipefail
-        oc --kubeconfig '{{ kubeconfig_file | default(install_dir ~ "/auth/kubeconfig") }}' \
+        test -r '{{ _sg_kubeconfig }}' || exit 0
+        oc --kubeconfig '{{ _sg_kubeconfig }}' \
           get nodes -o jsonpath='{range .items[*]}{.spec.providerID}{"\n"}{end}' \
           | sed -n 's|.*[./]\(i-[a-z0-9]*\)$|\1|p' | sort -u
       args:
