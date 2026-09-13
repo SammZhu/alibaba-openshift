@@ -394,6 +394,65 @@ after the module downloads have already succeeded — which reads as a Go proble
 00a now passes `-buildvcs=false` for its own two tools, but that does not cover
 the git operations in 08b/08c.
 
+## What does not travel between environments
+
+Everything below held on the reference environment and broke on the next one.
+The shape repeats: something that was never a property of the *deployment* — a
+resolver address, a storage tier, a file's owner, whether a VM can boot — got
+treated as one. The cost is rarely an error message; it is usually a wait.
+
+| What | Looked like | Where it is now handled |
+|---|---|---|
+| Node resolvers (`apsara_node_dns`) | 5 nodes registered, then `0 hosts ready, 5 hosts not validated` for an hour | 06a probes them from the mirror ECS and fails (`scripts/apsara/dns-probe.py`) |
+| NAS storage tier | PVC Pending, no reason given | `nas_storage_type`, see `docs/apsara/NAS.md` |
+| Checkout ownership | `git fetch` refused, reported as a network failure | 00a registers `safe.directory` for each checkout |
+| libguestfs appliance | phase 10 at 100% CPU, no output, forever | 10 probes it (below) |
+| OperatorHub catalogs | every MCO drain wedged for 40 minutes | 08 disables them when the mirror carries no catalog |
+
+### The libguestfs appliance may not boot at all
+
+Phase 10 re-stamps `ignition.platform.id=aliyun` into the RHCOS boot partition
+with `guestfish`, and every guestfish call boots a small appliance VM. On the
+RHEL8 runner that takes seconds. On ste2's host — Alibaba Cloud Linux 4, kernel
+6.6, AMD — the appliance never finishes booting:
+
+```
+supermin: internal insmod ata_piix.ko
+supermin: internal insmod virtio_blk.ko      <- stops here, then spins at 100% CPU
+```
+
+Nothing upstream is broken, which is what makes it expensive to diagnose:
+`/dev/kvm` is present, the CPU carries the virtualisation flags, `kvm_amd` shows
+references, and a hand-rolled `qemu-kvm` starts normally. Only the appliance
+hangs — with no error, no timeout and no output. Ansible's last task banner
+still reads `Install libguestfs tooling` from two tasks earlier, so the reader
+goes looking at dnf, which is fine.
+
+Two measurements separate "slow" from "hung", and they are worth taking before
+theorising:
+
+```bash
+# 1. Is the appliance burning CPU, or blocked?  20s of CPU in 20s = spinning.
+Q=$(pgrep -f '[q]emu-kvm' | head -1)
+a=$(awk '{print $14+$15}' /proc/$Q/stat); sleep 20
+echo "ticks in 20s: $(( $(awk '{print $14+$15}' /proc/$Q/stat) - a ))"
+
+# 2. Is it this image, or any image?  A 64MB scratch disk answers it.
+timeout 180 guestfish -N /tmp/probe.img=disk:64M list-filesystems
+```
+
+Same host, same command, same minute:
+
+| backend | rc | time | output |
+|---|---|---|---|
+| `LIBGUESTFS_BACKEND_SETTINGS=force_tcg` | 0 | **34s** | `/dev/sda: unknown` |
+| KVM (default) | 124 | 240s | none (timeout) |
+
+Phase 10 now probes this itself (90s, 32MB disk) and prints which backend it
+chose and why. Hosts where KVM works keep the fast path — TCG is minutes where
+KVM is seconds, so it is not something to enable everywhere because one host
+needs it. `bootimage_force_tcg: true|false` skips the probe in either direction.
+
 ## Two Apsara quirks worth knowing before you touch anything
 
 **`--DryRun` is not honoured.** The asapi gateway really performs the operation.
