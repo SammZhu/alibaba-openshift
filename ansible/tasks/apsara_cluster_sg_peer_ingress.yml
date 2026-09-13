@@ -42,11 +42,12 @@
 #
 # So collect the security groups of EVERY instance the cluster stack made, not
 # of one of them.
-- name: "cluster-sg: every cluster instance the stack created"
+- name: "cluster-sg: which instances to cover"
   ansible.builtin.set_fact:
     _csg_instance_ids: >-
-      {{ ([rendezvous_instance_id]
-          + (csg_extra_instance_ids | default([])))
+      {{ (csg_instance_ids | default([])
+          if (csg_instance_ids | default([])) | length > 0
+          else ([rendezvous_instance_id | default('')] + (csg_extra_instance_ids | default([]))))
          | select('string') | reject('equalto', '') | list | unique }}
 
 - name: "cluster-sg: read their security groups"
