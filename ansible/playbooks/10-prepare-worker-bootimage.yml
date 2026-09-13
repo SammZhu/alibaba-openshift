@@ -287,6 +287,60 @@
             state: present
           when: bootimage_become | bool
 
+        # ── Can the libguestfs appliance actually boot here? ──────────────────
+        # Every guestfish call below boots a small appliance VM. On the RHEL8
+        # runner that takes seconds under KVM. On ste2's operator host (Alibaba
+        # Cloud Linux 4, kernel 6.6, AMD) it never finishes: the appliance's
+        # mini-initrd loads virtio_blk and then spins at 100% CPU forever. KVM
+        # itself is fine there — a hand-rolled qemu-kvm instance starts — so
+        # nothing upstream of this reports a problem. Measured on that host,
+        # same command, same minute:
+        #
+        #   force_tcg   rc=0    34s    /dev/sda: unknown
+        #   KVM         rc=124  240s   (timeout, no output)
+        #
+        # Probing beats configuring: this is a property of the host, the guest
+        # kernel and the CPU, not of the deployment, and the failure it prevents
+        # is a hang with no error at all — 10 sat at 100% CPU with its task
+        # banner still showing the dnf install two tasks earlier, which is where
+        # the reader then goes looking.
+        #
+        # Set bootimage_force_tcg explicitly to skip the probe either way.
+        - name: "10 — probe whether the libguestfs appliance boots under KVM"
+          ansible.builtin.shell: |
+            set -o pipefail
+            P=$(mktemp -d)/probe.img
+            timeout 90 guestfish -N "$P"=disk:32M list-filesystems > /dev/null 2>&1
+            rc=$?
+            rm -rf "$(dirname "$P")"
+            exit $rc
+          args:
+            executable: /bin/bash
+          become: "{{ bootimage_become | bool }}"
+          environment:
+            LIBGUESTFS_BACKEND: direct
+          register: _bi_kvm_probe
+          changed_when: false
+          failed_when: false
+          when: bootimage_force_tcg is not defined
+
+        - name: "10 — pick the appliance backend"
+          ansible.builtin.set_fact:
+            _bi_guestfs_env: >-
+              {{ {'LIBGUESTFS_BACKEND': 'direct'} | combine(
+                   {'LIBGUESTFS_BACKEND_SETTINGS': 'force_tcg'}
+                   if (bootimage_force_tcg | default((_bi_kvm_probe.rc | default(0)) != 0) | bool)
+                   else {}) }}
+
+        - name: "10 — which backend, and why"
+          ansible.builtin.debug:
+            msg: >-
+              libguestfs appliance:
+              {{ 'TCG (software) — the KVM appliance did not boot within 90s here'
+                 if 'LIBGUESTFS_BACKEND_SETTINGS' in _bi_guestfs_env
+                 else 'KVM — the appliance booted, so keep the fast path' }}.
+              Re-stamping takes minutes rather than seconds under TCG.
+
         # ── Re-stamp ignition.platform.id -> aliyun on the /boot partition ─────
         # virt-customize cannot inspect RHCOS's OSTree layout, so edit the
         # BootLoaderSpec entries directly via guestfish: find the ext4 boot
@@ -294,8 +348,7 @@
         # upload them back. Then re-read from the image to prove it stuck.
         - name: Re-stamp platform id to aliyun
           become: "{{ bootimage_become | bool }}"
-          environment:
-            LIBGUESTFS_BACKEND: direct
+          environment: "{{ _bi_guestfs_env }}"
           ansible.builtin.shell: |
             set -euo pipefail
             Q="{{ qcow }}"
@@ -332,8 +385,7 @@
         # ignition.platform.id=aliyun and qemu-img check passes. No new cloud code —
         # just the same scripts/bootimage-gate.sh the supply chain already validated.
         - name: Offline format gate before upload
-          environment:
-            LIBGUESTFS_BACKEND: direct
+          environment: "{{ _bi_guestfs_env }}"
           ansible.builtin.command:
             argv: [bash, "{{ playbook_dir }}/../../scripts/bootimage-gate.sh", "{{ qcow }}"]
           changed_when: false
