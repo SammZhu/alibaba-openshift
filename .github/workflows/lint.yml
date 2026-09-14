@@ -55,6 +55,17 @@ jobs:
       - name: Install PyYAML (for the ROS tag lint)
         run: pip install PyYAML
 
+      - name: Ansible variable-collision gate
+        # A registered variable is a HOST FACT: it lives for the rest of the run
+        # and outranks a later play's vars.  So `register: x` in one playbook
+        # silently replaces `vars: x:` in every playbook that runs after it.
+        # Harmless while each phase ran as its own ansible-playbook process;
+        # site-apsara.yml puts the whole chain in one, and the first live run
+        # hit two of these — a PVC whose storageClassName became a result dict,
+        # and `oc delete ns <that same dict>`.  Neither error mentions variables.
+        run: |
+          python3 scripts/lint-ansible-var-collisions.py
+
       - name: Boot-image stream detection unit test
         # Upstream split data/data/coreos/rhcos.json into coreos-rhel-{9,10}.json
         # in 4.22.  The detector asked for the old name, got a real 404, read it

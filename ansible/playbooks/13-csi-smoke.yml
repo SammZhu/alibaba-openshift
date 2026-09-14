@@ -238,9 +238,12 @@
         - name: Create smoke namespace
           ansible.builtin.command:
             argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", create, namespace, "{{ ns }}"]
-          register: _ns
-          changed_when: _ns.rc == 0
-          failed_when: _ns.rc != 0 and 'AlreadyExists' not in _ns.stderr
+          # NOT `_ns`: 14 and 15 both use `_ns` as a play var, and this registered
+          # value would outrank theirs for the rest of the run — `oc delete ns
+          # <this whole dict>`.  See the comment in 08 on the same hazard.
+          register: _csi_ns_create
+          changed_when: _csi_ns_create.rc == 0
+          failed_when: _csi_ns_create.rc != 0 and 'AlreadyExists' not in _csi_ns_create.stderr
 
         # ── [disk-fs] RWO Filesystem PVC + writer Pod ──────────────────────
         - name: "[disk-fs] apply PVC + writer Pod"
