@@ -295,7 +295,7 @@ echo "    → pinned ${_CCM_TAG} → ${_CCM_DIGEST}"
 # Keep this tag in sync with ansible/vars/images.yml (capa_image_tag) — the SSOT
 # the deploy playbooks read. This script runs on an out-of-cluster build host and
 # can't read ansible vars, so override via OPENSHIFT_CAPI_IMAGE if they ever drift.
-OPENSHIFT_CAPI_IMAGE="${OPENSHIFT_CAPI_IMAGE:-quay.io/samzhu/openshift-capi-alicloud:v0.1.12}"
+OPENSHIFT_CAPI_IMAGE="${OPENSHIFT_CAPI_IMAGE:-quay.io/samzhu/openshift-capi-alicloud:v0.1.24}"
 echo "[2c/8] Pinning Alibaba CAPA image: $OPENSHIFT_CAPI_IMAGE"
 _CAPI_REPO="${OPENSHIFT_CAPI_IMAGE%:*}"
 _CAPI_TAG="${OPENSHIFT_CAPI_IMAGE##*:}"
@@ -341,7 +341,7 @@ _pin_quay_public_image() {
 # csi-operator CI). This script can't read ansible vars, so keep this in sync
 # (or override via CSI_OPERATOR_VERSION). NOT the upstream csi-driver imageTag
 # (v1.35.3), which ships inside the operator image.
-CSI_OPERATOR_VERSION="${CSI_OPERATOR_VERSION:-v0.1.0}"
+CSI_OPERATOR_VERSION="${CSI_OPERATOR_VERSION:-v0.1.13}"
 _pin_quay_public_image ALIBABA_CSI_OPERATOR_IMAGE \
   "quay.io/samzhu/alibaba-cloud-csi-operator:${CSI_OPERATOR_VERSION}"          "2d/8"
 _pin_quay_public_image ALIBABA_CSI_BUNDLE_IMAGE \
