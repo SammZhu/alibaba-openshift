@@ -174,8 +174,13 @@ AK=.. SK=.. REGION=.. ORG_ID=.. RG_ID=.. \
 - 某个产品**所有形状全部 DNS 失败** → 这套环境没部署这个产品。这是一个**真实答案**,
   不是探测失败
 
-探出了新形状,请顺手加进 `scripts/apsara/discover.py` 的 `PATTERNS` 和
-`probe-endpoints.sh` 里 —— 下一套环境就不用再撞一次。
+探出了新东西,请顺手加回 `scripts/apsara/discover.py` —— 下一套环境就不用再撞一次。
+那里有**两张表**,别加错:
+
+- `PATTERNS` 是**形状**(`{svc}.{domain}` / `{svc}-pub.{region}.{domain}` …)
+- `PROBES` 里每个产品的第一项是**域名标签**,它和 API 产品名是两回事:CloudDns
+  的产品名是 `CloudDns`,主机名却是 `dns-control`(ste2 实测 `dns-control.pop.cloud.ste2.com`
+  在,`clouddns.*` 十种形状一个都不在)
 
 ### ⚠ 节点 DNS:填错了最贵的一项
 
