@@ -233,15 +233,21 @@ def fetch_stream_for_version(version):
 
 
 def enumerate_minors(floor_minor, cap=40):
-    """Yield (branch, stream) for release-<floor>.. up to the first 404."""
+    """Yield (branch, stream) for release-<floor>.. 直到第一个「还没到」的 minor。
+
+    停下来的**理由**由 fetch_stream_for_minor 打印,这里不复述。它现在有两种
+    停法(分支不存在 / 分支在但还没有自己的 RHCOS 流),而这里分不出是哪一种 ——
+    以前在这里硬写「分支不存在(404 已复验)」,于是 4.23 那种情况下日志会紧跟着
+    一句与事实相反的断言。这份日志存在的全部意义,就是让人分清「还没发布」和
+    「我们坏了」;在里面写一句听起来很确定、其实没根据的话,是最坏的一种噪音。
+    """
     major, mn = floor_minor.split(".")
     m = int(mn)
     while m <= int(mn) + cap:
         branch = f"{major}.{m}"
         stream = fetch_stream_for_minor(branch)     # 文件名不认识时会抛
         if stream is None:
-            sys.stderr.write(
-                f"[detect] release-{branch}: 分支不存在(404 已复验)—— 扫描到此为止\n")
+            sys.stderr.write(f"[detect] 扫描到 release-{branch} 为止(理由见上一行)\n")
             break
         yield branch, stream
         m += 1

@@ -105,6 +105,24 @@ print("分支确实不存在:文件和 OWNERS 都没有")
 doc = run("4.99", {}, marker_exists=False)
 check("返回 None,扫描正常结束", doc is None, doc)
 
+print("enumerate_minors 不编造停止理由")
+import io                     # noqa: E402
+import contextlib             # noqa: E402
+
+_saved = b.fetch_stream_for_minor
+b.fetch_stream_for_minor = lambda br, **kw: (
+    stream_doc(f"rhcos-{br}") if br in ("4.20", "4.21") else None)
+buf = io.StringIO()
+try:
+    with contextlib.redirect_stderr(buf):
+        got = [br for br, _ in b.enumerate_minors("4.20")]
+finally:
+    b.fetch_stream_for_minor = _saved
+check("扫到第一个没有流的 minor 就停", got == ["4.20", "4.21"], got)
+# 它分不出是「分支不存在」还是「分支在但没有自己的流」,所以一个字都不能断言。
+check("停止那行不声称分支不存在", "分支不存在" not in buf.getvalue(), buf.getvalue())
+check("停止那行指向上面的真实理由", "理由见上一行" in buf.getvalue(), buf.getvalue())
+
 print("STREAM_FILES 本身")
 check("老名字仍在候选里(4.21 及以前要用)", "rhcos.json" in b.STREAM_FILES)
 check("4.22 的两个新名字都在",
