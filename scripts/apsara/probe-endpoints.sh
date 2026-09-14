@@ -38,7 +38,15 @@ declare -A PROD=([ecs]=Ecs [vpc]=Vpc [ros]=ROS [ram]=Ram)
 # Endpoint name patterns seen in the wild.
 # NOTE: POP services live under a separate ".pop." label (dns-control.pop.<domain>),
 # not a hyphen — that cost us hours on ste3.  OSS carries region (+zone) in the name.
-PATTERNS=("%s.%s" "%s-internal.%s" "%s-vpc.%s" "%s-pop.%s" "%s.pop.%s")
+PATTERNS=("%s.%s" "%s-internal.%s" "%s-vpc.%s" "%s-pub.%s" "%s-pop.%s" "%s.pop.%s")
+# Region-qualified shapes: ste2 serves NAS at
+# nas-pub.cn-wulan-ste2-d01.cloud.ste2.com.  Without these, that environment's
+# NAS reads as "not deployed" — a wrong answer that looks exactly like a right
+# one.  Only added when REGION is known; otherwise they would expand to
+# malformed "svc..domain" hosts and just add noise.
+if [ -n "${REGION:-}" ]; then
+  PATTERNS+=("%s.$REGION.%s" "%s-pub.$REGION.%s" "%s-vpc.$REGION.%s" "%s-internal.$REGION.%s")
+fi
 
 probe_tcp() {  # host -> prints "DNS=<ip> 80:OK 443:OK"
   local h="$1" ip

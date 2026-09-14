@@ -144,26 +144,31 @@ cluster_topology:    ha
 # 专有云里没有公网跳板机这一说,helper 必须能直连 mirror ECS 的**私网 IP**。
 # 二选一:
 #
-#  (A) 借用 helper 自己的 VPC —— mirror 直接建在 helper 所在 VPC/交换机里,
-#      不需要打通。最简单,推荐新环境先用这条。
-#  (B) 新建 VPC + 自动对等 —— mirror-stack 建自己的 VPC(和公有云完全一致),
-#      03 自动建 Router Interface 对等 + 双向路由 + 放行安全组,99 拆时反向解开。
+#  (B) 新建 VPC + 自动对等(**推荐,这是实际跑通的那条**)—— mirror-stack 建自己
+#      的 VPC(和公有云完全一致),03 自动建 Router Interface 对等 + 双向路由 +
+#      放行安全组,99 拆时反向解开。集群安全组放行和私有 DNS 绑 helper VPC 也
+#      都只认这条路径上的 apsara_peer_operator_vpc_id。
+#  (A) 借用 helper 自己的 VPC —— mirror 直接建在 helper 所在 VPC/交换机里。
+#      ⚠ 只有 mirror-stack 支持;集群栈和私有 DNS 没有对应接线,没有实测过。
 #
 # 查 helper 自己的 VPC/交换机:
 #   curl -s http://100.100.100.200/latest/meta-data/vpc-id
 #   curl -s http://100.100.100.200/latest/meta-data/vpc-cidr-block
 #   curl -s http://100.100.100.200/latest/meta-data/vswitch-id
 #
-# (A) 用 helper 的 VPC:
-existing_vpc_id:     ""           # vpc-xxxx
-existing_vswitch_id: ""           # vsw-xxxx(mirror ECS 落在这里)
-# (B) 新建 VPC 并对等到 helper 的 VPC(用 A 时留空):
-apsara_peer_operator_vpc_id: ""
+# (B) 新建 VPC 并对等到 helper 的 VPC —— 填 helper 自己的 VPC id:
+apsara_peer_operator_vpc_id: ""   # ← 推荐路径的必填项,vpc-xxxx
 apsara_peer_operator_cidr:   ""   # 留空 = 从 VPC 自己推
 apsara_peer_ri_spec:         "Large.1"
+# (A) 借用 helper 的 VPC(用 B 时留空):
+existing_vpc_id:     ""           # vpc-xxxx
+existing_vswitch_id: ""           # vsw-xxxx(mirror ECS 落在这里)
 
-# 用 (A) 时:填 helper 所在 VPC 的 CIDR 和该交换机网段里一个空闲 IP。
-# 用 (B) 时:保持下面这组默认的独立网段即可。
+# 用 (B) 时:下面这组是**新建**那个 VPC 的网段,保持默认即可——但**不能和
+# helper 自己的 VPC 网段重叠**,重叠了对等路由会打架。helper 的网段用
+# `curl -s http://100.100.100.200/latest/meta-data/vpc-cidr-block` 查。
+# 用 (A) 时:把 vpc_cidr 改成 helper VPC 的网段,mirror_private_ip 改成该交换机
+# 网段里一个空闲地址。
 vpc_cidr:             10.0.0.0/16
 private_subnet_cidr:  10.0.16.0/20
 private_subnet_cidr2: 10.0.32.0/20

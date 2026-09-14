@@ -55,6 +55,16 @@ jobs:
       - name: Install PyYAML (for the ROS tag lint)
         run: pip install PyYAML
 
+      - name: Apsara discovery unit test
+        # discover.py WRITES group_vars/all.yml.  A wrong value there does not
+        # fail loudly — it fails forty minutes later somewhere unrelated.  These
+        # are the pure, cloud-free parts: indent isolation between the top-level
+        # `region` and cloud_env's `REGION`, empty values staying `""` (a bare
+        # empty parses as None and `None | length` is what nas_available would
+        # hit), and the CIDR overlap check.
+        run: |
+          python3 scripts/apsara/discover_test.py
+
       - name: ROS template tag lint
         # !Condition is not supported by Aliyun ROS at all — it rejects the whole
         # template — and !Not parses but always evaluates false.  Both look
