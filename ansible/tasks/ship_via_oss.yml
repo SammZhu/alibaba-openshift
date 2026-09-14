@@ -51,6 +51,19 @@
       - "--endpoint={{ _ship_pub_endpoint }}"
     rc_argv: "{{ oss_cli_argv + _oss_rest }}"
 
+# 2026-09-14:08a 在这一步失败,stderr 只有 `ssh: Could not resolve hostname :` ——
+# root@ 后面什么都没有。ssh 对空主机名的说法完全不指向是哪个变量塌了,而这条任务
+# 已经重试了三次(rc_retries:3/rc_delay:15),三次字节相同 —— 不是抖动,是状态。
+# 查那一次花了十几轮外围推理,而下面这一行就能把它变成一句话。
+- name: "ship_via_oss [{{ ship_object }}] — the ssh target must actually have a host"
+  ansible.builtin.assert:
+    that: _ssh_root_mirror is search('root@\S')
+    fail_msg: >-
+      _ssh_root_mirror 渲染成了「{{ _ssh_root_mirror | default('(未定义)') }}」——
+      root@ 后面没有主机名,说明用到它的那一刻 mirror_private_ip 是空的。
+      ssh 只会说 "Could not resolve hostname :",完全不提这个变量,所以在这里先拦住。
+    quiet: true
+
 - name: "ship_via_oss [{{ ship_object }}] — mirror pulls from OSS (internal endpoint, RAM role)"
   ansible.builtin.include_tasks: ../tasks/run_cli.yml
   vars:
