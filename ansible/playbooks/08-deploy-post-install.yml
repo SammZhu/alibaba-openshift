@@ -1169,8 +1169,13 @@
             zoneId: "{{ nas_zone_id }}"
             vpcId: "{{ nas_vpc_id }}"
             vSwitchId: "{{ nas_vsw_id }}"
-      register: nas_sc
-      changed_when: "'unchanged' not in nas_sc.stdout"
+      # NOT `nas_sc`: 13 has a play var of that name, and a registered variable is
+      # a host fact that outranks a later play's vars — 13's StorageClass name
+      # became this result dict, and the PVC died on "cannot unmarshal object
+      # into ... storageClassName of type string".  Harmless while each phase ran
+      # in its own ansible process; site-apsara.yml puts them in one.
+      register: _nas_sc_apply
+      changed_when: "'unchanged' not in _nas_sc_apply.stdout"
       when:
         # Gate on the service existing before the network params: without this
         # the class was created on dyz7, where there is no NAS at all, and the
