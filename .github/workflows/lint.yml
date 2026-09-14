@@ -55,6 +55,17 @@ jobs:
       - name: Install PyYAML (for the ROS tag lint)
         run: pip install PyYAML
 
+      - name: Boot-image stream detection unit test
+        # Upstream split data/data/coreos/rhcos.json into coreos-rhel-{9,10}.json
+        # in 4.22.  The detector asked for the old name, got a real 404, read it
+        # as "this minor has no branch yet" and stopped — so 4.22 and everything
+        # above it went invisible while the job reported "nothing to bake".
+        # These pin the selection rule (match the stream to the branch, never
+        # fall back to another release's stream).  A future rename is caught at
+        # runtime by StreamFileMissing, not here.
+        run: |
+          python3 scripts/bootimage_detect_test.py
+
       - name: Component image tag drift gate
         # vars/images.yml is the source of truth, but build-mirror-tarball.sh is
         # a standalone bash script that cannot read ansible vars, so it carries

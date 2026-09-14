@@ -22,8 +22,19 @@ import time
 import urllib.error
 import urllib.request
 
-INSTALLER_RHCOS = ("https://raw.githubusercontent.com/openshift/installer/"
-                   "release-{branch}/data/data/coreos/rhcos.json")
+INSTALLER_COREOS_DIR = ("https://raw.githubusercontent.com/openshift/installer/"
+                        "release-{branch}/data/data/coreos/")
+
+# 上游改过这个文件的名字。4.21 及以前是单文件 rhcos.json;4.22 起按 RHEL 基座拆成
+# coreos-rhel-9.json / coreos-rhel-10.json,而 4.22 的两个文件里,rhel-9 那个的
+# stream 仍是 rhcos-4.21(升级路径),rhel-10 那个才是 rhcos-4.22。
+# 所以不能按文件名顺序挑,要按 stream 字段和分支号对得上来挑 —— 这条规则不写死
+# RHEL 代次,4.23 之后照样成立。
+STREAM_FILES = ["rhcos.json", "coreos-rhel-10.json", "coreos-rhel-9.json"]
+
+# 同目录里跨版本都存在的文件,用来区分「分支不存在」和「文件名又变了」。
+# 这个区别是这段代码的全部要点,见 fetch_stream_for_minor。
+BRANCH_MARKER = "OWNERS"
 
 
 def extract(stream):
@@ -94,22 +105,32 @@ def _confirm_404(url, times, delay):
     return True
 
 
-def fetch_stream_for_minor(branch, retries=4, backoff=2.0,
-                           confirm_404=1, confirm_delay=3.0):
-    """Fetch the installer rhcos.json for a release-X.Y branch; None on 404.
+class StreamFileMissing(Exception):
+    """分支在,但我们认识的 stream 文件名一个都不在 —— 上游又改名了。
+
+    这必须是个错误,不能当成「扫描到头了」。2026-09 就是这么丢掉 4.22 的:
+    上游把 rhcos.json 拆成 coreos-rhel-{9,10}.json,detect 拿到一个货真价实的
+    404,把它读成「这个 minor 还没出分支」,于是 break —— 4.22 **以及往上所有
+    版本**从此不可见,而 job 报 `nothing to bake`,退出码 0,绿的。
+    """
+
+
+def _fetch_json(url, retries=4, backoff=2.0, confirm_404=1, confirm_delay=3.0):
+    """Fetch one JSON URL; None on a confirmed 404.
 
     Transient network failures (connection reset / TLS handshake drop / timeout /
     429 / 5xx) are retried with exponential backoff — a flaky runner network
     must not fail the whole detection. Other 4xx still raise immediately.
 
-    A 404 means "this minor has no release branch yet", which is what stops
-    `enumerate_minors`. That makes it the one response where a single bad
-    reply is indistinguishable from the real answer, and getting it wrong is
-    invisible: the scan truncates and the job still reports "nothing to bake".
-    So a 404 is confirmed by re-requesting before it is believed. The cost is
-    one extra request per run (every scan ends on a 404 by construction).
+    A 404 is the one response where a single bad reply is indistinguishable
+    from the real answer, and getting it wrong is invisible: the scan
+    truncates and the job still reports "nothing to bake".  So a 404 is
+    confirmed by re-requesting before it is believed.  The cost is one extra
+    request per run (every scan ends on a 404 by construction).
+
+    What a confirmed 404 *means* is decided by the caller, not here — that
+    distinction is the whole point of fetch_stream_for_minor below.
     """
-    url = INSTALLER_RHCOS.format(branch=branch)
     last = None
     for attempt in range(retries):
         try:
@@ -137,6 +158,71 @@ def fetch_stream_for_minor(branch, retries=4, backoff=2.0,
     raise RuntimeError(f"failed to fetch {url} after {retries} attempts: {last}")
 
 
+def _url_exists(url, confirm_404=1, confirm_delay=3.0):
+    """这个 URL 在不在(不解析内容)。仅用于分支存在性判断。"""
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            return r.status == 200
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return not _confirm_404(url, confirm_404, confirm_delay)
+        return True          # 别的 HTTP 错不代表不存在
+    except (urllib.error.URLError, ConnectionError, TimeoutError):
+        return True          # 网络问题不该被读成「分支没了」
+
+
+def fetch_stream_for_minor(branch, **kw):
+    """release-X.Y 的 RHCOS stream;分支确实不存在时返回 None。
+
+    候选文件名有好几个(上游改过名),存在的可能不止一个:4.22 同时有
+    coreos-rhel-9.json(stream rhcos-4.21,升级路径)和 coreos-rhel-10.json
+    (stream rhcos-4.22)。**按 stream 字段和分支号对得上来挑**,不按文件名顺序
+    ——挑错的后果是给 4.22 烤了 4.21 的镜像,而两边都「成功」。
+
+    一个都没取到时要分清两种情况:
+      分支本身不在   → None,扫描正常结束
+      分支在但文件名不认识 → StreamFileMissing,必须响,不能静默停
+    """
+    base = INSTALLER_COREOS_DIR.format(branch=branch)
+    found = []
+    want = f"rhcos-{branch}"
+    for name in STREAM_FILES:
+        doc = _fetch_json(base + name, **kw)
+        if doc is None:
+            continue
+        found.append((name, doc))
+        # 已经拿到对得上的,不必再试剩下的候选(每个不存在的候选都要复验 404,
+        # 一次多两个请求)。
+        if doc.get("stream") == want:
+            break
+
+    if not found:
+        if _url_exists(base + BRANCH_MARKER):
+            raise StreamFileMissing(
+                f"release-{branch}: {base} 在(还有 {BRANCH_MARKER}),但 "
+                f"{STREAM_FILES} 一个都不在。上游多半又改了文件名 —— "
+                f"把新名字加进 STREAM_FILES。**不要**把这种情况当成扫描到头,"
+                f"那会让这个版本以及往上所有版本静默消失。")
+        return None
+
+    for name, doc in found:
+        if doc.get("stream") == want:
+            sys.stderr.write(f"[detect] release-{branch}: 用 {name} (stream {want})\n")
+            return doc
+
+    # 分支在、文件也在,但没有一个文件声明 rhcos-<branch> —— 这个 minor 还没有
+    # 自己的 RHCOS 流,是个尚未 GA 的开发分支。实测 release-4.23 就是这样:
+    # 它带着 coreos-rhel-{9,10}.json,两个的 stream 都还是 rhcos-4.22,而
+    # rhel-10 那个的 RHCOS(10.2.20260423-0)**比 4.22 自己的还旧**。
+    # 所以绝不能「退而用第一个」:那会给 4.23 烤一个 4.22 时代的镜像,而且两边
+    # 都报成功。没有自己的流 = 还没准备好,和分支不存在同等对待。
+    sys.stderr.write(
+        f"[detect] release-{branch}: 存在 {[n for n, _ in found]},但没有一个的 "
+        f"stream 是 {want}(看到的是 {[d.get('stream') for _, d in found]})—— "
+        f"这个 minor 还没有自己的 RHCOS 流,当作尚未发布,扫描到此为止\n")
+    return None
+
+
 def fetch_stream_for_version(version):
     b = minor(version)
     sys.stderr.write(f"[detect] resolving RHCOS for OCP {version} from release-{b}\n")
@@ -152,11 +238,10 @@ def enumerate_minors(floor_minor, cap=40):
     m = int(mn)
     while m <= int(mn) + cap:
         branch = f"{major}.{m}"
-        stream = fetch_stream_for_minor(branch)
+        stream = fetch_stream_for_minor(branch)     # 文件名不认识时会抛
         if stream is None:
             sys.stderr.write(
-                f"[detect] release-{branch}: no rhcos.json (404 confirmed) — "
-                f"scan stops here\n")
+                f"[detect] release-{branch}: 分支不存在(404 已复验)—— 扫描到此为止\n")
             break
         yield branch, stream
         m += 1
