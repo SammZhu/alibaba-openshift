@@ -160,43 +160,85 @@
     # never reached it, leaving three nodes with dead exec channels while the
     # MCO waits and readiness checks downstream silently depend on them.
     #
-    # Scope: only kubernetes.io/kubelet-serving CSRs whose requester is
-    # system:node:<name> for a node THIS cluster already has. That is the same
-    # judgement machine-approver makes for the nodes it does cover — the node is
-    # already a member, this is its rotation — and it is narrower than approving
-    # by signer alone, which would also sign for names that are not nodes here.
-    - name: "08 — approve pending kubelet-serving CSRs for nodes this cluster has"
+    # 2026-09-14: this step no longer approves anything — it checks that
+    # something else already did.
+    #
+    # It was a stopgap: a playbook only approves while someone is running it,
+    # and certificates rotate forever.  The permanent answer is the CSR
+    # controller the CAPA fork ships, whose serving branch requires only that
+    # the request comes from that node's own kubelet, that the node is already
+    # a member, and that every SAN is an address the node already advertises.
+    # Being backed by an AlibabaCloudMachine is deliberately NOT required
+    # (openshift-capi-alicloud #24) — that asks "did we create this node",
+    # which is provenance, not safety, and excluding ABI nodes is what left
+    # them with no renewal path in the first place.
+    #
+    # Measured on two independent fresh installs (2026-09-14, 16:56 and 22:56):
+    # this step approved **zero** both times.  During an ABI install the initial
+    # node certificates are approved by the bootstrap; rotations come later,
+    # by which time the controller is running.  So it was doing nothing while
+    # looking like it was protecting something.
+    #
+    # What remains is the check, which is what actually guards the failure mode:
+    # a pending serving CSR for a node this cluster has means nobody is covering
+    # it, and that node is about to stop serving exec and logs — with a symptom
+    # that never mentions certificates (three CSI checks once "failed" against
+    # volumes that were healthy and Bound).
+    #
+    # NOT live-proven on this cluster: that the controller approves an ABI
+    # node's rotation.  The code says it does and no serving CSR has been left
+    # pending, but the ABI nodes' install-time CSRs are garbage-collected within
+    # the hour, so the observed CAPAApprove decisions are all CAPA workers.
+    # Real proof needs a rotation (~monthly).  If that assumption ever breaks,
+    # this assert is what says so.
+    - name: "08 — no kubelet-serving CSR may be left pending for a node we have"
       ansible.builtin.shell: |
         set -o pipefail
         export KUBECONFIG='{{ kubeconfig_file }}'
         nodes=$(oc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
         # jq, not jsonpath: the jsonpath in oc has no null literal, so a filter
         # for "not yet decided" CSRs errors out and quietly selects nothing.
-        # (The apostrophe that used to be in this comment was itself an odd
-        #  single quote — it broke ansible arg parsing and both lint jobs.)
         pending=$(oc get csr -o json | jq -r '.items[]
           | select((.status.conditions // []) | length == 0)
           | [.metadata.name, .spec.signerName, .spec.username] | @tsv')
-        approved=0
+        stuck=""
         while read -r name signer user; do
           [ -z "$name" ] && continue
           [ "$signer" = "kubernetes.io/kubelet-serving" ] || continue
           case "$user" in system:node:*) node=${user#system:node:} ;; *) continue ;; esac
           printf '%s\n' "$nodes" | grep -qxF "$node" || continue
-          oc adm certificate approve "$name" >/dev/null && approved=$((approved+1))
+          stuck="$stuck $name($node)"
         done <<< "$pending"
-        echo "approved=$approved"
+        # Who decided the serving CSRs that still exist — the evidence that the
+        # controller, not this playbook, is the one doing the work.
+        approvers=$(oc get csr -o json | jq -r '.items[]
+          | select(.spec.signerName == "kubernetes.io/kubelet-serving")
+          | (.status.conditions // [] | map(.reason // "-") | join(","))' | sort | uniq -c | tr -s " " | paste -sd";" -)
+        echo "stuck=${stuck:-none} approvers=${approvers:-none}"
       args:
         executable: /bin/bash
-      register: _csr_approve
-      changed_when: "'approved=0' not in _csr_approve.stdout"
+      register: _csr_check
+      changed_when: false
 
     - name: "08 — kubelet serving certs"
       ansible.builtin.debug:
-        msg: >-
-          {{ _csr_approve.stdout | trim }} pending kubelet-serving CSR(s) approved.
-          An ABI node whose serving cert has rotated cannot serve exec or logs
-          until this happens, and the symptom is never a certificate error.
+        msg: "{{ _csr_check.stdout | trim }}"
+
+    - name: "08 — a pending serving CSR means nobody is renewing that node"
+      ansible.builtin.assert:
+        that: "'stuck=none' in _csr_check.stdout"
+        fail_msg: >-
+          These kubelet-serving CSRs are pending for nodes this cluster already
+          has: {{ (_csr_check.stdout | regex_search('stuck=(.*) approvers', '\\1') | first) | default('?') }}.
+          Nobody is approving them — the CAPA fork's CSR controller should be
+          (openshift-capi-alicloud #24), and machine-approver only ever covered
+          machine-api nodes. Left pending, those kubelets stop serving exec and
+          logs, and nothing reports it as a certificate problem: it surfaces as
+          whatever needed exec, e.g. CSI checks failing against healthy volumes.
+          Approve them by hand to unblock
+          (`oc adm certificate approve <name>`), then find out why the
+          controller did not.
+        quiet: true
 
     - name: "08 — is there recorded build state?"
       ansible.builtin.stat:
