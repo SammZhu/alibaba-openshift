@@ -168,6 +168,11 @@
           集群   : {{ cluster_name }}.{{ base_domain }}  ({{ cluster_topology | default('ha') }}, OpenShift {{ openshift_version }})
           环境   : {{ region }}   NAS: {{ '有' if (nas_available | bool) else '无(NAS 相关步骤自动跳过)' }}   CCM: {{ '开' if (ccm_enabled | default(true) | bool) else '关' }}
           阶段   : {{ apsara_phases_selected | join(' → ') }}
+          跳过   : {{ (apsara_phase_order | difference(apsara_phases_selected)) | join(' ') | default('(无)', true) }}
+
+          跳过的阶段**仍然会打印 PLAY 标题**,但里面每个任务都是 skipping —— 这是
+          `when` 加在 import_playbook 上的正常表现,不是「静默什么都没做」。
+          以上面这两行为准,不要以刷过去的 PLAY 标题为准。
           {% if 'mirror-build' in apsara_phases_selected %}
 
           注意:mirror-build 会拉取并上传约 25–30 GB 的镜像内容,耗时 1–2 小时。
