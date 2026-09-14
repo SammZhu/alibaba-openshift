@@ -42,5 +42,5 @@ export ORG_ID=org-... RG_ID=rs-... ENDPOINT_ROS=ros.cloud.ste3.com
 | Endpoint per service | `ENDPOINT` or `ENDPOINT_<PRODUCT>` (e.g. `ENDPOINT_ROS=ros.cloud.ste3.com`) |
 | STS instead of long-lived AK | set `STS_TOKEN` alongside `AK` / `SK` |
 
-See `../../../docs/apsara/QUICKSTART.md` for the endpoint/scheme table and the
+See `../../../docs/apsara/ROS-AND-RPC.md` for the endpoint/scheme table and the
 end-to-end mirror-stack create/delete flow.

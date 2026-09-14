@@ -1,0 +1,256 @@
+---
+# site-apsara.yml — 专有云(Apsara Stack)一键入口:从一台裸 helper 到一套带
+# worker/CSI/CCM 的 OpenShift 集群。
+#
+# 为什么单独一个文件,而不是让 site-agent.yml 认平台:公有云零回归是铁律,
+# 而这条链和公有云的差别不只是「多几个开关」——它多了 helper 准备(00a)、
+# 镜像内容构建(mirror-build)和三个必须在装机前就进 mirror 的自建镜像
+# (08b/08c/08d)。把这些塞进 site-agent.yml 只会让公有云路径多背四个
+# `when`,而每个 `when` 都是一次可能写错的机会。
+#
+# 用法(填好 group_vars/all.yml 之后):
+#
+#   ansible-playbook -i inventory.yml playbooks/site-apsara.yml
+#
+# 断在哪一步就从哪一步续跑(每个 playbook 都是幂等的):
+#
+#   ansible-playbook ... playbooks/site-apsara.yml -e apsara_from=06
+#
+# 只跑到某一步为止(例如只把 mirror 建好):
+#
+#   ansible-playbook ... playbooks/site-apsara.yml -e apsara_to=05
+#
+# 跳过个别步骤(例如 OSS 里已经有镜像内容,不必再花 1–2 小时重建):
+#
+#   ansible-playbook ... playbooks/site-apsara.yml -e '{"apsara_skip":["mirror-build"]}'
+#
+# 阶段顺序 apsara_phase_order / 选择逻辑 apsara_phases_selected 定义在
+# inventory.yml,和 nas_available 一样是惰性求值的 inventory 变量。
+#
+# ── 顺序里三个不显然、但错了就要重装的地方 ────────────────────────────────
+#
+# 1. **08b/08c/08d 在 06 之前,不在 08 之后。**
+#    这三个镜像是在 helper 上编译、层叠到「mirror 里已有的那层」再推回
+#    mirror 的,所以它们只要求 04 跑完(mirror 有内容),不要求集群存在。
+#    而 08d 产出的 `ccm_image_digest` 会被 06a 烤进 agent ISO 的 CCM
+#    manifest —— install-config 的 imageDigestSources 在第一个节点开机时
+#    就已定稿,ImageTagMirrorSet 要等 MCO,那时太晚了。把 08d 放到装机后,
+#    集群就只能靠 08e 事后补一次 CCM。
+#
+# 2. **08a 在 08 之前。** CAPI core 不到位,08 装出来的 provider 直接
+#    CrashLoop,报的却是 provider 的错。
+#
+# 3. **10 在 12 之前。** 12 要用 10 重新压好的 RHCOS worker 镜像;镜像不在,
+#    12 建出来的 ECS 永远起不来。
+#
+# 不在这条链里的:
+#   09-capa-smoke        —— 会**替换正在运行的**控制器,爆炸半径比 08 大,
+#                           留作手动验证(见 docs/apsara/DEPLOY.md)
+#   11-capa-routeb-join  —— 被 12 取代,同时跑会多出一台游离 worker
+#   99-teardown          —— 拆除永远显式跑,不进任何 site 入口
+
+- name: site-apsara — 检查配置并打印将要执行的阶段
+  hosts: local
+  gather_facts: false
+  tasks:
+    # 先验阶段名。apsara_phases_selected 里用的是 list.index(),名字写错时
+    # Jinja 抛的是 ValueError,错误信息里看不出是哪个变量写错了。
+    - name: "site-apsara — apsara_from / apsara_to 必须是已知阶段名"
+      ansible.builtin.assert:
+        that:
+          - apsara_from in apsara_phase_order
+          - apsara_to in apsara_phase_order
+          - apsara_phase_order.index(apsara_from) <= apsara_phase_order.index(apsara_to)
+        fail_msg: >-
+          apsara_from={{ apsara_from }} / apsara_to={{ apsara_to }} 不是合法的阶段区间。
+          可用阶段(按顺序):{{ apsara_phase_order | join(' ') }}
+        quiet: true
+
+    # apsara_phases_selected 是惰性模板,Ansible 会把整串模板的结果还原成真正
+    # 的 list。万一哪天它退化成字符串,`'08' in ...` 就从「成员判断」变成
+    # 「子串匹配」——而 "08" 是 "08a"/"08b"/"08d" 的子串,链条会静默地多跑
+    # 或少跑几步。这和 NAS 权限组按子串认领是同一类错(#67),所以在这里
+    # 把它变成一秒钟的硬失败。
+    - name: "site-apsara — 阶段选择必须是列表(不能退化成字符串)"
+      ansible.builtin.assert:
+        that:
+          - apsara_phases_selected is sequence
+          - apsara_phases_selected is not string
+        fail_msg: >-
+          apsara_phases_selected 解析成了 {{ apsara_phases_selected | type_debug }}
+          而不是 list;阶段判断会退化成子串匹配。检查 inventory.yml 里这个变量的定义。
+        quiet: true
+
+    - name: "site-apsara — apsara_skip 里的名字必须是已知阶段名"
+      ansible.builtin.assert:
+        that: (apsara_skip | difference(apsara_phase_order)) | length == 0
+        fail_msg: >-
+          apsara_skip 里有不认识的阶段:{{ apsara_skip | difference(apsara_phase_order) | join(' ') }}。
+          可用阶段:{{ apsara_phase_order | join(' ') }}
+        quiet: true
+
+    # 这条链只适用于专有云 + ABI。公有云有自己的 site.yml/site-agent.yml,
+    # 走错入口的代价是跑到 03 才发现,那时 mirror-build 已经花掉一两个小时。
+    - name: "site-apsara — 这是专有云入口:cloud_platform 必须是 apsara"
+      ansible.builtin.assert:
+        that: (cloud_platform | default('public')) == 'apsara'
+        fail_msg: >-
+          cloud_platform={{ cloud_platform | default('public') }} —— 这是专有云(Apsara Stack)
+          的入口。公有云请用 playbooks/site.yml(Assisted)或 playbooks/site-agent.yml(ABI)。
+        quiet: true
+
+    # 专有云上只有 ABI 走通过。Assisted 要连 api.openshift.com 起 REST 会话,
+    # 专有云里的节点到不了,而失败发生在装机中段。
+    - name: "site-apsara — 专有云只支持 Agent-based 安装"
+      ansible.builtin.assert:
+        that: (installation_method | default('Assisted')) | lower in ['agent', 'agent-based']
+        fail_msg: >-
+          installation_method={{ installation_method | default('Assisted') }} —— 专有云请设
+          `installation_method: Agent-based`。Assisted 需要节点连到 api.openshift.com 的
+          assisted-service,专有云里到不了,而且会跑到装机中段才失败。
+        quiet: true
+
+    # 下面这些键少一个,链条就会在某个昂贵的步骤中间停。全部是不需要联网就能
+    # 判断的,所以放在这里——五秒钟给出答案,而不是四十分钟。
+    - name: "site-apsara — 专有云必填项"
+      ansible.builtin.assert:
+        that:
+          - (cloud_cli | default('aliyun')) != 'aliyun'
+          - (cloud_env.AK | default('')) | length > 0
+          - (cloud_env.SK | default('')) | length > 0
+          - (cloud_env.ENDPOINT_ROS | default('')) | length > 0
+          - (cloud_env.ENDPOINT_ECS | default('')) | length > 0
+          - (cloud_env.ENDPOINT_VPC | default('')) | length > 0
+          - (cloud_env.ENDPOINT_CLOUDDNS | default('')) | length > 0
+          - (apsara_oss_endpoint | default('')) | length > 0
+          - (apsara_image_id | default('')) | length > 0
+          - (oss_bucket | default('')) | length > 0
+          - (region | default('')) | length > 0
+          - (zone | default('')) | length > 0
+          - (control_plane_type | default('')) | length > 0
+          - (mirror_instance_type | default('')) | length > 0
+          - (system_disk_category | default('')) | length > 0
+        fail_msg: >-
+          group_vars/all.yml 还缺专有云必填项。对照 group_vars/all.yml.apsara.example
+          逐项补齐:cloud_cli(指向 scripts/apsara/cloudcli)、cloud_env 的
+          AK/SK/ENDPOINT_ROS/ENDPOINT_ECS/ENDPOINT_VPC/ENDPOINT_CLOUDDNS、
+          apsara_oss_endpoint、apsara_image_id、oss_bucket、region/zone、
+          control_plane_type、mirror_instance_type、system_disk_category。
+          每一项怎么查见 docs/apsara/QUICKSTART.md。
+        quiet: true
+
+    # ENDPOINT_SLB 只在开了 CCM 时才需要,但缺了它 CCM 会自己拼一个专有云上不
+    # 存在的域名,而症状是每个 LoadBalancer Service 永远 Pending——离原因很远。
+    - name: "site-apsara — 开了 CCM 就必须有 SLB 端点"
+      ansible.builtin.assert:
+        that: (cloud_env.ENDPOINT_SLB | default('')) | length > 0
+        fail_msg: >-
+          ccm_enabled 为真,但 cloud_env.ENDPOINT_SLB 是空的。CCM 会去解析
+          slb.{{ region }}.aliyuncs.com —— 那个域名在专有云上不存在,结果是每个
+          LoadBalancer Service 永远 Pending。用 scripts/apsara/probe-endpoints.sh
+          探出本环境的 SLB 端点,或者设 ccm_enabled: false。
+        quiet: true
+      when: ccm_enabled | default(true) | bool
+
+    # 版本必须是 X.Y.Z。写成 "4.20" 时 mirror 按某个具体补丁版本构建,而装机
+    # 侧会解析成「最新」,两边错开的症状是节点拉不到镜像——离真正的原因很远。
+    - name: "site-apsara — openshift_version 必须钉到补丁版本(X.Y.Z)"
+      ansible.builtin.assert:
+        that: (openshift_version | default('')) is match('^[0-9]+\\.[0-9]+\\.[0-9]+$')
+        fail_msg: >-
+          openshift_version={{ openshift_version | default('(未设置)') }} —— 必须是
+          X.Y.Z(例如 4.20.22),不能是 "4.20" 这种频道形式。
+        quiet: true
+
+    - name: "site-apsara — 本次将要执行的阶段"
+      ansible.builtin.debug:
+        msg: |
+          集群   : {{ cluster_name }}.{{ base_domain }}  ({{ cluster_topology | default('ha') }}, OpenShift {{ openshift_version }})
+          环境   : {{ region }}   NAS: {{ '有' if (nas_available | bool) else '无(NAS 相关步骤自动跳过)' }}   CCM: {{ '开' if (ccm_enabled | default(true) | bool) else '关' }}
+          阶段   : {{ apsara_phases_selected | join(' → ') }}
+          {% if 'mirror-build' in apsara_phases_selected %}
+
+          注意:mirror-build 会拉取并上传约 25–30 GB 的镜像内容,耗时 1–2 小时。
+          如果这个 bucket 里已经有同版本的内容,加上
+            -e '{"apsara_skip":["mirror-build"]}'
+          {% endif %}
+          日志   : ansible/logs/ansible.log(实时)
+
+# ── helper 准备 ───────────────────────────────────────────────────────────────
+# 装包、生成 SSH 密钥、编译 apsara-rpc/apsara-oss、clone 三个兄弟仓库、装 oc。
+# 可重复跑,已满足的步骤自动跳过。
+- ansible.builtin.import_playbook: 00a-prepare-operator.yml
+  when: "'00a' in apsara_phases_selected"
+
+- ansible.builtin.import_playbook: 00-preflight.yml
+  when: "'00' in apsara_phases_selected"
+
+# ── mirror 内容:构建并推到 OSS(1–2 小时,同版本只需一次)────────────────────
+- ansible.builtin.import_playbook: mirror-build.yml
+  when: "'mirror-build' in apsara_phases_selected"
+
+# ── 持久层:mirror-stack(VPC/NAT/RAM/mirror ECS)+ 与 helper VPC 打通 ───────
+- ansible.builtin.import_playbook: 03-create-mirror-stack.yml
+  when: "'03' in apsara_phases_selected"
+
+- ansible.builtin.import_playbook: 04-prepare-mirror.yml
+  when: "'04' in apsara_phases_selected"
+
+- ansible.builtin.import_playbook: 05-verify-mirror.yml
+  when: "'05' in apsara_phases_selected"
+
+# ── 三个自建镜像:在 helper 上编译,层叠到 mirror 里已有的那层,推回 mirror ──
+# 必须在 06 之前:08d 写进 state 的 ccm_image_digest 要被 06a 烤进 agent ISO。
+- ansible.builtin.import_playbook: 08b-build-capa-image.yml
+  when: "'08b' in apsara_phases_selected"
+
+- ansible.builtin.import_playbook: 08c-build-csi-operator-image.yml
+  when: "'08c' in apsara_phases_selected"
+
+- ansible.builtin.import_playbook: 08d-build-ccm-image.yml
+  when:
+    - "'08d' in apsara_phases_selected"
+    - ccm_enabled | default(true) | bool
+
+# ── 装机(ABI 的 ENI-first / reimage 两阶段)───────────────────────────────────
+- ansible.builtin.import_playbook: 06-create-cluster-stack.yml
+  when: "'06' in apsara_phases_selected"
+
+- ansible.builtin.import_playbook: 06a-build-agent-iso.yml
+  when: "'06a' in apsara_phases_selected"
+
+- ansible.builtin.import_playbook: 06b-reimage-masters.yml
+  when: "'06b' in apsara_phases_selected"
+
+- ansible.builtin.import_playbook: 07-install-cluster-agent.yml
+  when: "'07' in apsara_phases_selected"
+
+# ── 装机后:worker plane + 存储 ───────────────────────────────────────────────
+- ansible.builtin.import_playbook: 08a-capi-core.yml
+  when: "'08a' in apsara_phases_selected"
+
+- ansible.builtin.import_playbook: 08-deploy-post-install.yml
+  when: "'08' in apsara_phases_selected"
+
+- ansible.builtin.import_playbook: 10-prepare-worker-bootimage.yml
+  when: "'10' in apsara_phases_selected"
+
+- ansible.builtin.import_playbook: 12-capa-machinedeployment.yml
+  when: "'12' in apsara_phases_selected"
+
+# ── 验收 ─────────────────────────────────────────────────────────────────────
+# 默认跑。对不熟悉 OpenShift 的人来说,「装完了」和「装对了」之间差的就是这
+# 三步:它们建真盘、真快照、真 LoadBalancer,验完自己删干净。不想跑就
+# -e '{"apsara_skip":["13","14","15"]}'。
+- ansible.builtin.import_playbook: 13-csi-smoke.yml
+  when: "'13' in apsara_phases_selected"
+
+- ansible.builtin.import_playbook: 14-ccm-smoke.yml
+  when:
+    - "'14' in apsara_phases_selected"
+    - ccm_enabled | default(true) | bool
+
+- ansible.builtin.import_playbook: 15-ccm-dataplane.yml
+  when:
+    - "'15' in apsara_phases_selected"
+    - ccm_enabled | default(true) | bool

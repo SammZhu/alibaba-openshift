@@ -54,6 +54,29 @@ all:
     # the cluster VPC, and names it in the StorageClass.
     nas_access_group_name: "{{ cluster_name }}-nas"
 
+    # ── playbooks/site-apsara.yml 的阶段表 ──────────────────────────────────
+    # 专有云一键入口按这个顺序跑。放在 inventory 里而不是 site-apsara.yml 里,
+    # 是因为 import_playbook 的 `when` 只能看到 inventory / extra-vars 这一层
+    # 的变量——play 里 set_fact 出来的东西对它不可见。
+    #
+    # 顺序里有三处不显然但错了就要重装的依赖,理由写在 site-apsara.yml 的头部:
+    # 08b/08c/08d 在 06 之前(08d 的 digest 要烤进 agent ISO)、08a 在 08 之前、
+    # 10 在 12 之前。改这个列表前先读那段。
+    apsara_phase_order:
+      ['00a', '00', 'mirror-build', '03', '04', '05',
+       '08b', '08c', '08d',
+       '06', '06a', '06b', '07',
+       '08a', '08', '10', '12',
+       '13', '14', '15']
+    apsara_from: '00a'          # 续跑:-e apsara_from=06
+    apsara_to: '15'             # 只跑到某步:-e apsara_to=05
+    apsara_skip: []             # 跳过个别步骤:-e '{"apsara_skip":["mirror-build"]}'
+    # 惰性求值,和上面的 nas_available 一样——extra-vars 覆盖 from/to/skip 后
+    # 这里自动跟着变。
+    apsara_phases_selected: >-
+      {{ apsara_phase_order[apsara_phase_order.index(apsara_from):apsara_phase_order.index(apsara_to) + 1]
+         | difference(apsara_skip) }}
+
   hosts:
     local:
       ansible_connection: local
