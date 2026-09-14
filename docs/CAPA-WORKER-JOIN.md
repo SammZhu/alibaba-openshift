@@ -190,8 +190,15 @@ never approves their kubelet CSRs — they would hang NotReady until someone ran
 
 - **bootstrap** (`kube-apiserver-client-kubelet`): approved only for the
   node-bootstrapper SA when a provisioned `AlibabaCloudMachine` is awaiting its node.
-- **serving** (`kubelet-serving`): approved only when the node exists, is backed
-  by a CAPA machine (providerID match), and every SAN is one of that node's addresses.
+- **serving** (`kubelet-serving`): approved when the node exists, the request
+  comes from that node's own kubelet, and every SAN is one of that node's
+  addresses.  Being backed by a CAPA machine was a fourth requirement until
+  openshift-capi-alicloud #24 removed it: it answers "did we create this node",
+  which is provenance rather than safety, and it left every node this provider
+  did not create — on an ABI cluster, the control plane and the install-time
+  workers — with no renewal path at all.  Observed on ste2 2026-09-13: 57
+  pending serving CSRs and three kubelets that had stopped serving exec and
+  logs.  The provenance is still recorded, in the approval reason.
 
 Validated live 2026-06-07: a worker joined Ready with **no manual approval** —
 both CSRs auto-approved (`reason=CAPAApprove`). 11-capa-routeb-join.yml therefore

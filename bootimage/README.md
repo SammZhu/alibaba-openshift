@@ -75,6 +75,36 @@ no firewall hole. Register (private repo only):
   source (prefer the internal mirror), and the Alibaba OSS/ECS **internal** endpoints.
 - **Security**: private repo, no fork-PR execution on self-hosted, pin to this workflow.
 
+## Where the RHCOS stream comes from (and how 4.22 went missing)
+
+Detection reads the installer's own stream metadata from
+`openshift/installer`, branch `release-X.Y`, under `data/data/coreos/`.  The
+filename is not stable:
+
+| | |
+| --- | --- |
+| 4.21 and earlier | `rhcos.json` |
+| 4.22 and later | `coreos-rhel-9.json` + `coreos-rhel-10.json` |
+
+4.22 ships both, and **the rhel-9 one still declares `stream: rhcos-4.21`** —
+it is the upgrade path.  So the file is chosen by matching `stream` to the
+branch, not by filename order; for 4.22 that selects `coreos-rhel-10.json`,
+RHCOS 10.2.x, **a RHEL 10 base this pipeline has never baked**.  Watch the
+first 4.22 run rather than treating it as routine.
+
+A minor whose files exist but where **none** declares `rhcos-<branch>` is
+treated as not released yet — `release-4.23` is exactly that today: both files
+are still on `rhcos-4.22`, and the rhel-10 one is at an *older* RHCOS than 4.22
+itself.  Falling back to "whatever file is there" would bake 4.23 from a
+4.22-era image with both sides reporting success.
+
+This is how 4.22 stayed invisible for months: detection asked for `rhcos.json`,
+got a genuine 404, read it as "this minor has no branch yet" and stopped — so
+4.22 **and everything above it** disappeared while the job reported
+`nothing to bake` and exited 0.  If upstream renames these files again the
+detector now raises `StreamFileMissing` (the directory and its `OWNERS` are
+there, the filenames are not) instead of silently truncating the scan.
+
 ## Choosing a version to deploy (operator)
 
 `bootimage/provenance/` is the **menu**: every entry is a baked, gate-passed image
