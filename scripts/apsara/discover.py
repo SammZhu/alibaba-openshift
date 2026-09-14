@@ -127,8 +127,12 @@ def classify(rc, out, err):
     blob = (out or "") + (err or "")
     if '"asapiSuccess":true' in blob.replace(" ", "") or (rc == 0 and blob.strip().startswith("{")):
         return "ok"
+    # 凭据问题要单独分出来:它会让**每一个**候选都返回同样的错,于是「第一个能
+    # 解析的」就被当成命中,产出一整份看起来很确定、其实全是猜的配置。
+    for marker in ("SignatureDoesNotMatch", "InvalidAccessKeyId", "InvalidSecurityToken"):
+        if marker in blob:
+            return "authfail"
     for marker in ("InvalidAction.NotFound", "InvalidVersion", "NeedSsl",
-                   "SignatureDoesNotMatch", "InvalidAccessKeyId",
                    "Forbidden", "NoPermission"):
         if marker in blob:
             return "reachable"          # 端点通,是调用本身的问题
@@ -143,8 +147,16 @@ def resolves(host):
         return False
 
 
+class AuthFailed(Exception):
+    """AK/SK 不被接受 —— 再探下去只会产出一份全是猜测的配置。"""
+
+
 def discover_endpoints(region, domain, found):
-    """逐产品试形状。found 会被就地填充,后续调用直接用它做环境。"""
+    """逐产品试形状。found 会被就地填充,后续调用直接用它做环境。
+
+    每个产品的结果是 (命中的主机名, 说明, 是否**调用成功**确认过)。第三项很重要:
+    只靠「端点可达」认下来的值没有被证明是对的,不能和真跑通的值一样对待。
+    """
     results = {}
     for prod in PROBE_ORDER:
         labels, key, action, needs_region = PROBES[prod]
@@ -161,20 +173,29 @@ def discover_endpoints(region, domain, found):
         resolving = [h for h in ordered if resolves(h)]
         if not resolving:
             note = "所有候选域名都不解析 —— 这套环境很可能没有部署这个产品"
+        confirmed = False
         for host in resolving:
             env = dict(found)
             env[f"ENDPOINT_{prod}"] = host
             rc, out, err = cloudcli(key, action, env, **params)
             verdict = classify(rc, out, err)
+            if verdict == "authfail":
+                # 每个候选都会这样答,继续探毫无意义。
+                raise AuthFailed(
+                    f"{prod} 在 {host} 上返回凭据错误:{(err or out).strip()[:100]}\n"
+                    "  AK/SK(或 STS token)不被这个网关接受。先把凭据弄对再探 ——\n"
+                    "  凭据错时每个候选都返回同样的错,探测会把第一个能解析的域名\n"
+                    "  当成命中,产出一份看起来很确定、其实全是猜的配置。")
             if verdict == "ok":
-                hit, note = host, "调用成功"
+                hit, note, confirmed = host, "调用成功", True
                 break
             if verdict == "reachable" and not hit:
-                hit, note = host, f"端点可达,但调用返回:{(err or out).strip()[:80]}"
+                hit, note = host, f"端点可达但调用未成功:{(err or out).strip()[:70]}"
         if hit:
             found[f"ENDPOINT_{prod}"] = hit
-        results[prod] = (hit, note, len(resolving))
-        mark = "✓" if hit else ("·" if prod not in REQUIRED_ENDPOINTS else "✗")
+        results[prod] = (hit, note, confirmed)
+        mark = "✓" if confirmed else ("?" if hit else
+                                      ("·" if prod not in REQUIRED_ENDPOINTS else "✗"))
         log(f"  {mark} {prod:<9} {hit or '(未找到)':<45} {note}")
     return results
 
@@ -399,9 +420,15 @@ def main():
     log("")
     log("── 2. 端点(逐个形状真实调用)──────────────────────────────────")
     found = dict(base_env)
-    ep = discover_endpoints(region, domain, found)
+    try:
+        ep = discover_endpoints(region, domain, found)
+    except AuthFailed as e:
+        log("")
+        log(f"  ✗ 凭据不对,已停止:{e}")
+        return 2
 
     missing_required = [p for p in REQUIRED_ENDPOINTS if not ep[p][0]]
+    unconfirmed = [p for p in PROBE_ORDER if ep[p][0] and not ep[p][2]]
     has_nas = bool(ep["NAS"][0])
 
     log("")
@@ -520,6 +547,10 @@ def main():
     if missing_required:
         log(f"  ✗ 必需的端点没找到:{missing_required} —— 装不下去。"
             f"用 scripts/apsara/probe-endpoints.sh {domain} --call 手工再看一遍")
+    if unconfirmed:
+        log(f"  ? 这些端点只是「可达」,没有一次调用真的成功过:{unconfirmed}")
+        log("    上面每行的说明里有网关的原话。可达不等于对:同一个网关可能对好几个"
+            "域名都应答,而只有一个是这个产品的。")
     if unresolved:
         log(f"  ⚠ 还有 {len(unresolved)} 项没能确定,写成了 {CHANGEME}:{unresolved}")
     else:

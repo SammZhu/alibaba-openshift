@@ -110,6 +110,115 @@ check("正常取值", d.dig({"a": {"b": 1}}, "a", "b") == 1)
 check("缺层返回 default", d.dig({"a": {}}, "a", "b", default="x") == "x")
 check("中间不是 dict 也返回 default", d.dig({"a": 1}, "a", "b", default="x") == "x")
 
+print("响应解析 —— 把网关的返回喂进去,看解出来的是不是那回事")
+# ⚠ 这些是**文档形状**,不是从 ste2 抓下来的报文。它们能证明解析器不会在正确
+# 的形状上解错或崩掉,**不能**证明网关真的发这个形状 —— 那要等带凭据的实跑。
+# 之所以还是要写:在此之前这几条路径一行都没被执行过,连拼错一个键名都发现
+# 不了。
+RESPONSES = {
+    ("ecs", "DescribeZones"): {
+        "Zones": {"Zone": [{"ZoneId": "cn-wulan-ste2-amtest11001-a"}]}},
+    ("ecs", "DescribeImages"): {"Images": {"Image": [
+        {"ImageId": "centos_7_9_x64_20G_alibase.vhd", "Architecture": "x86_64",
+         "OSName": "CentOS 7.9"},
+        {"ImageId": "aliyun_3_x86_64_20G_alibase_20241103.vhd", "Architecture": "x86_64",
+         "OSName": "Alibaba Cloud Linux 3"},
+        {"ImageId": "win2019_x64.vhd", "Architecture": "i386", "OSName": "Windows"},
+    ]}},
+    ("ecs", "DescribeAvailableResource"): {"AvailableZones": {"AvailableZone": [
+        {"AvailableResources": {"AvailableResource": [
+            {"SupportedResources": {"SupportedResource": [
+                {"Value": "ecs.g6x-hg-k10-c1m1.large", "Status": "Available"},
+                {"Value": "ecs.g6x-hg-k10-c1m4.2xlarge", "Status": "Available"},
+                {"Value": "ecs.sold-out.xlarge", "Status": "SoldOut"},
+                {"Value": "cloud_pperf", "Status": "Available"},
+                {"Value": "cloud_sperf", "Status": "Available"},
+            ]}}]}}]}},
+    ("ecs", "DescribeInstanceTypes"): {"InstanceTypes": {"InstanceType": [
+        {"InstanceTypeId": "ecs.g6x-hg-k10-c1m1.large", "CpuCoreCount": 2, "MemorySize": 2.0},
+        {"InstanceTypeId": "ecs.g6x-hg-k10-c1m4.2xlarge", "CpuCoreCount": 8, "MemorySize": 32.0},
+        {"InstanceTypeId": "ecs.sold-out.xlarge", "CpuCoreCount": 4, "MemorySize": 16.0},
+    ]}},
+    ("ecs", "DescribeImageSupportInstanceTypes"): {"InstanceTypes": {"InstanceType": [
+        {"InstanceTypeId": "ecs.g6x-hg-k10-c1m1.large"},
+        {"InstanceTypeId": "ecs.g6x-hg-k10-c1m4.2xlarge"},
+        {"InstanceTypeId": "ecs.sold-out.xlarge"},
+    ]}},
+    # ste2 的真实情况:Performance 列着但 Protocol 是空的,只有 Capacity 给 NFS
+    ("nas", "DescribeZones"): {"Zones": {"Zone": [
+        {"ZoneId": "cn-wulan-ste2-amtest11001-a",
+         "Performance": {"Protocol": []},
+         "Capacity": {"Protocol": ["nfs"]}},
+    ]}},
+}
+
+_calls = []
+
+
+def fake_cloudcli(product_key, action, env_extra, **params):
+    _calls.append((product_key, action))
+    body = RESPONSES.get((product_key, action))
+    if body is None:
+        return 1, "", "InvalidAction.NotFound"
+    return 0, json.dumps(body), ""
+
+
+import json  # noqa: E402  - 只有这段假网关用得到
+_real = d.cloudcli
+d.cloudcli = fake_cloudcli
+try:
+    check("可用区解出来了", d.discover_zones("r", {}) == ["cn-wulan-ste2-amtest11001-a"])
+
+    img, note = d.discover_image("r", {})
+    check("镜像偏好 aliyun_3", img == "aliyun_3_x86_64_20G_alibase_20241103.vhd", img)
+    check("非 x86_64 的被排除掉", "3 个 x86_64" not in note and "2 个 x86_64" in note, note)
+
+    types = d.available_resources("r", "z", {}, "InstanceType")
+    check("SoldOut 的规格不算可用", "ecs.sold-out.xlarge" not in types, types)
+    check("Available 的都在", "ecs.g6x-hg-k10-c1m4.2xlarge" in types, types)
+
+    specs = d.instance_type_specs({})
+    check("规格的 cpu/内存解出来了",
+          specs.get("ecs.g6x-hg-k10-c1m4.2xlarge") == (8, 32.0),
+          specs.get("ecs.g6x-hg-k10-c1m4.2xlarge"))
+
+    supported = d.image_supported_types("img", {})
+    pool = sorted(set(types) & supported)
+    check("master 规格选到满足 4C16G 的那个",
+          d.pick_type(pool, specs, 4, 16) == "ecs.g6x-hg-k10-c1m4.2xlarge",
+          d.pick_type(pool, specs, 4, 16))
+    check("SoldOut 那台虽然规格够也不会被选中",
+          "ecs.sold-out.xlarge" not in pool, pool)
+
+    nas, nas_note = d.discover_nas_storage_type("r", {})
+    check("NAS 盘类选 Capacity 而不是空 Protocol 的 Performance",
+          nas == "Capacity", f"{nas} / {nas_note}")
+
+    # 端点探测:候选能解析但调用失败时,不能当成找到了
+    d.resolves = lambda h: True
+    found = {}
+    res = d.discover_endpoints("cn-wulan-ste2-d01", "cloud.ste2.com", found)
+    check("端点探到了", res["ECS"][0] != "" and res["NAS"][0] != "", res["ECS"])
+    # 假网关对没定义的动作返回 InvalidAction.NotFound = 「可达」,不是「确认」。
+    # 这个区别是整段的重点:可达不等于对。
+    check("只靠可达认下来的端点标成未确认", res["ECS"][2] is False, res["ECS"])
+    nas_ok = d.discover_endpoints("cn-wulan-ste2-d01", "cloud.ste2.com", {})["NAS"]
+    check("真调用成功的端点标成已确认", nas_ok[2] is True, nas_ok)
+
+    # 凭据错:每个候选都会返回同样的错。不停下来的话,「第一个能解析的域名」会被
+    # 当成命中,产出一份看起来很确定、其实全是猜的配置。
+    d.cloudcli = lambda *a, **k: (1, "", "SignatureDoesNotMatch")
+    try:
+        d.discover_endpoints("cn-wulan-ste2-d01", "cloud.ste2.com", {})
+        check("凭据错时立刻停", False, "没有抛 AuthFailed")
+    except d.AuthFailed:
+        check("凭据错时立刻停", True)
+    check("凭据错和动作错分成两类",
+          d.classify(1, "", "SignatureDoesNotMatch") == "authfail"
+          and d.classify(1, "", "InvalidAction.NotFound") == "reachable")
+finally:
+    d.cloudcli = _real
+
 print("对真实模板做一次完整写入")
 if os.path.exists(TEMPLATE):
     lines = open(TEMPLATE).readlines()
