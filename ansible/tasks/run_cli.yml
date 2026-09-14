@@ -9,7 +9,12 @@
 #   rc_cmd   : shell string — only when argv can't express it (pipes / heredoc /
 #              ssh-wrapped commands)
 # Optional:
-#   rc_no_log      : default true.  Set false for non-secret commands.
+#   rc_no_log      : default true.  Set false for non-secret commands.  Doing so
+#                    ALSO surfaces the command itself on failure — the caller has
+#                    already declared it carries no secret, and stderr alone is
+#                    often not enough to act on: an ssh whose target rendered
+#                    empty reports `Could not resolve hostname :` and nothing
+#                    about which variable produced it.
 #   rc_changed     : changed_when value, default true.
 #   rc_retries     : retry the command until rc==0, default 1 (single shot).
 #   rc_delay       : seconds between retries, default 0.
@@ -55,6 +60,11 @@
       ── stderr ────────────────────────────────────────────────
       {{ rc.stderr | default('(no stderr captured)') | trim }}
       ──────────────────────────────────────────────────────────
+      {% if not (rc_no_log | default(true) | bool) and (rc.cmd | default('')) %}
+      ── the command that was run ──────────────────────────────
+      {{ rc.cmd if (rc.cmd is string) else (rc.cmd | join(' ')) }}
+      ──────────────────────────────────────────────────────────
+      {% endif %}
       {% if (rc_show_stdout | default(false)) and (rc.stdout | default('') | trim) %}
       ── stdout (tail) ─────────────────────────────────────────
       {{ (rc.stdout | default('')).split('\n')[-15:] | join('\n') }}
