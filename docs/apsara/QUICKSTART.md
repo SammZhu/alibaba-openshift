@@ -244,6 +244,10 @@ ansible-playbook -i inventory.yml playbooks/site-apsara.yml
 | `10` `12` | 重压 worker 启动镜像 → 建 worker 池 | ~30 分钟 |
 | `13` `14` `15` | 验收:存储、LoadBalancer、数据面 | ~15 分钟 |
 
+> **看到一堆 PLAY 标题刷过去、里面全是 skipping —— 那是正常的。** `when` 加在
+> playbook 导入上的表现就是这样:play 照样起,里面的任务整段跳过。开跑时打印的
+> 「阶段 / 跳过」两行才是准数,别数屏幕上的 PLAY 标题。
+
 ### 断了怎么续
 
 每个阶段都是幂等的,**从断掉的那个阶段接着跑**:
