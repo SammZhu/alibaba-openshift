@@ -86,6 +86,25 @@ check("满足下限里选最小", d.pick_type(["s", "m", "l"], specs, 4, 16) == 
 check("都不满足时返回空", d.pick_type(["s"], specs, 4, 16) == "")
 check("候选里有 specs 查不到的也不炸", d.pick_type(["unknown", "m"], specs, 4, 16) == "m")
 
+print("端点候选 —— 域名标签不是 API 产品名")
+# ste2 实测:dns-control.pop.cloud.ste2.com 在,clouddns.* 十种形状一个都不在。
+# 拿 cloudcli 的产品键当域名标签,会让这套环境的 CLOUDDNS 报「未找到」——而它在
+# 必需清单里,结论就成了「装不了」。
+def candidates(prod, domain="cloud.ste2.com", region="cn-wulan-ste2-d01"):
+    labels = d.PROBES[prod][0]
+    return [p.format(svc=lbl, domain=domain, region=region)
+            for lbl in labels for p in d.PATTERNS]
+
+
+check("CLOUDDNS 候选里有 dns-control.pop.<domain>",
+      "dns-control.pop.cloud.ste2.com" in candidates("CLOUDDNS"))
+check("NAS 候选里有带 region 的 nas-pub 形状",
+      "nas-pub.cn-wulan-ste2-d01.cloud.ste2.com" in candidates("NAS"))
+check("每个产品都至少有一个域名标签",
+      all(len(d.PROBES[p][0]) >= 1 for p in d.PROBE_ORDER))
+check("必需端点都在 PROBES 里",
+      all(p in d.PROBES for p in d.REQUIRED_ENDPOINTS))
+
 print("dig —— 网关返回结构缺层时不抛")
 check("正常取值", d.dig({"a": {"b": 1}}, "a", "b") == 1)
 check("缺层返回 default", d.dig({"a": {}}, "a", "b", default="x") == "x")

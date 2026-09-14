@@ -57,17 +57,26 @@ PATTERNS = [
     "{svc}-internal.{region}.{domain}",
 ]
 
-# 产品 -> (cloudcli 的产品键, 只读探测动作, 该动作要不要 RegionId)
+# 产品 -> (域名标签候选, cloudcli 的产品键, 只读探测动作, 该动作要不要 RegionId)
+#
+# ⚠ **域名标签 ≠ API 产品名。** 这两个东西看起来该是一回事,实际不是:CloudDns
+# 的 API 产品名是 CloudDns、cloudcli 键是 clouddns,但它的主机名标签是
+# `dns-control`(ste2 实测:dns-control.pop.cloud.ste2.com 在,clouddns.* 十种
+# 形状一个都不在)。拿产品键当标签去探,会对一套端点明明存在的环境报「未找到」
+# —— 而 CLOUDDNS 在必需清单里,结论就成了「这套环境装不了」。**又一个和正确
+# 答案长得一样的错误答案。** 所以标签是一张独立的候选表。
+#
 # 探测动作必须是只读的:这个脚本会对每一个候选端点真的发一次请求。
 PROBES = {
-    "ROS": ("ros", "DescribeRegions", False),
-    "ECS": ("ecs", "DescribeRegions", False),
-    "VPC": ("vpc", "DescribeVpcs", True),
-    "RAM": ("ram", "ListRoles", False),
-    "NAS": ("nas", "DescribeZones", True),
-    "SLB": ("slb", "DescribeLoadBalancers", True),
-    "NLB": ("nlb", "ListLoadBalancers", True),
-    "CLOUDDNS": ("clouddns", "DescribePrivateZones", True),
+    "ROS": (["ros"], "ros", "DescribeRegions", False),
+    "ECS": (["ecs"], "ecs", "DescribeRegions", False),
+    "VPC": (["vpc"], "vpc", "DescribeVpcs", True),
+    "RAM": (["ram"], "ram", "ListRoles", False),
+    "NAS": (["nas"], "nas", "DescribeZones", True),
+    "SLB": (["slb"], "slb", "DescribeLoadBalancers", True),
+    "NLB": (["nlb"], "nlb", "ListLoadBalancers", True),
+    "CLOUDDNS": (["dns-control", "clouddns", "dns", "pvtz", "privatezone"],
+                 "clouddns", "DescribePrivateZones", True),
 }
 # 探测顺序:先 ECS/VPC/ROS(后面的查询都靠它们),再其余。
 PROBE_ORDER = ["ECS", "VPC", "ROS", "RAM", "NAS", "SLB", "NLB", "CLOUDDNS"]
@@ -138,10 +147,11 @@ def discover_endpoints(region, domain, found):
     """逐产品试形状。found 会被就地填充,后续调用直接用它做环境。"""
     results = {}
     for prod in PROBE_ORDER:
-        key, action, needs_region = PROBES[prod]
+        labels, key, action, needs_region = PROBES[prod]
         params = {"RegionId": region} if needs_region else {}
         hit, note = "", ""
-        candidates = [p.format(svc=key, domain=domain, region=region) for p in PATTERNS]
+        candidates = [p.format(svc=lbl, domain=domain, region=region)
+                      for lbl in labels for p in PATTERNS]
         # 去重但保持顺序
         seen, ordered = set(), []
         for c in candidates:
