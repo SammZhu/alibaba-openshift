@@ -1,0 +1,285 @@
+---
+# 专有云(Apsara Stack)配置模板 —— 拷成 group_vars/all.yml 再改。
+#
+#   cp group_vars/all.yml.apsara.example group_vars/all.yml
+#   vi group_vars/all.yml
+#
+# group_vars/all.yml 已被 .gitignore,里面放 AK/SK 是安全的;不要提交。
+#
+# 和 all.yml.example(公有云那份)的关系:那份是全量参考,键多、注释长,适合
+# 查「某个开关是干什么的」。这份只留专有云真正要填的东西,每一项上面写清楚
+# **这个值从哪来**——因为专有云上几乎没有一个值是能从别的环境抄过来的。
+#
+# ⚠ 一条贯穿全文的经验:**参考环境的值不可移植**。端点、镜像 ID、实例规格、
+#   盘型、NAS 盘类、节点网关和 DNS——每一项在另一套专有云上都可能不同,而且
+#   错了以后的症状通常指向别的地方(节点 DNS 填成了别的环境的,表现是五台机
+#   器「已注册但未验证」卡一小时)。逐项在**本环境**查一遍。
+#   索引见 docs/apsara/OPERATOR-HOST.md 的「What does not travel between
+#   environments」。
+#
+# 标了「← 必填」的项留空会在 site-apsara.yml 开跑后几秒内报错,不会让你等到
+# 半小时后才发现。
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 1. 集群身份
+# ═══════════════════════════════════════════════════════════════════════════
+cluster_name:        cluster1          # 小写字母/数字/连字符,≥3 字符
+base_domain:         example.local     # ← 必填。集群域名后缀;专有云内部域名即可
+
+# ⚠ 必须钉到补丁版本 X.Y.Z,不能写 "4.20"。写成频道形式时 mirror 是按某个具体
+# 补丁版本构建的,而装机侧会解析成「最新」,两边错开的症状是节点拉不到镜像。
+openshift_version:   "4.20.22"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 2. 云环境 —— 区域 / 可用区
+# ═══════════════════════════════════════════════════════════════════════════
+# 查:在 helper 上 `curl -s http://100.100.100.200/latest/meta-data/region-id`
+region:              ""                # ← 必填,例 cn-wulan-ste2-d01
+# 查:cloudcli ecs DescribeZones --RegionId <region>
+# 目前三套专有云都是单可用区,zone2/zone3 填成和 zone 一样即可。
+zone:                ""                # ← 必填
+zone2:               ""                # ← 必填(单 AZ 环境填成和 zone 相同)
+zone3:               ""                # 同上;HA 三 master 时用
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 3. 云环境 —— 调度层(把 aliyun CLI 换成专有云的 apsara-rpc)
+# ═══════════════════════════════════════════════════════════════════════════
+cloud_platform:      apsara
+# 专有云上 cloudcli 会把 --profile 丢掉,但这个变量本身仍被 00-preflight / 03
+# 引用(没有 default),留空会直接报 undefined。随便填个名字即可。
+aliyun_profile:      openshift-test
+# 这两个是仓库里的脚本路径,按你的 clone 位置改。00a 会把 Go 工具编译出来。
+cloud_cli:           /root/alibaba-openshift/scripts/apsara/cloudcli
+oss_cli:             /root/alibaba-openshift/scripts/apsara/apsara-oss/apsara-oss
+oss_cli_argv:        "{{ oss_cli.split() }}"
+
+# ── 端点:整份配置里最容易错、也最没有规律的一段 ────────────────────────────
+# 端点**推不出来**。同一套环境里就能同时出现 ros.cloud.X、ecs-internal.cloud.X、
+# slb-vpc.cloud.X、dns-control.pop.cloud.X、nas-pub.<region>.cloud.X 五种形状。
+# 用探测脚本逐个打,别照着别的环境抄:
+#
+#   scripts/apsara/probe-endpoints.sh cloud.<环境域名>            # 只探 DNS/TCP
+#   AK=.. SK=.. REGION=.. ORG_ID=.. RG_ID=.. \
+#     scripts/apsara/probe-endpoints.sh cloud.<环境域名> --call   # 再发真实调用
+#
+# 读法:asapiSuccess:true = 端点+产品+版本都对;InvalidAction.NotFound = 端点通
+# 但动作名不对;503 / no such host = 端点不对。
+cloud_env:
+  CLOUD_PLATFORM: apsara
+  AK: ""                          # ← 必填。RAM 子账号 AccessKey
+  SK: ""                          # ← 必填
+  REGION: "{{ region }}"          # 引用上面的 region,不要重复写值
+  ORG_ID: ""                      # ← 必填。x-acs-organizationid(ASCM 组织 ID)
+  RG_ID:  ""                      # ← 必填。x-acs-resourcegroupid(ASCM 资源集 ID)
+  ENDPOINT_ROS: ""                # ← 必填,例 ros.cloud.ste2.com
+  ENDPOINT_ECS: ""                # ← 必填,例 ecs-internal.cloud.ste2.com
+  ENDPOINT_VPC: ""                # ← 必填,例 vpc.cloud.ste2.com
+  ENDPOINT_RAM: ""                # ← 必填(RAM 走 https,cloudcli 自己会切)
+  # 私有 DNS(CloudDns POP)。api-int / *.apps 的解析记录建在这里。
+  # 值在天基里:dnsProduct/dnsService 容器的 pop_out_endpoint 环境变量。
+  ENDPOINT_CLOUDDNS: ""           # ← 必填,例 dns-control.pop.cloud.ste2.com
+  # SLB —— 只有 ccm_enabled 时需要。不填的话 CCM 会自己拼
+  # slb.<region>.aliyuncs.com,那个域名在专有云上不存在。
+  ENDPOINT_SLB: ""                # 例 slb-vpc.cloud.ste2.com
+  # NAS —— **留空 = 这套环境没有 NAS**。留空时 nas_available 自动变 false,
+  # CSI 的 NAS 驱动不部署、08 不建 NAS StorageClass、13 跳过 nas-rwx 检查,
+  # 整条链正常跑完。不要为了「看起来完整」随便填一个。
+  # dyz7 就是没有(所有候选域名都不解析);ste2 有,是 nas-pub.<region>.cloud.ste2.com。
+  ENDPOINT_NAS: ""
+  # ⚠ 只有当 helper **到不了** OpenAPI 端点时才设代理。一个只有公网 DNS 的代理
+  # 解析不了 *.cloud.<env>.com,每个调用都会死在 Squid 的 ERR_DNS_FAIL 页面上。
+  # 另外 Go SDK 会自己读环境里的 HTTP_PROXY/HTTPS_PROXY——为 git clone 导出的
+  # 代理会悄悄劫持所有云调用,所以在这里显式清空来免疫:
+  HTTP_PROXY: ""
+  HTTPS_PROXY: ""
+  # APSARA_PROXY: "http://<squid>:3128"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 4. 云环境 —— OSS(对象存储)
+# ═══════════════════════════════════════════════════════════════════════════
+# ⚠ bucket 必须属于上面那个 AK/SK 的账号。用别的账号建的 bucket,端点/TLS/代理
+# 全对也会返回 AccessDenied。apsara-oss 不能建 bucket(网关按 bucket 做 TLS
+# vhost,不存在的 bucket SNI 会被拒),去控制台建好再填。
+oss_bucket:          ""           # ← 必填
+# 专有云 OSS 端点自成一格,不是 oss-<region>.aliyuncs.com。注意它可能带可用区
+# 后缀,而且是 https。在 OSS 控制台看 bucket 域名(显示成 <bucket>.<endpoint>)。
+apsara_oss_endpoint: ""           # ← 必填,例 https://oss-cn-wulan-ste2-d01-a.cloud.ste2.com
+
+# 下面两行不是可选的:04/06/99 都会引用它们,缺了会直接报 undefined。
+# 专有云下两者都回到 apsara_oss_endpoint。
+_oss_pub_endpoint: "{{ apsara_oss_endpoint if (cloud_platform | default('public')) == 'apsara' else 'oss-' + region + '.aliyuncs.com' }}"
+_oss_int_endpoint: "{{ apsara_oss_endpoint if (cloud_platform | default('public')) == 'apsara' else 'oss-' + region + '-internal.aliyuncs.com' }}"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 5. 云环境 —— 镜像 / 规格 / 盘型
+# ═══════════════════════════════════════════════════════════════════════════
+# 这三项是「本环境有什么」的问题,不是偏好问题。公有云的 g7 系列、cloud_essd、
+# Rocky 镜像在专有云上通常一个都没有。
+#
+# 镜像:cloudcli ecs DescribeImages --RegionId <region>
+#       (专有云上 ImageId 常常就是 .vhd 文件名)
+apsara_image_id:     ""           # ← 必填,例 aliyun_3_x86_64_20G_alibase_20241103.vhd
+# 规格:要同时满足「镜像支持」和「该可用区有货」
+#   cloudcli ecs DescribeImageSupportInstanceTypes --ImageId <img>
+#   cloudcli ecs DescribeAvailableResource --RegionId <r> --ZoneId <z> \
+#     --DestinationResource InstanceType --InstanceChargeType PostPaid
+control_plane_type:  ""           # ← 必填。master:≥4 vCPU / 16 GiB
+compute_type:        ""           # ← 必填。compact 模式下可与 master 同型
+worker_instance_type: ""          # CAPA worker(phase 12);不填则回落到 compute_type
+mirror_instance_type: ""          # ← 必填。mirror ECS:首次构建需 ≥16 GiB 内存
+# 盘型:DescribeAvailableResource 的 SystemDisk 部分。专有云一般没有 cloud_essd,
+# 常见是 cloud_pperf / cloud_sperf。
+system_disk_category: ""          # ← 必填,例 cloud_pperf
+# data_disk_category: ""          # 不填则跟随 system_disk_category
+system_disk_size:    120
+install_disk_size:   100          # /dev/vdb 安装盘,必须 ≥100
+
+control_plane_count: 3            # HA;单节点见 cluster_topology: sno
+compute_count:       0            # 0 = compact(master 兼跑业务),worker 由 phase 12 建
+cluster_topology:    ha
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 6. 网络 —— helper 怎么够到 mirror ECS
+# ═══════════════════════════════════════════════════════════════════════════
+# 专有云里没有公网跳板机这一说,helper 必须能直连 mirror ECS 的**私网 IP**。
+# 二选一:
+#
+#  (A) 借用 helper 自己的 VPC —— mirror 直接建在 helper 所在 VPC/交换机里,
+#      不需要打通。最简单,推荐新环境先用这条。
+#  (B) 新建 VPC + 自动对等 —— mirror-stack 建自己的 VPC(和公有云完全一致),
+#      03 自动建 Router Interface 对等 + 双向路由 + 放行安全组,99 拆时反向解开。
+#
+# 查 helper 自己的 VPC/交换机:
+#   curl -s http://100.100.100.200/latest/meta-data/vpc-id
+#   curl -s http://100.100.100.200/latest/meta-data/vpc-cidr-block
+#   curl -s http://100.100.100.200/latest/meta-data/vswitch-id
+#
+# (A) 用 helper 的 VPC:
+existing_vpc_id:     ""           # vpc-xxxx
+existing_vswitch_id: ""           # vsw-xxxx(mirror ECS 落在这里)
+# (B) 新建 VPC 并对等到 helper 的 VPC(用 A 时留空):
+apsara_peer_operator_vpc_id: ""
+apsara_peer_operator_cidr:   ""   # 留空 = 从 VPC 自己推
+apsara_peer_ri_spec:         "Large.1"
+
+# 用 (A) 时:填 helper 所在 VPC 的 CIDR 和该交换机网段里一个空闲 IP。
+# 用 (B) 时:保持下面这组默认的独立网段即可。
+vpc_cidr:             10.0.0.0/16
+private_subnet_cidr:  10.0.16.0/20
+private_subnet_cidr2: 10.0.32.0/20
+private_subnet_cidr3: 10.0.48.0/20
+public_subnet_cidr:   10.0.0.0/20
+mirror_private_ip:    "10.0.16.4"
+# mirror ECS 的数据盘和 Quay 初始账号。下面三项都被直接引用(没有 default)。
+mirror_data_disk_size: 200
+mirror_init_user:     "mirror-admin"
+mirror_init_password: ""          # 留空 = 自动生成
+# OSS 上那份 mirror 内容的对象名。mirror-build 往这里写,04 从这里取——重建
+# 时想复用上一次的内容,就是靠这个名字对上。
+mirror_oss_object:    "mirror-tarballs/{{ cluster_name }}-{{ openshift_version }}.tar"
+rendezvous_ip:        10.0.16.5   # ABI master-1 固定 IP
+ingress_vip:          10.0.16.6
+
+jump_host_ip:        ""           # 专有云不用跳板机:helper 直接有路由
+enable_jump_host:    false
+jump_host_type:      ecs.t6-c1m1.large   # 不建跳板机也要有值:模板参数引用它
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 7. 节点网络(ABI 专用)—— 最容易被「抄别的环境」坑到的一段
+# ═══════════════════════════════════════════════════════════════════════════
+# 有些专有云 VPC 里 RHCOS 拿不到 DHCP 租约(阿里云 Linux 可以,RHCOS 不行),
+# 所以 agent-config 给每台 master 钉静态 nmstate。
+apsara_node_nic:     ens3         # RHCOS 上叫 ens3(阿里云 Linux 显示 eth0)
+
+# 网关和 DNS **默认自动发现**——06a 会从 mirror ECS(和节点同 VPC 同网段)读出
+# 来。除非确有需要,不要手填。
+#
+# ⚠ 手填 DNS 是已知最贵的一个坑:这两个地址会成为节点**唯一**的解析器,而一台
+#   不应答的解析器会让每个节点停在「已注册但未验证」——五台机器卡了一小时,
+#   报错完全不指向 DNS。**绝对不要从另一套环境抄这个值。**
+#   06a 在造 ISO 之前会从 mirror 上探这两个地址,不应答就直接失败。
+# apsara_node_dns:
+#   - 10.x.x.x
+#   - 10.x.x.y
+# 每个 master 的子网各要自己的下一跳:nmstate 每台只发一条默认路由,而不在本
+# 子网内的下一跳会被 NetworkManager 静默丢弃——节点有地址但没有路由,停在
+# agent 的文字界面上。有的环境网关在 /20 的 .253 而不是公有云习惯的 .1。
+# apsara_node_gateway:  10.0.31.253
+# apsara_node_gateway2: 10.0.47.253
+# apsara_node_gateway3: 10.0.63.253
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 8. 存储 —— NAS
+# ═══════════════════════════════════════════════════════════════════════════
+# 有没有 NAS 由上面的 cloud_env.ENDPOINT_NAS 决定(留空 = 没有),这里只在
+# **有** NAS 时才需要关心。
+#
+# ⚠ 盘类不是自由选择:DescribeZones 会按存储类型返回一个 Protocol 列表,列表
+#   为空的类型虽然列出来了但**卖不出去**。ste2 的 Performance 是空的,只有
+#   Capacity 给 NFS。先查再填:
+#     cloudcli nas DescribeZones --RegionId <region>
+#   这个值同时决定 StorageClass 的名字(alicloud-nas-<小写>),08 和 13 靠它对齐。
+# nas_storage_type:  Capacity
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 9. 组件开关
+# ═══════════════════════════════════════════════════════════════════════════
+installation_method: Agent-based  # 专有云只有 ABI 走通过
+mirror_enabled:      true         # 专有云必须走私有 mirror
+agent_iso_build:     mirror-ecs   # mirror ECS 的 glibc 太旧时改成 container
+
+# CCM(LoadBalancer Service + ProviderID)。要它就必须有 ENDPOINT_SLB,而且
+# 08d 必须在装机前跑过——site-apsara.yml 已经排好这个顺序。
+# ⚠ 用**上游原版**镜像开 CCM 会把装机卡死:install-config 声明了
+#   cloudControllerManager: External,kubelet 就会给每个节点打
+#   uninitialized 污点,而连不上云的 CCM 永远清不掉它,装机停在 ~50% 且
+#   报错完全不指向 CCM。真卡住了就 -e ccm_enabled=false 重来。
+ccm_enabled:         true
+
+# 断网集群必须关。Insights 连不上 console.redhat.com 会一直 Degraded,
+# 而 `wait-for install-complete` 要求每个 ClusterOperator 都 Available。
+insights_enabled:    false
+
+# phase 10 重压 RHCOS 镜像时用的 libguestfs。默认不填:10 会自己探,起不来才
+# 回落到软件模拟。分界线是 **CPU 厂商**——Intel 上 KVM 正常,海光 C86
+# (vendor 报 AuthenticAMD、family 24)上 KVM appliance 起不来,必须 TCG
+# (34 秒 vs KVM 等 240 秒超时)。不是发行版或内核的问题,先看 CPU。
+# bootimage_force_tcg: true
+
+# 专有云的 mirror ECS 装不了包时用:镜像默认的 dnf 源(mirrors.cloud.aliyuncs.com)
+# 在专有云 VPC 里到不了,cloud-init 装不上 podman,Quay 就起不来。
+apsara_pkg_repo_mirror_host: ""   # 例 mirrors.aliyun.com
+apsara_pkg_repo_mirror_ip:   ""   # 例 117.161.66.75(该域名的公网 CDN IP)
+# 专有云的 CSI sidecar 镜像源:registry.k8s.io 在国内构建机上拉不到。
+apsara_sig_storage_registry: ""   # 例 registry.aliyuncs.com/google_containers
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 10. 本地文件 / 输出
+# ═══════════════════════════════════════════════════════════════════════════
+# Red Hat pull secret:https://console.redhat.com/openshift/install/pull-secret
+# offline token:      https://console.redhat.com/openshift/token
+pull_secret_file:    "{{ lookup('env', 'HOME') }}/.openshift/pull-secret.json"
+offline_token_file:  "{{ lookup('env', 'HOME') }}/.openshift/offline-token"
+ssh_pub_key_file:    "{{ lookup('env', 'HOME') }}/.ssh/openshift_ed25519.pub"
+ssh_priv_key_file:   "{{ lookup('env', 'HOME') }}/.ssh/openshift_ed25519"
+output_dir:          "{{ lookup('env', 'HOME') }}/openshift-install/{{ cluster_name }}"
+repo_root:           "{{ playbook_dir }}/../.."
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 11. worker 池 / 拆除默认值
+# ═══════════════════════════════════════════════════════════════════════════
+# 集群 worker 数 = worker_zone_count × replicas_per_zone。目前三套专有云都是
+# 单可用区,所以 worker_zone_count 只能是 1。
+worker_zone_count:   1
+replicas_per_zone:   2
+worker_exclude_zones: []
+
+teardown_from:       3
+keep_image:          true
+teardown_confirmed:  false
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 12. 内部端点(专有云用不到,但有些 play 会引用,保留)
+# ═══════════════════════════════════════════════════════════════════════════
+assisted_api:  https://api.openshift.com/api/assisted-install/v2
+sso_url:       https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token

@@ -47,7 +47,9 @@ ansible/
 │   │
 │   │  ── 辅助 ────────────────────────────────────────────────
 │   ├── mirror-rebuild.yml              # 仅刷新 mirror 镜像内容（不动 cluster；与 04 重跑等价）
-│   └── site.yml                        # 端到端跑 Phase 00→07（08 需手动在跳板跑）
+│   ├── site.yml                        # 端到端跑 Phase 00→07（08 需手动在跳板跑）
+│   └── site-apsara.yml                 # 专有云一键入口：helper 准备→mirror→装机→worker→验收
+│                                       #   见 docs/apsara/QUICKSTART.md
 ├── state.yml                           # 流水线状态（gitignored，自动生成）
 └── README.md
 ```

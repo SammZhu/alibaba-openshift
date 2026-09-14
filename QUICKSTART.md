@@ -12,6 +12,7 @@
 > 装整套时，本仓库会在 **post-install（`site-post`）** 阶段自动把这两者部署进集群。
 
 > **想看每一步细节 / 故障排查 / 命令解释**：[`ansible/README.md`](ansible/README.md)
+> **装到专有云 Apsara Stack（私有云）**：[`docs/apsara/QUICKSTART.md`](docs/apsara/QUICKSTART.md) —— 这份文档讲的是公有云；专有云是另一条入口（`site-apsara.yml`）
 > **想理解架构 / 为什么是双栈**：[`README.md`](README.md)
 > **手动 / 控制台方式（不跑 Ansible）**：[`QUICKSTART-LEGACY.md`](QUICKSTART-LEGACY.md)
 

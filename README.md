@@ -7,6 +7,7 @@ Supports two installation methods via the same ROS template — choose `Installa
 > **👉 想直接动手？**
 > - **📚 全部文档索引**：[`docs/README.md`](docs/README.md) —— 按主题分组的所有参考文档导航
 > - **全自动（推荐）**：[`ansible/README.md`](ansible/README.md) —— 一条命令端到端，~90 分钟
+> - **专有云 Apsara Stack（私有云）**：[`docs/apsara/QUICKSTART.md`](docs/apsara/QUICKSTART.md) —— 从零装出一套集群：一个配置文件 + 一条命令（`playbooks/site-apsara.yml`）
 > - **简要 split-flow 入口**：[`QUICKSTART.md`](QUICKSTART.md) —— 一页内跑通 + 故障排查链接
 > - **LEGACY 单栈 / 手动控制台流程**：[`QUICKSTART-LEGACY.md`](QUICKSTART-LEGACY.md) —— 不跑 Ansible 时用
 > - **手动控制台流程深度解析（LEGACY 单栈）**：[`docs/legacy/test-walkthrough.md`](docs/legacy/test-walkthrough.md) —— 每步含预期输出 + 控制台操作，仅当排查 Ansible 自动化失败时参考

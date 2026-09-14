@@ -1,9 +1,13 @@
 # Deploying on Apsara Stack — operator host setup + run
 
-This is the hands-on companion to `QUICKSTART.md` (which explains the transform +
-parameters). It captures the manual setup done to run the install flow on the
-`ste3` private cloud: building the local tools, wiring config, and the OSS/network
-specifics that are not obvious.
+> **Installing for the first time?** Start at [QUICKSTART.md](QUICKSTART.md) —
+> one config file, one command.  This file is the reference underneath it: what
+> each step actually does, and why the order is what it is.
+
+The hands-on companion to [ROS-AND-RPC.md](ROS-AND-RPC.md) (which explains the
+template transform + ROS parameters).  It captures the setup done to run the
+install flow on a private cloud: building the local tools, wiring config, and the
+OSS/network specifics that are not obvious.
 
 Everything here is Apsara-only. Public cloud is unaffected (defaults keep every
 call on the `aliyun` CLI).
@@ -318,7 +322,7 @@ is the commit you want. Each play prints the commit it built — that print is t
 only evidence the fix is actually in the image.
 
 Teardown of the persistent (mirror) stack needs RAM delete permissions the
-sub-user may lack — see the teardown note in `QUICKSTART.md`.
+sub-user may lack — see the teardown note in [ROS-AND-RPC.md](ROS-AND-RPC.md).
 
 ## 5. cloud-controller-manager
 
