@@ -86,18 +86,52 @@ ansible-playbook -i inventory.yml playbooks/00a-prepare-operator.yml \
 
 ---
 
-## 2. 填配置(约 30 分钟,整个流程里唯一需要动脑的一步)
+## 2. 填配置
+
+### 先让脚本把能探的都探出来
+
+这套环境卖什么规格、什么盘型、端点长什么样、有没有 NAS —— 这些都是可以问出来的,
+不必手查:
 
 ```bash
-cd /root/alibaba-openshift/ansible
-cp group_vars/all.yml.apsara.example group_vars/all.yml
-vi group_vars/all.yml
+cd /root/alibaba-openshift
+AK=<你的AK> SK=<你的SK> ORG_ID=org-xxxx RG_ID=rs-xxxx \
+  python3 scripts/apsara/discover.py -o ansible/group_vars/all.yml
 ```
 
-`group_vars/all.yml` 已被 gitignore,里面放 AK/SK 是安全的。
+它在 helper 上跑,做这几件事:
 
-模板里每一项上面都写了**这个值从哪来**,照着查就行。这里只强调整体思路和三个
-最贵的坑。
+1. 从元数据服务读 region、helper 自己的 VPC 和网段
+2. 按见过的**十种域名形状**逐个试每个产品的端点,每个候选都**真的发一次只读调用**
+   ——不是猜,是打通了才算
+3. 用探到的 ECS 端点查:可用区、可用镜像、可用实例规格 ∩ 镜像支持的规格、可用盘型
+4. 有 NAS 的话,查哪个盘类**真的**能开 NFS(列出来但 Protocol 为空的不算)
+5. 看 CPU 厂商,决定要不要 `bootimage_force_tcg`
+6. 检查 helper 的 VPC 网段和默认的 `10.0.0.0/16` 有没有重叠
+
+然后以 `all.yml.apsara.example` 为底稿写出一份填好的 `group_vars/all.yml`(权限
+600,里面有 AK/SK,该路径已被 gitignore)。
+
+**探不出来的值一律写成 `CHANGEME` 并说明原因,不猜。** 猜出来的值会一路跑到很深
+的地方才暴露,而那时症状通常指向别的东西。
+
+不加 `-o` 就只打印不写文件(AK/SK 会打码),可以先看一眼再决定。
+
+### 再手工补三项
+
+脚本问不出来的,是那些「你想要什么」而不是「环境有什么」的:
+
+```bash
+vi ansible/group_vars/all.yml
+```
+
+- `cluster_name` —— 集群名,小写字母数字,≥3 字符
+- `base_domain` —— 域名后缀,专有云内部域名即可
+- `openshift_version` —— ⚠ 必须是 `X.Y.Z`,不能写 `4.20`
+
+再把脚本标了 `CHANGEME` 的那几项处理掉(通常是端点没探到,见下面「端点怎么探」)。
+
+模板里每一项上面都写了**这个值从哪来**,想手工核对时照着查。下面几段是最贵的几个坑。
 
 ### ⚠ 核心原则:值不可移植
 
@@ -116,9 +150,10 @@ vi group_vars/all.yml
 完整索引在 [OPERATOR-HOST.md](OPERATOR-HOST.md) 的
 「What does not travel between environments」。
 
-### 端点怎么探
+### 端点怎么探(discover.py 没探到时)
 
-别猜,用脚本打:
+`discover.py` 已经把十种形状都试过一遍了。它报 `CHANGEME` 的产品,要么这套环境
+真的没有,要么域名形状是个新的。手工再看一遍:
 
 ```bash
 # 只看 DNS 和端口通不通
@@ -139,6 +174,9 @@ AK=.. SK=.. REGION=.. ORG_ID=.. RG_ID=.. \
 - 某个产品**所有形状全部 DNS 失败** → 这套环境没部署这个产品。这是一个**真实答案**,
   不是探测失败
 
+探出了新形状,请顺手加进 `scripts/apsara/discover.py` 的 `PATTERNS` 和
+`probe-endpoints.sh` 里 —— 下一套环境就不用再撞一次。
+
 ### ⚠ 节点 DNS:填错了最贵的一项
 
 `apsara_node_dns` **默认不要填**。不填时,06a 会从 mirror 机器(和集群节点同网段)
@@ -147,6 +185,22 @@ AK=.. SK=.. REGION=.. ORG_ID=.. RG_ID=.. \
 手填的代价:这两个地址会成为节点**唯一**的解析器。填了一个不应答的地址,每台节点
 都会停在「已注册但未验证」,而报错完全不指向 DNS。这件事真实发生过——五台机器卡了
 一小时,原因是配置从另一套环境抄了过来。
+
+### helper 怎么够到 mirror:用 (B)
+
+专有云里没有公网跳板机,helper 必须能直连 mirror 机器的私网 IP。模板里给了两条路,
+**填 (B)**:`apsara_peer_operator_vpc_id` 设成 helper 自己的 VPC id,03 会自动建
+对等连接、双向路由、放行安全组,99 拆的时候反向解开。
+
+(A)「把 mirror 建进 helper 的 VPC」只有 mirror-stack 支持,集群栈和私有 DNS 没有
+对应接线,**没有实测过**——除非你有特别的理由,别走那条。
+
+唯一要留意的:(B) 新建的那个 VPC 网段(默认 `10.0.0.0/16`)**不能和 helper 自己的
+VPC 网段重叠**。查一下:
+
+```bash
+curl -s http://100.100.100.200/latest/meta-data/vpc-cidr-block
+```
 
 ### 没有 NAS 的环境怎么办
 
