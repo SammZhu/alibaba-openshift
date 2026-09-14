@@ -55,6 +55,16 @@ jobs:
       - name: Install PyYAML (for the ROS tag lint)
         run: pip install PyYAML
 
+      - name: Component image tag drift gate
+        # vars/images.yml is the source of truth, but build-mirror-tarball.sh is
+        # a standalone bash script that cannot read ansible vars, so it carries
+        # its own defaults.  Both sides said "keep in sync" in a comment; both
+        # sides drifted anyway (CAPA v0.1.12 vs v0.1.24, CSI v0.1.0 vs v0.1.13).
+        # Drift is silent: the mirror gets three unused old images, and 04 then
+        # re-pulls the right ones from upstream.
+        run: |
+          python3 scripts/lint-image-tags.py
+
       - name: Apsara discovery unit test
         # discover.py WRITES group_vars/all.yml.  A wrong value there does not
         # fail loudly — it fails forty minutes later somewhere unrelated.  These

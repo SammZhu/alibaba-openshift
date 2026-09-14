@@ -20,6 +20,12 @@
 - name: Build + ship the mirror tarball to OSS
   hosts: local
   gather_facts: false
+  # 组件镜像 tag 的唯一事实来源。build-mirror-tarball.sh 是独立 bash 脚本,读不到
+  # ansible 变量,所以它自带一份默认值 —— 两边漂过一次(脚本停在 CAPA v0.1.12 /
+  # CSI v0.1.0,而 images.yml 已经是 v0.1.24 / v0.1.13)。从这里显式传进去,走
+  # ansible 的路径就不可能再漂;单独跑脚本那条路由 scripts/lint-image-tags.py 看着。
+  vars_files:
+    - "{{ playbook_dir }}/../vars/images.yml"
   # apsara: cloud_env carries CLOUD_PLATFORM/AK/SK/endpoints/APSARA_PROXY so
   # apsara-oss can upload.  It deliberately does NOT set http_proxy — registry
   # pulls go direct.  Public cloud: cloud_env is {} (no-op).
@@ -103,7 +109,9 @@
                'OPENSHIFT_PATCH_VERSION': openshift_version,
                'PULL_SECRET': pull_secret_file,
                'OFFLINE_TOKEN_FILE': offline_token_file,
-               'WORK_DIR': repo_root ~ '/mirror-build'
+               'WORK_DIR': repo_root ~ '/mirror-build',
+               'OPENSHIFT_CAPI_IMAGE': capa_image_repo ~ ':' ~ capa_image_tag,
+               'CSI_OPERATOR_VERSION': csi_operator_image_tag
              } | combine(
                {
                  'OC_MIRROR_PARALLEL_IMAGES': oc_mirror_parallel_images | default('') | string,
