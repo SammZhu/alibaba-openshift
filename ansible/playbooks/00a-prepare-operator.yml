@@ -33,10 +33,17 @@
     # container build extracts the version-matched oc AND openshift-install from
     # the mirror release.  mirror.openshift.com is slow from China, so allow
     # skipping the (much larger) installer archive: -e operator_oc_only=true
+    # `bin` is the binary this archive is wanted FOR — probed one by one below.
+    # Probing only `oc` (as this did) means a host that has oc but lost, or never
+    # got, openshift-install can never repair itself: the whole download block is
+    # skipped, and the toolchain assert at the end then fails on the missing
+    # installer every single time.  Re-running the playbook — which is exactly
+    # what its own error message tells you to do — changes nothing.
     _op_clients: >-
-      {{ [{'f': 'openshift-client-linux.tar.gz', 'only': ['oc', 'kubectl']}]
+      {{ [{'f': 'openshift-client-linux.tar.gz', 'only': ['oc', 'kubectl'], 'bin': 'oc'}]
          + ([] if (operator_oc_only | default(false) | bool)
-              else [{'f': 'openshift-install-linux.tar.gz', 'only': ['openshift-install']}]) }}
+              else [{'f': 'openshift-install-linux.tar.gz', 'only': ['openshift-install'],
+                     'bin': 'openshift-install'}]) }}
     # Go module fetching: proxy.golang.org and sum.golang.org are Google-hosted and
     # unreachable from China, so default to a domestic module proxy.  GOSUMDB=off
     # because the checksum DB is behind the same wall; go.sum is committed, so
@@ -228,14 +235,30 @@
     # ── 6. OpenShift clients (oc + openshift-install) ────────────────────────
     # Only a BOOTSTRAP pair is needed: 06a's container build extracts the exact
     # version-matched clients from the mirror release.  Skipped if oc is present.
-    - name: "operator: check for oc"
-      ansible.builtin.command: oc version --client
-      register: _op_oc
+    # Probe each client separately.  They are shipped as two archives and can go
+    # missing independently — a timed-out installer download leaves a host with
+    # oc and nothing else, and the old single `oc` probe made that permanent.
+    - name: "operator: which OpenShift clients are already installed"
+      ansible.builtin.shell: "command -v {{ item.bin | quote }}"
+      args:
+        executable: /bin/bash
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+      loop: "{{ _op_clients }}"
+      loop_control:
+        label: "{{ item.bin }}"
+      register: _op_client_probe
       changed_when: false
       failed_when: false
 
-    - name: "operator: install oc + openshift-install"
-      when: (_op_oc.rc | default(1)) != 0
+    - name: "operator: the clients still to fetch"
+      ansible.builtin.set_fact:
+        _op_clients_missing: >-
+          {{ _op_client_probe.results | rejectattr('rc', 'equalto', 0)
+             | map(attribute='item') | list }}
+
+    - name: "operator: install the missing OpenShift clients"
+      when: (_op_clients_missing | default([])) | length > 0
       block:
         - name: "operator: download the OpenShift clients"
           ansible.builtin.get_url:
@@ -246,7 +269,7 @@
           environment:
             http_proxy: "{{ _op_proxy }}"
             https_proxy: "{{ _op_proxy }}"
-          loop: "{{ _op_clients | map(attribute='f') | list }}"
+          loop: "{{ _op_clients_missing | map(attribute='f') | list }}"
           register: _op_dl
           retries: 3
           delay: 10
@@ -259,7 +282,7 @@
             remote_src: true
             extra_opts: "{{ item.only }}"
             mode: "0755"
-          loop: "{{ _op_clients }}"
+          loop: "{{ _op_clients_missing }}"
           loop_control:
             label: "{{ item.f }}"
 
