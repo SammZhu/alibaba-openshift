@@ -14,7 +14,15 @@
 - name: ABI — set mirror ECS ssh connection facts
   ansible.builtin.set_fact:
     _ssh_common_args: "-i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes"
-    _ssh_proxy_args: "-o ProxyCommand='ssh -i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@{{ jump_host_ip }}'"
+    # 没有跳板机时必须是空串,不能拼出 `root@` 后面什么都没有的 ProxyCommand。
+    # 这是 set_fact:它是主机级事实,活到整个 run 结束,**压过后面 playbook 自己
+    # 那份带守卫的同名 play var**。所以 07 跑完之后,08a 用的不是自己算的那份,
+    # 而是这里这份 —— 空主机名的 ProxyCommand 一路带到 08a 的 ssh 上,报
+    # `Could not resolve hostname :`,完全不指向 07,也不指向 jump_host_ip。
+    # iso_agent.yml 里的同一个变量一直是有守卫的;这里漏了。
+    _ssh_proxy_args: >-
+      {{ ("-o ProxyCommand='ssh -i " ~ ssh_priv_key_file ~ " -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@" ~ jump_host_ip ~ "'")
+         if (jump_host_ip | default('')) | length > 0 else "" }}
     _m_install_dir: /var/lib/quay-storage/agent-build/install
 
 - name: ABI — set _ssh_root_mirror

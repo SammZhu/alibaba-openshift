@@ -19,10 +19,10 @@
   gather_facts: false
   vars:
     _ssh_keepalive: "-o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes"
-    _ssh_common_args: "-i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {{ _ssh_keepalive }}"
+    _ssh_common_args: "-i {{ ssh_priv_key_file }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes"
     _ssh_proxy_args: >-
-      {{ ("-o ProxyCommand='ssh " ~ _ssh_common_args ~ " -W %h:%p root@" ~ jump_host_ip ~ "'")
-         if (jump_host_ip | default('') | length > 0) else '' }}
+      {{ ("-o ProxyCommand='ssh -i " ~ ssh_priv_key_file ~ " -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@" ~ jump_host_ip ~ "'")
+         if (jump_host_ip | default('')) | length > 0 else "" }}
     _ssh_root_mirror: "ssh {{ _ssh_common_args }} {{ _ssh_proxy_args }} root@{{ mirror_private_ip }}"
     capi_core_upstream: registry.k8s.io/cluster-api/cluster-api-controller
     capi_core_tag: v1.12.7

@@ -34,7 +34,6 @@
     _ssh_proxy_args: >-
       {{ ("-o ProxyCommand='ssh -i " ~ ssh_priv_key_file ~ " -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -W %h:%p root@" ~ jump_host_ip ~ "'")
          if (jump_host_ip | default('')) | length > 0 else "" }}
-    # All build artifacts live on the 200 GB data disk, never the 40 GB system disk.
     _m_build_dir: /var/lib/quay-storage/agent-build
     _m_install_dir: /var/lib/quay-storage/agent-build/install
     _m_tmp: /var/lib/quay-storage/agent-build/tmp
