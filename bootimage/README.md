@@ -56,6 +56,41 @@ free)". It asserts:
 100% proof still needs the low-frequency **boot smoke** (launch one ECS, confirm
 ignition runs as `aliyun` + kubelet joins) before a version is blessed.
 
+### Why `bootSmoke` is still `pending` everywhere
+
+Not because the smoke never happens — it happens on every install.  Phase 10
+re-stamps the image, phase 12 boots CAPA workers from it, and they join Ready.
+That *is* the boot smoke.
+
+It cannot be written back because the two halves resolve RHCOS from different
+places:
+
+| | resolves RHCOS from |
+| --- | --- |
+| this supply chain | `openshift/installer`, branch `release-X.Y` — the **branch HEAD** |
+| phase 10 (what a cluster boots) | the cluster's own `coreos-bootimages` — its **pinned payload** |
+
+The branch head moves; a deployment stays on its patch.  Measured 2026-09-14: a
+4.20.22 cluster boots RHCOS `9.6.20260217-1`, and provenance holds
+`9.6.20260512-0`, `-20260520-0`, `-20260616-0`, `-20260815-0`, `-20260818-0` and
+`10.2.20260715-0` — **no overlap at all**.  So there is no entry to flip.
+
+What the deployed image does and does not get:
+
+| | |
+| --- | --- |
+| absolute format checks (platform id, qcow2 integrity, layout) | **yes** — phase 10 runs the same `bootimage-gate.sh` before upload, and a failure blocks it |
+| karg-drift diff guard | **no** — phase 10 calls the gate without a baseline, so the comparison against the previous version never runs |
+| provenance entry | **no** — hence nowhere to record `bootSmoke` |
+
+So the deployed image is format-checked; what it lacks is the early warning for
+a changed kernel-arg scheme, and any record that it was checked at all.
+
+Phase 10 now records `worker_rhcos_version` in `state.yml` and says on every run
+whether provenance covers it, so the size of the gap is visible instead of
+inferred.  Closing it means baking the deployed patch version's RHCOS as well as
+the branch head's.
+
 ## The self-hosted runner (internal RHEL, zero inbound)
 
 The bake runs on a runner registered on the internal RHEL/ECS. The runner agent

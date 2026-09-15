@@ -144,6 +144,21 @@
             _qcow_src_object: "mirror-tarballs/{{ (_qcow_url.stdout | trim) | basename }}"
           when: (rhcos_qcow | default('') | length) == 0
 
+        # Which RHCOS this cluster actually boots.  It comes from the cluster's
+        # own coreos-bootimages — the release payload's stream — and NOT from
+        # the branch head that bootimage/ bakes from, so the two can name
+        # different builds.  Until this was recorded there was no way to tell:
+        # phase 10 saved only the ECS image id, and `bootSmoke: pending` in
+        # provenance looked like a missing write-back rather than a missing
+        # correspondence.  Filename shape:
+        #   rhcos-9.6.20260217-1-openstack.x86_64.qcow2.gz -> 9.6.20260217-1
+        - name: Resolve the RHCOS version this cluster boots
+          ansible.builtin.set_fact:
+            _worker_rhcos_version: >-
+              {{ ((_qcow_url.stdout | trim) | basename
+                  | regex_search('rhcos-([0-9.]+-[0-9]+)-', '\\1') | first) | default('', true) }}
+          when: (rhcos_qcow | default('') | length) == 0
+
         - name: Check whether the raw qcow is already staged in OSS
           ansible.builtin.command:
             argv: "{{ oss_cli_argv + _a }}"
@@ -495,6 +510,48 @@
       vars:
         new_state:
           worker_boot_image_id: "{{ worker_boot_image_id }}"
+          worker_rhcos_version: "{{ _worker_rhcos_version | default('') }}"
+      when: not (skip_upload_until_gate | bool)
+
+    # ── Does the supply chain know this image? ─────────────────────────────────
+    # bootimage/ bakes RHCOS resolved from openshift/installer's release-X.Y
+    # branch HEAD; this cluster boots whatever its own pinned payload declares.
+    # Those drift apart as the branch moves, and when they do, the image that
+    # actually boots is still format-checked (the gate below runs on it) but is
+    # checked WITHOUT a karg baseline, and has no provenance entry — which also
+    # means its `bootSmoke` can never be flipped to passed, because there is no
+    # entry to flip.  Say so rather than leaving it to be noticed.
+    - name: Is there a provenance entry for the RHCOS this cluster boots?
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../../bootimage/provenance/{{ _worker_rhcos_version }}.yaml"
+      register: _rhcos_prov
+      delegate_to: local
+      changed_when: false
+      when:
+        - not (skip_upload_until_gate | bool)
+        - (_worker_rhcos_version | default('')) | length > 0
+
+    - name: Supply-chain coverage for this boot image
+      ansible.builtin.debug:
+        msg: >-
+          {% if (_worker_rhcos_version | default('')) | length == 0 %}
+          RHCOS version not resolved (an explicit -e rhcos_qcow was used) — no
+          provenance check performed.
+          {% elif _rhcos_prov.stat.exists | default(false) %}
+          RHCOS {{ _worker_rhcos_version }} HAS a provenance entry — the image this
+          cluster boots is the one the offline gate checked. Once these workers
+          reach Ready (phase 12), that is this version's boot smoke; record it in
+          bootimage/provenance/{{ _worker_rhcos_version }}.yaml.
+          {% else %}
+          RHCOS {{ _worker_rhcos_version }} has NO provenance entry. bootimage/
+          bakes from the release branch HEAD, this cluster boots what its pinned
+          payload declares, and here they differ. This image IS format-checked —
+          the gate above runs on it and blocks the upload on failure — but it is
+          checked without a karg baseline, so a changed kernel-arg scheme would
+          not be caught, and nothing records that it was checked. Its bootSmoke
+          cannot be recorded either: there is no entry to record it on.
+          See bootimage/README.md.
+          {% endif %}
       when: not (skip_upload_until_gate | bool)
 
     - name: Done
