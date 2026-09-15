@@ -10,7 +10,8 @@ Resolution order (first that applies):
   --stream <file|->        explicit stream JSON (manual override)
   --openshift-version X.Y  explicit version -> installer rhcos.json
   --group-vars <file>      read openshift_version from group_vars (operator-local)
-  --version-file <file>    committed authoritative version (default: bootimage/version)
+  --floor-file <file>      committed support floor
+                           (default: bootimage/oldest-supported-minor)
 """
 import argparse
 import glob
@@ -83,7 +84,16 @@ def load_ai_versions(path, include_prereleases):
     return minors, max_z
 
 
-def _confirm_404(url, times, delay):
+def _req(url, headers):
+    """headers 为空时就是原来的裸 url —— 现有调用者的行为一个字节都不变。
+
+    access.redhat.com 在 Akamai 后面,对 urllib 的默认 UA(`Python-urllib/3.x`)
+    直接回 403,而同一个 URL 用 curl 是 200。这类差别只在真跑的时候才会暴露。
+    """
+    return urllib.request.Request(url, headers=headers) if headers else url
+
+
+def _confirm_404(url, times, delay, headers=None):
     """Re-request `url` and report whether it 404s every time.
 
     A 404 is the signal that STOPS the scan, so unlike every other response it
@@ -95,7 +105,7 @@ def _confirm_404(url, times, delay):
     for _ in range(times):
         time.sleep(delay)
         try:
-            with urllib.request.urlopen(url, timeout=30):
+            with urllib.request.urlopen(_req(url, headers), timeout=30):
                 return False
         except urllib.error.HTTPError as e:
             if e.code != 404:
@@ -115,7 +125,8 @@ class StreamFileMissing(Exception):
     """
 
 
-def _fetch_json(url, retries=4, backoff=2.0, confirm_404=1, confirm_delay=3.0):
+def _fetch_json(url, retries=4, backoff=2.0, confirm_404=1, confirm_delay=3.0,
+                headers=None):
     """Fetch one JSON URL; None on a confirmed 404.
 
     Transient network failures (connection reset / TLS handshake drop / timeout /
@@ -134,11 +145,11 @@ def _fetch_json(url, retries=4, backoff=2.0, confirm_404=1, confirm_delay=3.0):
     last = None
     for attempt in range(retries):
         try:
-            with urllib.request.urlopen(url, timeout=30) as r:
+            with urllib.request.urlopen(_req(url, headers), timeout=30) as r:
                 return json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                if _confirm_404(url, confirm_404, confirm_delay):
+                if _confirm_404(url, confirm_404, confirm_delay, headers):
                     return None
                 sys.stderr.write(
                     f"[detect] {url} 404 not reproducible — treating it as a "
@@ -299,7 +310,8 @@ def main(argv=None):
     ap.add_argument("--stream", help="explicit stream JSON file, or - for stdin")
     ap.add_argument("--openshift-version", help="explicit OCP version, e.g. 4.20.22")
     ap.add_argument("--group-vars", help="operator-local group_vars override (reads openshift_version)")
-    ap.add_argument("--version-file", default="bootimage/version",
+    ap.add_argument("--floor-file", "--version-file",
+                    default="bootimage/oldest-supported-minor",
                     help="committed FLOOR version file (the minimum supported OCP)")
     ap.add_argument("--all-from", action="store_true",
                     help="MATRIX: enumerate every OCP minor from the floor (version "
@@ -317,12 +329,12 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     # ── MATRIX mode: floor minor .. latest, skip already-baked, emit a list ──────
-    # bootimage/version is the FLOOR (minimum supported OCP). The actual set to bake
+    # bootimage/oldest-supported-minor is the FLOOR. The actual set to bake
     # = enumerate floor..latest, minus what provenance already has. Optionally AND
     # with the AI-supported set (#84) so every image matches a version a cluster can
     # actually be. GA-only unless --include-prereleases.
     if args.all_from:
-        floor = args.openshift_version or version_from_file(args.version_file)
+        floor = args.openshift_version or version_from_file(args.floor_file)
         fminor = minor(floor)
         # The AI-supported set (#84) doubles as the z-stream resolver: ocpVersion
         # recorded in provenance is the highest GA z of the minor (precise,
@@ -363,7 +375,7 @@ def main(argv=None):
         elif args.group_vars:
             version = version_from_group_vars(args.group_vars)
         else:
-            version = version_from_file(args.version_file)
+            version = version_from_file(args.floor_file)
         stream = fetch_stream_for_version(version)
 
     info = extract(stream)

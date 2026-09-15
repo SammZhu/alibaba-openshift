@@ -77,6 +77,17 @@ jobs:
         run: |
           python3 scripts/bootimage_detect_test.py
 
+      - name: Red Hat lifecycle unit test
+        # bootimage/oldest-supported-minor 现在是机器写的,而它决定了每天烤哪些
+        # RHCOS —— 也就决定了用户装机时菜单上有哪些版本。生命周期接口里 EOL 和
+        # EUS 在版本序列里交错(4.17 EOL,更老的 4.16/4.14/4.12 却是 Extended
+        # Support),所以「最老的非 EOL 版本」会给出 4.12 而不是 4.18:一个看上去
+        # 完全合理、而且不会报错的错答案,后果是菜单里塞满没人该装的版本。
+        # 退役那半边更要测:它今天在真实数据上一条都不触发(六个配方全在支持期
+        # 内),所以除了这里没有别的地方能证明它对 —— 而它错了是整张菜单。
+        run: |
+          python3 scripts/rh_lifecycle_test.py
+
       - name: Component image tag drift gate
         # vars/images.yml is the source of truth, but build-mirror-tarball.sh is
         # a standalone bash script that cannot read ansible vars, so it carries

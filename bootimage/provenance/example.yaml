@@ -9,6 +9,22 @@
 # Filename convention: bootimage/provenance/<rhcos_version>.yaml
 schemaVersion: 1
 
+# 退役的逃生口。这一行**平时不写**。
+#
+# 供应链每天按红帽生命周期退役配方:一个版本等到 EOL 和 EUS 都走完(接口里
+# `type: End of life`)就把它的配方删掉 —— 留着等于让新手在 site-apsara 的菜单上
+# 挑到一个不再有补丁的版本,而且装得一路绿灯。
+#
+# 但「不再受支持」不等于「没人在跑」。手上还有集群跑着这个版本时,删掉配方就意味着
+# 那个集群**扩不了 worker**(phase 10 要按这份配方烤 boot image)。这种时候在那份
+# 配方里加一行 retain,写清楚为什么,它就再也不会被自动退役:
+#
+#   retain: "ste2 上还跑着 4.17,下线前别删"
+#
+# 真删错了也能找回来 —— 都在 git 里:
+#   git log --diff-filter=D -- bootimage/provenance/
+#   git checkout <sha>^ -- bootimage/provenance/<file>
+
 # What this image is for.
 ocpVersion: "4.20.22"
 rhcosVersion: "420.96.202xxxxxxx-0"      # = coreos-bootimages architectures.x86_64.artifacts.openstack.release
