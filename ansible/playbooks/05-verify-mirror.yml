@@ -750,6 +750,11 @@
           vars:
             new_state:
               mirror_snapshot_data_id:   "{{ _new_vdb_snap_id }}"
+              # Which release's content this snapshot holds.  03 refuses the
+              # fast-path when it does not match the version being installed —
+              # without this the snapshot is just "some mirror", and reusing it
+              # across a version bump silently installs the wrong images.
+              mirror_snapshot_openshift_version: "{{ openshift_version }}"
               # P3-FIX.9: there is no longer a system-disk snapshot; clear any
               # stale id left in state.yml from the old two-disk layout so 03's
               # fast-path decision never references it.
