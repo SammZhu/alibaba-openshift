@@ -22,6 +22,28 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 1
+      # floor 决定了每天扫哪些 minor,也就决定了用户装机时菜单上有哪些版本。
+      # 手写那一行没有参照系,而红帽每 4 个月发一个 minor —— 必然过期。这一步每次
+      # 跑之前先从红帽自己的生命周期数据推出下沿(Full + Maintenance,**不含 EUS**;
+      # 为什么不含,见 rh_oldest_supported_minor.py 的模块注释,那是个会给出好看错答案的坑)。
+      #
+      # 查不到就沿用已提交的 floor 照常烤 —— 接口挂了不该让整条供应链停摆,
+      # 但也绝不拿一个残缺列表算出来的数字去改文件。
+      - name: Refresh the floor from Red Hat's product lifecycle
+        run: |
+          set -uo pipefail
+          # 管道里 head 提前关掉会给 grep 一个 SIGPIPE,pipefail 下就是非 0。单进程读。
+          BEFORE="$(awk '!/^#/ && NF {print; exit}' bootimage/oldest-supported-minor)"
+          python3 scripts/rh_oldest_supported_minor.py --write bootimage/oldest-supported-minor
+          rc=$?
+          AFTER="$(awk '!/^#/ && NF {print; exit}' bootimage/oldest-supported-minor)"
+          case "$rc" in
+            0) echo "floor: $BEFORE -> $AFTER" ;;
+            2) echo "::warning::红帽生命周期接口取不到(原因见上)—— 沿用已提交的 floor $BEFORE,照常烤" ;;
+            3) echo "::error::生命周期数据不可信(原因见上)—— 沿用已提交的 floor $BEFORE。烤照常进行,但这条要人看" ;;
+            *) echo "::error::rh_oldest_supported_minor.py 意外退出 $rc"; exit "$rc" ;;
+          esac
+
       - name: Bake every RHCOS from the floor up (skip already baked)
         run: |
           set -uo pipefail
@@ -62,19 +84,25 @@ jobs:
           done <<< "$LIST"
           exit $rc
 
-      - name: Refresh provenance ocpVersion to latest z-stream
+      - name: Commit the floor + refreshed provenance
         if: ${{ !cancelled() }}            # 即使某个版本烤失败也刷新其它条目
         run: |
           set -uo pipefail
           # 复用 bake 步骤已拉好的 AI 列表;没有就跳过(没 AI 源刷不了 z)
-          [ -s /tmp/ai-versions.txt ] || { echo "no AI list — skip refresh"; exit 0; }
-          python3 scripts/normalize_provenance.py \
-            --ai-versions /tmp/ai-versions.txt \
-            --provenance-dir bootimage/provenance
+          # 没有 AI 列表就刷不了 z —— 但 floor 可能已经变了,那个照样要提交,
+          # 所以这里只跳过 normalize 这一步,不再整步 exit 0。
+          if [ -s /tmp/ai-versions.txt ]; then
+            python3 scripts/normalize_provenance.py \
+              --ai-versions /tmp/ai-versions.txt \
+              --provenance-dir bootimage/provenance
+          else
+            echo "no AI list — skip provenance z refresh (floor 仍会提交)"
+          fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add bootimage/provenance
-          git commit -m "chore(bootimage): refresh ocpVersion to latest z" || { echo "no change"; exit 0; }
+          git add bootimage/provenance bootimage/oldest-supported-minor
+          git commit -m "chore(bootimage): refresh support floor + provenance z" \
+            || { echo "no change"; exit 0; }
           # Self-hosted runner -> github.com is cross-border and flaky
           # (OpenSSL SSL_ERROR_SYSCALL); retry the pull/push write-back.
           for i in 1 2 3 4 5; do

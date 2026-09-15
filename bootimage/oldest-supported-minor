@@ -1,0 +1,26 @@
+# 红帽仍在**正常支持**的最老 OCP minor —— RHCOS aliyun boot-image 供应链的下沿
+# (P3-IMG.1)。这是**由机器维护的一行**:每次 rhcos-aliyun-bootimage 跑之前,
+# scripts/rh_oldest_supported_minor.py 从红帽产品生命周期接口查出来写在这里,
+# 变了就随当天的 provenance 一起提交。手改会在下一次跑时被覆盖。
+#
+# 「正常支持」= Full Support + Maintenance Support,**不含 EUS**(Extended
+# Support 是另买的延长线)。这条过滤不是细节:接口里 EOL 和 EUS 在版本序列里是
+# 交错的,漏掉它,「最老的非 EOL 版本」会给出 4.12 而不是 4.18 —— 一个看上去
+# 完全合理的错答案。原委见那个脚本的模块注释。
+#
+# 它**不是**要装的版本,也不是要烤的列表。
+#   要装哪个版本 → operator 的 ansible/group_vars/all.yml 里的 openshift_version,
+#                   而且必须是 bootimage/provenance/ 里已经烤过的(site-apsara 会拦)。
+#   要烤哪些     → 运行时推导:从这里往上枚举到最新 release,减去 provenance 里
+#                   已有的,再和 AI 支持列表求交。默认只要 GA。
+#
+# 文件提交在仓库里,是因为 CI runner 上没有 operator 的 all.yml —— 下沿必须自带、
+# 可审计,而不是从某台机器的配置里捡来。
+#
+# 只取 MINOR。两种模式拿到这行都先过 minor(),所以写了 patch 也会被丢掉 ——
+# 这个文件从前叫 `version`、里面写着 `4.20.22`,于是它读起来像「推荐安装 4.20.22」,
+# 而那既不是安装版本、也不在菜单上(装了会被 site-apsara 拦下)。改名就是为了
+# 让那种误读说不出口。
+#
+# 下面第一行非注释非空行就是它。
+4.18

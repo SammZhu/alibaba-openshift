@@ -77,6 +77,16 @@ jobs:
         run: |
           python3 scripts/bootimage_detect_test.py
 
+      - name: Support-floor unit test
+        # bootimage/oldest-supported-minor 现在是机器写的,而它决定了每天烤哪些
+        # RHCOS —— 也就决定了用户装机时菜单上有哪些版本。生命周期接口里 EOL 和
+        # EUS 在版本序列里交错(4.17 EOL,更老的 4.16/4.14/4.12 却是 Extended
+        # Support),所以「最老的非 EOL 版本」会给出 4.12 而不是 4.18:一个看上去
+        # 完全合理、而且不会报错的错答案,后果是菜单里塞满没人该装的版本。
+        # 这里钉死那条过滤,外加「查不到就别改文件」的三种退出码。
+        run: |
+          python3 scripts/rh_oldest_supported_minor_test.py
+
       - name: Component image tag drift gate
         # vars/images.yml is the source of truth, but build-mirror-tarball.sh is
         # a standalone bash script that cannot read ansible vars, so it carries
