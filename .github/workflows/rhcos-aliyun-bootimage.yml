@@ -22,26 +22,32 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 1
-      # floor 决定了每天扫哪些 minor,也就决定了用户装机时菜单上有哪些版本。
-      # 手写那一行没有参照系,而红帽每 4 个月发一个 minor —— 必然过期。这一步每次
-      # 跑之前先从红帽自己的生命周期数据推出下沿(Full + Maintenance,**不含 EUS**;
-      # 为什么不含,见 rh_oldest_supported_minor.py 的模块注释,那是个会给出好看错答案的坑)。
+      # 这一步用红帽自己的生命周期数据决定两件事,取数一次、判据一处:
       #
-      # 查不到就沿用已提交的 floor 照常烤 —— 接口挂了不该让整条供应链停摆,
-      # 但也绝不拿一个残缺列表算出来的数字去改文件。
-      - name: Refresh the floor from Red Hat's product lifecycle
+      #   烤的下沿 —— Full + Maintenance,**不含 EUS**。为什么不含,见
+      #               scripts/rh_lifecycle.py 的模块注释:那是个会给出好看错答案的坑
+      #               (「最老的非 EOL 版本」会答 4.12 而不是 4.18)。
+      #   退役配方 —— 逐个版本问,等到 EOL 和 EUS 都走完才删。中间那段(今天的
+      #               4.12/4.14/4.16,EUS 未到期)不再烤新的,但配方留着 —— 它们比
+      #               已经 EOL 的 4.13/4.15/4.17 还老,所以退役不可能用一条线表达。
+      #
+      # 查不到就两边都不动、照常烤 —— 接口挂了不该让整条供应链停摆,更不该拿一份
+      # 残缺列表去删菜单。删掉的配方在 git 里可恢复。
+      - name: Refresh the floor and retire dead recipes (Red Hat lifecycle)
         run: |
           set -uo pipefail
           # 管道里 head 提前关掉会给 grep 一个 SIGPIPE,pipefail 下就是非 0。单进程读。
           BEFORE="$(awk '!/^#/ && NF {print; exit}' bootimage/oldest-supported-minor)"
-          python3 scripts/rh_oldest_supported_minor.py --write bootimage/oldest-supported-minor
+          python3 scripts/rh_lifecycle.py \
+            --write-floor bootimage/oldest-supported-minor \
+            --retire bootimage/provenance --delete
           rc=$?
           AFTER="$(awk '!/^#/ && NF {print; exit}' bootimage/oldest-supported-minor)"
           case "$rc" in
             0) echo "floor: $BEFORE -> $AFTER" ;;
-            2) echo "::warning::红帽生命周期接口取不到(原因见上)—— 沿用已提交的 floor $BEFORE,照常烤" ;;
-            3) echo "::error::生命周期数据不可信(原因见上)—— 沿用已提交的 floor $BEFORE。烤照常进行,但这条要人看" ;;
-            *) echo "::error::rh_oldest_supported_minor.py 意外退出 $rc"; exit "$rc" ;;
+            2) echo "::warning::红帽生命周期接口取不到(原因见上)—— 沿用已提交的下沿 $BEFORE,配方不动,照常烤" ;;
+            3) echo "::error::生命周期数据不可信(原因见上)—— 沿用已提交的下沿 $BEFORE,配方不动。烤照常进行,但这条要人看" ;;
+            *) echo "::error::rh_lifecycle.py 意外退出 $rc"; exit "$rc" ;;
           esac
 
       - name: Bake every RHCOS from the floor up (skip already baked)
@@ -84,7 +90,7 @@ jobs:
           done <<< "$LIST"
           exit $rc
 
-      - name: Commit the floor + refreshed provenance
+      - name: Commit the floor + provenance changes
         if: ${{ !cancelled() }}            # 即使某个版本烤失败也刷新其它条目
         run: |
           set -uo pipefail
@@ -101,7 +107,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bootimage/provenance bootimage/oldest-supported-minor
-          git commit -m "chore(bootimage): refresh support floor + provenance z" \
+          git commit -m "chore(bootimage): refresh support floor, retire dead recipes, refresh z" \
             || { echo "no change"; exit 0; }
           # Self-hosted runner -> github.com is cross-border and flaky
           # (OpenSSL SSL_ERROR_SYSCALL); retry the pull/push write-back.
