@@ -40,10 +40,16 @@
     # installer every single time.  Re-running the playbook — which is exactly
     # what its own error message tells you to do — changes nothing.
     _op_clients: >-
-      {{ [{'f': 'openshift-client-linux.tar.gz', 'only': ['oc', 'kubectl'], 'bin': 'oc'}]
+      {{ [{'f': 'openshift-client-linux.tar.gz', 'only': ['oc', 'kubectl'], 'bin': 'oc',
+           'ver': 'oc version --client'}]
          + ([] if (operator_oc_only | default(false) | bool)
               else [{'f': 'openshift-install-linux.tar.gz', 'only': ['openshift-install'],
-                     'bin': 'openshift-install'}]) }}
+                     'bin': 'openshift-install', 'ver': 'openshift-install version'}]) }}
+    # 这对客户端不是「引导完就换掉」的:iso_agent 把 operator 上的
+    # openshift-install + oc 打包送到 mirror ECS,agent ISO 就是用它们造的
+    # (tasks/iso_agent.yml 的注释:"the operator already has the version-matched
+    # binaries (a documented prerequisite)")。所以它们的版本必须等于要装的版本。
+    _op_want_ver: "{{ openshift_version | default('', true) }}"
     # Go module fetching: proxy.golang.org and sum.golang.org are Google-hosted and
     # unreachable from China, so default to a domestic module proxy.  GOSUMDB=off
     # because the checksum DB is behind the same wall; go.sum is committed, so
@@ -238,8 +244,15 @@
     # Probe each client separately.  They are shipped as two archives and can go
     # missing independently — a timed-out installer download leaves a host with
     # oc and nothing else, and the old single `oc` probe made that permanent.
-    - name: "operator: which OpenShift clients are already installed"
-      ansible.builtin.shell: "command -v {{ item.bin | quote }}"
+    # Existence is not enough.  Bumping openshift_version (or the channel) on a
+    # host that already has the old pair changed nothing: the probe asked only
+    # `command -v`, so a 4.20 openshift-install stayed and went on to build the
+    # agent ISO for a 4.22 install.  Nothing anywhere compared the two.
+    - name: "operator: which OpenShift clients are present, and at which version"
+      ansible.builtin.shell: |
+        set -o pipefail
+        command -v {{ item.bin | quote }} >/dev/null 2>&1 || { echo MISSING; exit 0; }
+        {{ item.ver }} 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
       args:
         executable: /bin/bash
       environment:
@@ -251,18 +264,38 @@
       changed_when: false
       failed_when: false
 
+    # Refetch when absent, or when present at the wrong version.  When
+    # openshift_version is not set (00a can run before all.yml is filled) there
+    # is nothing to compare against, so absence alone decides — today's rule.
     - name: "operator: the clients still to fetch"
       ansible.builtin.set_fact:
         _op_clients_missing: >-
-          {{ _op_client_probe.results | rejectattr('rc', 'equalto', 0)
-             | map(attribute='item') | list }}
+          {{ _op_client_probe.results | rejectattr('stdout', 'equalto', _op_want_ver)
+             | map(attribute='item') | list
+             if (_op_want_ver | length > 0)
+             else (_op_client_probe.results | selectattr('stdout', 'equalto', 'MISSING')
+                   | map(attribute='item') | list) }}
+
+    - name: "operator: OpenShift clients"
+      ansible.builtin.debug:
+        msg: >-
+          {% for r in _op_client_probe.results %}
+          {{ r.item.bin }}={{ r.stdout | default('?') }}{% if not loop.last %}, {% endif %}
+          {% endfor %}
+          {% if (_op_want_ver | length) > 0 %}— 需要 {{ _op_want_ver }};
+          {{ '要取: ' ~ (_op_clients_missing | map(attribute='bin') | join(' ')) if (_op_clients_missing | length) > 0 else '都对上了' }}
+          {% else %}— openshift_version 未设置,只按「在不在」判断
+          {% endif %}
 
     - name: "operator: install the missing OpenShift clients"
       when: (_op_clients_missing | default([])) | length > 0
       block:
         - name: "operator: download the OpenShift clients"
           ansible.builtin.get_url:
-            url: "{{ operator_client_mirror | default('https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/' ~ (operator_client_channel | default('stable-4.20'))) }}/{{ item }}"
+            # channel 默认跟随 openshift_version(镜像站上 4.22.12 这种精确版本
+            # 目录是存在的,实测 200)。写死 stable-4.20 会让「改了版本却下到旧
+            # 客户端」这件事需要额外记得改一处 —— 而忘了改是沉默的。
+            url: "{{ operator_client_mirror | default('https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/' ~ (operator_client_channel | default(_op_want_ver if (_op_want_ver | length > 0) else 'stable-4.20', true))) }}/{{ item }}"
             dest: "/tmp/{{ item }}"
             mode: "0644"
             timeout: 120
