@@ -415,9 +415,17 @@
             ver='{{ _worker_rhcos_version | default("") }}'
             [ -n "$ver" ] || exit 0
             gen=${ver%%.*}
+            # awk, not a grep chain: grep exits 1 when it matches nothing, and
+            # `set -o pipefail` turns that into a failed task — so "there is no
+            # same-generation entry yet" would abort the install.  That is the
+            # normal state the first time a generation is deployed, which is
+            # exactly the 4.22 / RHEL 10 case this same-generation rule exists
+            # to protect.  awk exits 0 with no output, and pipefail still
+            # catches a real failure in ls/sed.
             ls -1 '{{ playbook_dir }}/../../bootimage/provenance/'*.yaml 2>/dev/null \
               | xargs -r -n1 basename | sed 's/\.yaml$//' \
-              | grep -v '^example$' | grep "^${gen}\." | grep -vx "$ver" \
+              | awk -v gen="$gen." -v self="$ver" \
+                    '$0 != "example" && index($0, gen) == 1 && $0 != self' \
               | sort -V | tail -1
           args:
             executable: /bin/bash
