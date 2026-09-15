@@ -56,6 +56,41 @@
           {{ (mirror_restore_from_snapshot | default(true) | bool)
              and (mirror_snapshot_data_id   | default('') | length > 0) }}
 
+    # A snapshot holds ONE release's mirror content, and until now the decision
+    # above never looked at which.  Bump openshift_version, keep the snapshot,
+    # and the chain restores the old release's Quay; 04 then sees a mirror that
+    # is "already ready" and skips the import entirely — including the assert
+    # that would have said the new version's tarball is missing from OSS,
+    # because that assert is gated on the mirror NOT being ready.  Nothing is
+    # wrong until 06a/07, when nodes cannot pull images for the version you
+    # asked for.  Two hours to find out you installed against the wrong mirror.
+    #
+    # So the snapshot now carries the version it was taken for, and a mismatch
+    # falls back to the full import instead of being silently honoured.  A
+    # snapshot recorded before this change has no version — treated as unknown
+    # and therefore not trusted for a fast-path, which costs one slow rebuild
+    # once and then self-heals when 05 re-snapshots.
+    - name: (fast-path) refuse a snapshot taken for a different release
+      ansible.builtin.set_fact:
+        _mirror_restore_from_snapshot: false
+        _snapshot_version_mismatch: >-
+          {{ 'snapshot has no recorded version (taken before versions were recorded)'
+             if (mirror_snapshot_openshift_version | default('')) | length == 0
+             else 'snapshot holds ' ~ mirror_snapshot_openshift_version
+                  ~ ', this run wants ' ~ openshift_version }}
+      when:
+        - _mirror_restore_from_snapshot
+        - (mirror_snapshot_openshift_version | default('')) != (openshift_version | default(''))
+
+    - name: (fast-path) why the snapshot was not used
+      ansible.builtin.debug:
+        msg: >-
+          Taking the full Phase 04 import instead of the snapshot fast-path:
+          {{ _snapshot_version_mismatch }}. The mirror content is per-release, so
+          reusing it across versions would install the wrong images — and the
+          symptom would not appear until nodes start pulling.
+      when: _snapshot_version_mismatch is defined
+
     # Defensive: a snapshot ID in state.yml does not guarantee the snapshot
     # is still in the cloud.  Examples:
     #   - 99-teardown -e delete_mirror_snapshots=true deleted the image,
