@@ -330,7 +330,13 @@ insights_enabled: true
 # operator_become:       true           # sudo for package installs
 # operator_proxy:        ""             # HTTP proxy for dnf/git/go; defaults to cloud_env.APSARA_PROXY
 # operator_packages:     []             # override the default package list entirely
-# operator_client_channel: stable-4.20  # bootstrap oc/openshift-install channel
+# operator_client_channel: 4.22.12      # where 00a fetches oc/openshift-install.
+#   Defaults to openshift_version, which is what you want: these are NOT
+#   throwaway bootstrap binaries — 06a ships the operator's pair to the mirror
+#   ECS and builds the agent ISO with them, so their version IS the install's.
+#   00a refetches when the version on disk does not match.  Valid values are
+#   directories that exist on the mirror: an exact z (4.22.12) or a channel
+#   (stable-4.22 / latest-4.22).  A bare "4.22" is a 404.
 # operator_client_mirror:  ""           # full base URL if not mirror.openshift.com
 # operator_goproxy:      https://goproxy.cn,direct   # Go module proxy (proxy.golang.org is blocked in CN)
 
