@@ -11,9 +11,15 @@
 - 需要时可用的 LoadBalancer Service(CCM)
 - 一个 worker 池,改一个数字就能扩缩容
 
-**时间量级**(首次,单套环境实测的量级,不是保证值):准备 helper 半小时,填配置
-半小时,其余全自动约 5–7 小时,其中构建镜像内容(mirror-build)独占 1–2 小时。
-同一个 bucket 里已经有同版本内容时,重建约 3 小时。
+**耗时**(2026-09-14 在 ste2 实测,不是估计):
+
+| | |
+|---|---|
+| 准备 helper + 填配置 | 约 1 小时(人工) |
+| **重建**(OSS 里已有镜像内容,mirror 快照还在) | **2 小时 17 分**,全自动 |
+| 首次(还要 `mirror-build` + 无快照的完整导入) | 再加约 2–3 小时 |
+
+重建那 2 小时 17 分是**一条命令跑完、零人工干预**的实测值,逐阶段拆解见下面第 3 节。
 
 > 这条链在 `ste2` 专有云上从空环境完整跑通过(装机 → 存储 → CCM → worker 全绿)。
 > 换一套环境时,**配置值几乎没有一个能照抄**——这份文档里凡是标 ⚠ 的地方,都是
@@ -229,20 +235,21 @@ ansible-playbook -i inventory.yml playbooks/site-apsara.yml
 
 它按这个顺序走:
 
-| 阶段 | 做什么 | 量级 |
+下面的耗时是 **2026-09-14 在 ste2 的实测值**(一条命令跑完,零人工干预,总计 2 小时 17 分):
+
+| 阶段 | 做什么 | 实测 |
 | --- | --- | --- |
-| `00a` | 准备 helper(已经跑过就基本是空转) | 分钟 |
-| `00` | preflight:工具、凭据、规格库存 | 分钟 |
-| `mirror-build` | 拉取 25–30 GB 镜像内容并上传到 OSS | **1–2 小时** |
-| `03` | 建持久层:VPC / NAT / RAM 角色 / mirror 机器 | ~10 分钟 |
-| `04` | 在 mirror 机器上起 Quay,把内容导进去 | 40–60 分钟 |
-| `05` | mirror 健康检查 + 拍快照 | 分钟 |
-| `08b` `08c` `08d` | 在 helper 上编译三个专有云版镜像,推回 mirror | ~15 分钟 |
-| `06` `06a` `06b` | 建集群栈 → 造 agent ISO → 换镜像重启 master | ~30 分钟 |
-| `07` | 等集群装完 | 60–90 分钟 |
-| `08a` `08` | CAPI core、CAPA provider、CSI、存储类 | ~20 分钟 |
-| `10` `12` | 重压 worker 启动镜像 → 建 worker 池 | ~30 分钟 |
-| `13` `14` `15` | 验收:存储、LoadBalancer、数据面 | ~15 分钟 |
+| `00a` `00` | 准备 helper + preflight | 4 分钟 |
+| `mirror-build` | 拉取 25–30 GB 镜像内容并上传到 OSS | **1–2 小时**(本次跳过) |
+| `03` | 建持久层:VPC / NAT / RAM 角色 / mirror 机器 | 含在上面 4 分钟里 |
+| `04` | 在 mirror 机器上起 Quay,把内容导进去 | **21 分钟**(有快照;没快照要 40–60 分钟) |
+| `05` | mirror 健康检查 + 拍快照 | 10 秒 |
+| `08b` `08c` `08d` | 在 helper 上编译三个专有云版镜像,推回 mirror | 1 分钟 |
+| `06` `06a` `06b` | 建集群栈 → 造 agent ISO → 换镜像重启 master | 18 分钟 |
+| `07` | 等集群装完 | **47 分钟**(最长的一段) |
+| `08a` `08` | CAPI core、CAPA provider、CSI、存储类 | 16 分钟 |
+| `10` `12` | 重压 worker 启动镜像 → 建 worker 池 | 25 分钟 |
+| `13` `14` `15` | 验收:存储、LoadBalancer、数据面 | 5 分钟 |
 
 > **看到一堆 PLAY 标题刷过去、里面全是 skipping —— 那是正常的。** `when` 加在
 > playbook 导入上的表现就是这样:play 照样起,里面的任务整段跳过。开跑时打印的
@@ -322,7 +329,7 @@ oc whoami --show-console
 | 节点全部「已注册但未验证」,卡很久 | 节点 DNS 不应答(多半是从别的环境抄来的) | 清空 `apsara_node_dns`,让 06a 自动探;从 `06a` 重跑 |
 | 装机停在 ~50%,节点 NotReady 且带 `uninitialized` 污点 | CCM 连不上云,永远清不掉污点 | `-e ccm_enabled=false` 重装,或确认 `08d` 在 `06a` 之前跑过 |
 | LoadBalancer Service 永远 Pending | `cloud_env.ENDPOINT_SLB` 没填 | 探出来填上,重跑 `08e` |
-| 存储三项一起 FAIL,但卷看着是 Bound | 不是存储坏了,是 kubelet 证书过期导致 `oc exec` 失效 | 重跑 `08`(开头会批 CSR) |
+| 存储三项一起 FAIL,但卷看着是 Bound | 不是存储坏了,是 kubelet 证书过期导致 `oc exec` 失效 | `oc get csr` 看有没有挂起的 `kubelet-serving`;有就是没人在续期,手工 `oc adm certificate approve` 先解封,再查 CAPA 控制器 |
 | phase 10 卡住四分钟后超时 | libguestfs 在这台 CPU 上起不来(海光 C86) | `-e bootimage_force_tcg=true` |
 | mirror 机器起不来,cloud-init 装不上 podman | 镜像默认的软件源在这个 VPC 里到不了 | 填 `apsara_pkg_repo_mirror_host` / `_ip` |
 | 每个云调用都返回 Squid 的 ERR_DNS_FAIL | 代理只有公网 DNS,解析不了内部域名 | 不要设 `APSARA_PROXY`;确认 `HTTP_PROXY`/`HTTPS_PROXY` 在 `cloud_env` 里被清空 |
@@ -346,6 +353,10 @@ ansible-playbook -i inventory.yml playbooks/99-teardown.yml \
 ansible-playbook -i inventory.yml playbooks/99-teardown.yml \
   -e teardown_target=both -e teardown_confirmed=true
 ```
+
+**OSS 里的镜像内容和 mirror 数据盘快照,拆除后都会保留** —— 所以下一次重建可以
+`-e '{"apsara_skip":["mirror-build"]}'`,而且 `04` 走快照恢复(21 分钟而不是 40–60 分钟)。
+实测下来,拆干净再整跑一遍总共 2 小时 19 分。
 
 ⚠ 专有云常常是**多租户共用**的。拆除只会动本次部署建出来、并且**有归属证据**的
 资源;归属不明的一律留着并打印出来,请人工确认。这个约束是有来历的:一次

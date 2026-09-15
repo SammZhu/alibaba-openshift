@@ -408,7 +408,7 @@ treated as one. The cost is rarely an error message; it is usually a wait.
 | Checkout ownership | `git fetch` refused, reported as a network failure | 00a registers `safe.directory` for each checkout |
 | libguestfs appliance | phase 10 at 100% CPU, no output, forever | 10 probes it (below) |
 | OperatorHub catalogs | every MCO drain wedged for 40 minutes | 08 disables them when the mirror carries no catalog |
-| kubelet serving certs | three CSI checks "failed" against healthy volumes | 08 approves the CSRs; 13 says when a verdict is inconclusive |
+| kubelet serving certs | three CSI checks "failed" against healthy volumes | the CAPA controller renews them (openshift-capi-alicloud #24); 08 now only asserts none are left pending, and 13 says when a verdict is inconclusive |
 | NAS access group | PVC Pending: "The specified AccessGroup does not exist" | 08 creates the group and its VPC rule |
 | NAS StorageClass parameters | `Forbidden: updates to parameters are forbidden` | 08 compares first, recreates under csi_storageclass_recreate |
 | SLB tag service | CCM could neither claim nor delete its own CLB, and leaked one | CCM fork falls back to `Slb DescribeTags` on `InvalidAction.NotFound` |

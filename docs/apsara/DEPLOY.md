@@ -282,10 +282,24 @@ ansible-playbook playbooks/03-create-mirror-stack.yml     # validated: builds mi
 # ... 06 / 07 ...
 ```
 
-### 4b. Day-2 (site-post) — 08b/08c are a PREREQUISITE, not a wrap-up
+### 4b. Day-2 — 08b/08c/08d come BEFORE the install, not after
 
-On Apsara the order is **08a → 08 → 10 → 08b → 08c → 08 (again, with the
-`-apsara` tags) → 12 → 13**:
+> This section described the old hand-run order.  `playbooks/site-apsara.yml`
+> runs the whole chain and puts the three image builds **before phase 06**; that
+> ordering is now the one that has been proven end to end.  What follows is the
+> manual equivalent, for running a phase on its own.
+
+The three images are compiled on the operator and layered onto the copy already
+in the mirror, so they need 04 (a populated mirror) and **not** a cluster.  One
+of them must come earlier still: **08d's `ccm_image_digest` is baked into the
+agent ISO by 06a**.  install-config's `imageDigestSources` is fixed before the
+first node boots, and an ImageTagMirrorSet needs a running cluster with MCO —
+far too late.  Build the CCM image after the install and the only way to get a
+CCM is 08e, afterwards, by hand.
+
+The full order is therefore **04 → 08b → 08c → 08d → 06 → 06a → 06b → 07 →
+08a → 08 → 10 → 12 → 13**.  The commands below build the images; run them
+before 06:
 
 ```sh
 # CAPA provider image with the Apsara endpoint support
