@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Refresh provenance ocpVersion to the latest deployable z-stream (P3-IMG.2).
+"""Refresh each provenance entry's `latestZ` to the newest z of its minor (P3-IMG.2).
+
+**这个字段证明什么、不证明什么** —— 下面那道守卫只检查「分支头现在仍指向这条的
+rhcosVersion」。它证明的是:这张镜像目前仍是 release-X.Y 的 bootimage。它**不**
+证明:装 latestZ 那个 z 会拿到这张镜像 —— 因为 bootimage 是按「bump」提交离散往前
+走的,而 payload 每个 z 都发,payload 切出来之后再 bump 一次,两者就分家了。
+所以字段名从 `ocpVersion`(读起来像「这张镜像是给这个版本的」)改成 `latestZ`,
+而菜单校验改用 `ocpMinor`。实证过的对应关系只有一处来源:真装过的集群,由
+phase 10 写成 `bootedBy`。
 
 The operator picks a deploy version by eye from bootimage/provenance/, so every
 entry should show the *latest* precise version that this exact image can run. The
@@ -43,7 +51,7 @@ def main(argv=None):
     for path in sorted(glob.glob(os.path.join(args.provenance_dir, "*.yaml"))):
         if os.path.basename(path) == "example.yaml":
             continue
-        ocp = _grep1(path, "ocpVersion")
+        ocp = _grep1(path, "latestZ")
         rhcos = _grep1(path, "rhcosVersion")
         if not ocp or not rhcos:
             continue
@@ -57,14 +65,14 @@ def main(argv=None):
         if live != rhcos:
             sys.stderr.write(
                 f"[normalize] {os.path.basename(path)}: minor {m} live RHCOS {live} "
-                f"!= {rhcos}; image is historical, leaving ocpVersion={ocp}\n")
+                f"!= {rhcos}; image is historical, leaving latestZ={ocp}\n")
             continue
         text = open(path).read()
-        new = re.sub(r'(?m)^(ocpVersion:\s*)"?%s"?\s*$' % re.escape(ocp),
+        new = re.sub(r'(?m)^(latestZ:\s*)"?%s"?\s*$' % re.escape(ocp),
                      r'\g<1>"%s"' % z, text)
         if new == text:
             continue
-        print(f"[normalize] {os.path.basename(path)}: ocpVersion {ocp} -> {z}")
+        print(f"[normalize] {os.path.basename(path)}: latestZ {ocp} -> {z}")
         if not args.dry_run:
             open(path, "w").write(new)
         changed += 1

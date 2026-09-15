@@ -39,8 +39,12 @@ ansible-playbook -i ansible/inventory.yml ansible/playbooks/10-prepare-worker-bo
 export BOOTIMAGE_EMIT_BASELINE="$WORK/kargs.baseline"
 scripts/bootimage-gate.sh "$WORK/rhcos.qcow2" $BASELINE     # hard gate before any record
 
+# --ref-kind branch-head:CI 烤的是 openshift/installer release-X.Y 的**分支头**,
+# 所以 --ocp 只是「当时该 minor 最新的 z」,不是「装那个 z 会拿到这张镜像」。
+# 两者只在 payload 切出来之后又发生过 bootimage bump 时才分家 —— 见 write_provenance.py。
 python3 scripts/write_provenance.py \
   --rhcos "$RHCOS" --ocp "$OCP" --url "$URL" --sha256 "$SHA" \
+  --ref-kind branch-head --ref "release-${OCP%.*}" \
   --baseline "$WORK/kargs.baseline" --provenance-dir bootimage/provenance \
   --guestfish "$(guestfish --version | awk '{print $2}')" \
   --qemu-img "$(qemu-img --version | head -1 | awk '{print $3}')" \

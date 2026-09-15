@@ -123,7 +123,7 @@ print("退役:逐版本判,EOL 的删、EUS 的留 —— 而 EUS 的那个比 E
 with tempfile.TemporaryDirectory() as d:
     def prov(name, ocp, extra=""):
         open(os.path.join(d, name), "w").write(
-            f'schemaVersion: 1\nocpVersion: "{ocp}"\nrhcosVersion: "x"\n{extra}')
+            f'schemaVersion: 2\nocpMinor: "{ocp}"\nrhcosVersion: "x"\n{extra}')
 
     prov("a.yaml", "4.22.1")     # Full        -> keep
     prov("b.yaml", "4.18.9")     # Maintenance -> keep
@@ -174,10 +174,21 @@ with tempfile.TemporaryDirectory() as d:
     check("没被列进来", "example.yaml" not in rows, rows)
     os.remove(os.path.join(d, "example.yaml"))
 
+print("schemaVersion 1 的旧条目仍能分类(回落到 ocpVersion)")
+with tempfile.TemporaryDirectory() as d:
+    open(os.path.join(d, "old.yaml"), "w").write(
+        'schemaVersion: 1\nocpVersion: "4.17.30"\n')
+    open(os.path.join(d, "new.yaml"), "w").write(
+        'schemaVersion: 2\nocpMinor: "4.22"\n')
+    rows = {b: (a, w) for b, _, a, w in
+            f.classify_provenance(d, f.type_map(doc(REAL)), "4.18")}
+    check("旧字段照样判成 EOL", rows["old.yaml"][0] == "retire", rows["old.yaml"])
+    check("新字段正常", rows["new.yaml"][0] == "keep", rows["new.yaml"])
+
 print("批量栏杆:三种都得一个文件都不动")
 with tempfile.TemporaryDirectory() as d:
     def prov2(name, ocp):
-        open(os.path.join(d, name), "w").write(f'ocpVersion: "{ocp}"\n')
+        open(os.path.join(d, name), "w").write(f'ocpMinor: "{ocp}"\n')
     tmap = f.type_map(doc(REAL))
 
     prov2("x.yaml", "4.17.1"); prov2("y.yaml", "4.15.1")
@@ -200,8 +211,8 @@ with tempfile.TemporaryDirectory() as d:
 
 with tempfile.TemporaryDirectory() as d:
     # 生命周期数据自相矛盾:下沿那个版本自己是 EOL
-    open(os.path.join(d, "k.yaml"), "w").write('ocpVersion: "4.20.1"\n')
-    open(os.path.join(d, "l.yaml"), "w").write('ocpVersion: "4.22.1"\n')
+    open(os.path.join(d, "k.yaml"), "w").write('ocpMinor: "4.20"\n')
+    open(os.path.join(d, "l.yaml"), "w").write('ocpMinor: "4.22"\n')
     bad_tmap = f.type_map(doc([("4.22", "Full Support"), ("4.20", "End of life")]))
     try:
         f.retire_provenance(d, bad_tmap, "4.20", delete=True)
@@ -214,7 +225,7 @@ print("退役失败时退出码是 3,而且 floor 那半边已经写好了")
 with tempfile.TemporaryDirectory() as d:
     real = os.path.join(d, "real.json"); json.dump(doc(REAL), open(real, "w"))
     pd = os.path.join(d, "prov"); os.makedirs(pd)
-    open(os.path.join(pd, "x.yaml"), "w").write('ocpVersion: "4.17.1"\n')
+    open(os.path.join(pd, "x.yaml"), "w").write('ocpMinor: "4.17"\n')
     check("→ 3", f.main(["--from-file", real, "--current", "4.18",
                          "--retire", pd, "--delete"]) == 3)
     check("配方没动", os.listdir(pd) == ["x.yaml"], os.listdir(pd))

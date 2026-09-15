@@ -635,6 +635,13 @@
           - "{{ playbook_dir }}/../../scripts/write_provenance.py"
           - --rhcos
           - "{{ _worker_rhcos_version }}"
+          # refKind: payload —— 这份 RHCOS 是从**这个集群自己的** coreos-bootimages
+          # 读出来的,所以 openshift_version 和它的对应关系是实证的,不是推断的。
+          # CI 那边写的是 branch-head,只能记 latestZ。
+          - --ref-kind
+          - payload
+          - --ref
+          - "{{ openshift_version }}"
           - --ocp
           - "{{ openshift_version }}"
           - --url

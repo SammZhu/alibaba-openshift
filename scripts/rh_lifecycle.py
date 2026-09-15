@@ -154,9 +154,12 @@ def classify_provenance(prov_dir, tmap, floor):
         base = os.path.basename(path)
         if base == "example.yaml":
             continue
-        ocp = _grep1(path, "ocpVersion")
+        # schemaVersion 2 起是 ocpMinor。旧的 ocpVersion 是个 z,而且那个 z 的
+        # 含义只是「烤的时候该 minor 最新的 z」—— 退役只关心 minor 的支持状态,
+        # 两者取 minor 之后等价,所以读不到新字段时回落到旧字段仍然正确。
+        ocp = _grep1(path, "ocpMinor") or _grep1(path, "ocpVersion")
         if not ocp:
-            out.append((base, None, "keep", "读不出 ocpVersion —— 不认识的东西不删"))
+            out.append((base, None, "keep", "读不出 ocpMinor —— 不认识的东西不删"))
             continue
         m = minor(ocp)
         pin = _grep1(path, "retain")
