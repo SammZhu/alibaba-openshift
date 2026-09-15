@@ -162,6 +162,56 @@
           X.Y.Z(例如 4.20.22),不能是 "4.20" 这种频道形式。
         quiet: true
 
+    # 菜单 = bootimage/provenance/*.yaml,每条是「这个 z 的 RHCOS 已被烤过并通过
+    # 离线门禁」。装菜单外的版本**不是没保障** —— phase 10 会用同一套门禁验它
+    # 实际要启动的那张镜像,并补写 provenance(#85)。差别是 CI 没有提前验过,
+    # 也就没有「上游换了内核参数方案」的早期预警。
+    #
+    # 之所以默认拦住:4.20.22 漂到菜单外不是谁决定的,是没人注意到。把它变成
+    # 一个要显式说出口的选择,而不是一个沉默的默认。放行:-e allow_offmenu_version=true
+    - name: "site-apsara — 读取已烤过的版本菜单"
+      ansible.builtin.shell: |
+        set -o pipefail
+        # example.yaml 是模板不是烤出来的条目 —— 它碰巧写着 4.20.22,不排掉就会
+        # 把这个版本判成合格,而它正是这条检查要拦的那一个。bake-one.sh 和
+        # phase 10 的 baseline 挑选一直是排除它的;这里漏了就不一致。
+        ls '{{ playbook_dir }}/../../bootimage/provenance/'*.yaml 2>/dev/null \
+          | grep -v '/example\.yaml$' \
+          | xargs -r grep -h '^ocpVersion:' \
+          | tr -d '"' | awk '{print $2}' | sort -V | tr '\n' ' '
+      args:
+        executable: /bin/bash
+      register: _menu
+      changed_when: false
+      failed_when: false
+      # 只读查询,--check 下也必须真跑:否则它被跳过,_menu 为空,下面那条
+      # 断言就会把**每一个**版本都判成菜单外 —— 包括菜单上的。
+      check_mode: false
+      delegate_to: local
+
+    - name: "site-apsara — openshift_version 必须在菜单上"
+      ansible.builtin.assert:
+        that: openshift_version in ((_menu.stdout | default('')).split())
+        fail_msg: >-
+          openshift_version={{ openshift_version }} 不在已烤过的版本菜单上。
+          菜单(bootimage/provenance/):{{ _menu.stdout | default('(读不到)') | trim }}。
+          菜单上的每个版本,其 RHCOS 都已被 CI 烤过并通过离线门禁;菜单外的版本
+          phase 10 仍会用同一套门禁验并补写 provenance,但没有 CI 的提前预警 ——
+          上游换了内核参数方案时,你会在装机时才知道,而不是在烤镜像时。
+          要么改成菜单上的版本,要么明示放行:-e allow_offmenu_version=true
+        quiet: true
+      when: not (allow_offmenu_version | default(false) | bool)
+
+    - name: "site-apsara — 明示装菜单外的版本"
+      ansible.builtin.debug:
+        msg: >-
+          allow_offmenu_version=true:{{ openshift_version }} 不在菜单
+          ({{ _menu.stdout | default('') | trim }})上,继续。phase 10 会门禁这张
+          镜像并补写 provenance,但 CI 没有提前验过它。
+      when:
+        - allow_offmenu_version | default(false) | bool
+        - openshift_version not in ((_menu.stdout | default('')).split())
+
     - name: "site-apsara — 本次将要执行的阶段"
       ansible.builtin.debug:
         msg: |
