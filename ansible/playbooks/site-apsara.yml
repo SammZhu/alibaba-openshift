@@ -162,10 +162,21 @@
           X.Y.Z(例如 4.20.22),不能是 "4.20" 这种频道形式。
         quiet: true
 
-    # 菜单 = bootimage/provenance/*.yaml,每条是「这个 z 的 RHCOS 已被烤过并通过
-    # 离线门禁」。装菜单外的版本**不是没保障** —— phase 10 会用同一套门禁验它
-    # 实际要启动的那张镜像,并补写 provenance(#85)。差别是 CI 没有提前验过,
-    # 也就没有「上游换了内核参数方案」的早期预警。
+    # 菜单 = bootimage/provenance/*.yaml,按 **minor** 校验,不按 z。
+    #
+    # 原来按 z 拦,而那个 z 是 `latestZ`(旧名 ocpVersion)—— 它的意思只是
+    # 「烤这张镜像的时候,该 minor 最新的 z 是它」,**不是**「装那个 z 会拿到这张
+    # 镜像」。两者只要 payload 切出来之后又发生过 bootimage bump 就会分家:
+    # release-4.18 在 2026-08-24 bump 到 418.94.202608142238-0,而 4.18.54 是
+    # 08-21 构建的 —— 4.18.54 实际 boot 的是 418.94.202602022246-0。按 z 拦等于
+    # 拿一个证明不了的断言去拦人:它会放行 4.18.54(标签对得上、实物对不上),
+    # 又会拦住 4.18.53(实物同样对不上、标签也对不上)。两种结论都没有依据。
+    #
+    # minor 是能证明的:stream 字段就是 rhcos-4.22,烤的就是那个 minor 的
+    # bootimage。而同一 minor 内换哪个 z 都安全 —— phase 10 本来就按集群**实际**
+    # 钉的 bootimage 重压 + 过同一套门禁 + 补写 provenance(#85)。菜单的真实含义
+    # 因此是:这个 minor 的 bootimage 链路 CI 提前验过,上游换内核参数方案时你会
+    # 在烤镜像时就知道,而不是等到装机。
     #
     # 之所以默认拦住:4.20.22 漂到菜单外不是谁决定的,是没人注意到。把它变成
     # 一个要显式说出口的选择,而不是一个沉默的默认。放行:-e allow_offmenu_version=true
@@ -177,8 +188,8 @@
         # phase 10 的 baseline 挑选一直是排除它的;这里漏了就不一致。
         ls '{{ playbook_dir }}/../../bootimage/provenance/'*.yaml 2>/dev/null \
           | grep -v '/example\.yaml$' \
-          | xargs -r grep -h '^ocpVersion:' \
-          | tr -d '"' | awk '{print $2}' | sort -V | tr '\n' ' '
+          | xargs -r grep -h '^ocpMinor:' \
+          | tr -d '"' | awk '{print $2}' | sort -V -u | tr '\n' ' '
       args:
         executable: /bin/bash
       register: _menu
@@ -189,15 +200,19 @@
       check_mode: false
       delegate_to: local
 
-    - name: "site-apsara — openshift_version 必须在菜单上"
+    - name: "site-apsara — openshift_version 的 minor 必须在菜单上"
       ansible.builtin.assert:
-        that: openshift_version in ((_menu.stdout | default('')).split())
+        that: >-
+          (openshift_version | regex_replace('^([0-9]+\\.[0-9]+).*$', '\\1'))
+          in ((_menu.stdout | default('')).split())
         fail_msg: >-
-          openshift_version={{ openshift_version }} 不在已烤过的版本菜单上。
-          菜单(bootimage/provenance/):{{ _menu.stdout | default('(读不到)') | trim }}。
-          菜单上的每个版本,其 RHCOS 都已被 CI 烤过并通过离线门禁;菜单外的版本
-          phase 10 仍会用同一套门禁验并补写 provenance,但没有 CI 的提前预警 ——
-          上游换了内核参数方案时,你会在装机时才知道,而不是在烤镜像时。
+          openshift_version={{ openshift_version }},它的 minor
+          {{ openshift_version | regex_replace('^([0-9]+\\.[0-9]+).*$', '\\1') }}
+          不在已烤过的菜单上。菜单(bootimage/provenance/ 的 ocpMinor):{{
+          _menu.stdout | default('(读不到)') | trim }}。
+          菜单上的每个 minor,其 bootimage 都已被 CI 烤过并通过离线门禁;菜单外的
+          phase 10 仍会用同一套门禁验它实际要启动的那张镜像并补写 provenance,但
+          没有 CI 的提前预警 —— 上游换了内核参数方案时,你会在装机时才知道。
           要么改成菜单上的版本,要么明示放行:-e allow_offmenu_version=true
         quiet: true
       when: not (allow_offmenu_version | default(false) | bool)

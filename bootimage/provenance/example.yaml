@@ -7,7 +7,7 @@
 # by the `provenance` job after the bake passes the offline gate.
 #
 # Filename convention: bootimage/provenance/<rhcos_version>.yaml
-schemaVersion: 1
+schemaVersion: 2
 
 # 退役的逃生口。这一行**平时不写**。
 #
@@ -25,12 +25,34 @@ schemaVersion: 1
 #   git log --diff-filter=D -- bootimage/provenance/
 #   git checkout <sha>^ -- bootimage/provenance/<file>
 
-# What this image is for.
-ocpVersion: "4.20.22"
+# 这是一张 **bootimage** —— 节点第一次开机用的磁盘镜像。
+#
+# 它不是 machine-os。machine-os 是 MCO 在首次开机后立刻把节点 pivot 过去的 OS,
+# 跟着每个 z 版走;本供应链没有任何一处读它。4.21 把区别摆得最清楚:它 boot 一张
+# RHEL 9.6 的 bootimage,然后跑在 RHEL 10.2 上。
+#
+# bootimage 是按离散的「bump」提交往前走的(约每月一次),payload 则每个 z 都发。
+# 所以 release-X.Y 的分支头 和 某个 z 的 payload 里那张 bootimage,可以是不同的构建。
+ocpMinor: "4.20"                         # 确定的:stream 字段就是 rhcos-4.20
 rhcosVersion: "420.96.202xxxxxxx-0"      # = coreos-bootimages architectures.x86_64.artifacts.openstack.release
+
+# 和 z 版有关的断言只有下面这一个,**而且两种写法互斥** —— 谁写的谁负责:
+#
+#   latestZ:  "4.20.36"   CI 写。含义仅仅是「烤这张镜像时该 minor 最新的 z」。
+#                         **不保证**装那个 z 会拿到这张镜像。
+#   bootedBy: "4.20.36"   phase 10 写。实证:真有一个跑着这个版本的集群 boot 了它。
+#
+# 旧的 schemaVersion 1 只有一个 `ocpVersion`,名字读起来像后者、写进去的是前者,
+# 于是它可以直接说假话:release-4.18 在 2026-08-24 bump 到 418.94.202608142238-0,
+# 而 4.18.54 是 08-21 构建的 —— 那条 provenance 标着 "4.18.54",可 4.18.54 实际
+# boot 的是 418.94.202602022246-0。
+latestZ: "4.20.36"
 
 # The verified Red Hat source (the trust anchor — re-bake verifies this sha).
 source:
+  kind: bootimage            # 不是 machine-os
+  refKind: branch-head       # branch-head = CI 从 installer 分支头解析;payload = 从集群的 coreos-bootimages
+  ref: "release-4.20"        # branch-head 时是分支名;payload 时是那个集群的 openshift_version
   format: openstack-qcow2.gz
   # architectures.x86_64.artifacts.openstack.formats["qcow2.gz"].disk.location
   url: "https://rhcos.mirror.openshift.com/.../rhcos-openstack.x86_64.qcow2.gz"

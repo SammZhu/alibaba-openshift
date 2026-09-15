@@ -32,7 +32,7 @@ detect → re-stamp → GATE               re-stamp (cluster's current RHCOS) �
 | `bootimage/oldest-supported-minor` | **the FLOOR** — the oldest OCP minor Red Hat still supports normally (Full + Maintenance, **no EUS**). Refreshed from Red Hat's product lifecycle before every run by `scripts/rh_lifecycle.py`; hand edits are overwritten. Committed, because the runner has no local `all.yml`. NOT the list to bake; that set is derived at run time (floor→latest, minus provenance). | `rh_oldest_supported_minor.py` + git | ✅ |
 | `scripts/bootimage_detect.py` | resolve RHCOS via the installer `release-X.Y` stream — **no cluster/oc needed**. `--all-from` = matrix (enumerate floor→latest, skip what's in provenance, optionally `--ai-versions` AND); default = single (the floor line) | hosted / runner | ✅ |
 | `scripts/ai_versions.py` | (optional, connected) fetch AI-supported versions from assisted-service `/openshift-versions` (offline token from `all.yml`) — feed to `detect --ai-versions` so the matrix only bakes minors a cluster can actually be **and records the precise z-stream** (#84) | runner | ✅ |
-| `scripts/normalize_provenance.py` | refresh each provenance `ocpVersion` to the latest GA z of its minor from the AI set (`4.21` → `4.21.12` → later `4.21.13` …) **only while** `release-X.Y` still points at that entry's `rhcosVersion` (else it's a historical image — left untouched, no drift). Idempotent; backfill now + schedule for ongoing refresh | runner | ✅ |
+| `scripts/normalize_provenance.py` | refresh each provenance `latestZ` to the latest GA z of its minor from the AI set (`4.21` → `4.21.12` → later `4.21.13` …) **only while** `release-X.Y` still points at that entry's `rhcosVersion` (else it's a historical image — left untouched, no drift). Idempotent; backfill now + schedule for ongoing refresh | runner | ✅ |
 | `ansible/playbooks/10-prepare-worker-bootimage.yml` | the bake (guestfish re-stamp + OSS + ImportImage) | runner (VPC) | — |
 | `scripts/bootimage-gate.sh` | **offline format gate**: qemu-img check + partition layout + extract + karg assertions, BEFORE any upload | runner | partial (needs an image) |
 | `scripts/verify_kargs.py` (+ `_test.py`) | pure karg-assertion logic: all `ignition.platform.id=aliyun`, no residual, completeness, cross-version diff guard | anywhere | ✅ (unit-tested) |
@@ -73,7 +73,15 @@ places:
 The branch head moves; a deployment stays on its patch.  Measured 2026-09-14: a
 4.20.22 cluster boots RHCOS `9.6.20260217-1`, and provenance holds
 `9.6.20260512-0`, `-20260520-0`, `-20260616-0`, `-20260815-0`, `-20260818-0` and
-`10.2.20260715-0` — **no overlap at all**.  So there is no entry to flip.
+`10.2.20260715-0` — **no overlap at all**.  So there was no entry to flip.
+
+That is not a permanent condition, and the rule for when it lifts is exact:
+**the two coincide for any z whose payload was built after the most recent
+bootimage bump on its branch.** Measured 2026-09-15: release-4.22 was last bumped
+2026-07-16 to `10.2.20260715-0` and 4.22.12 was built 2026-08-27, so a 4.22.12
+cluster boots precisely the entry CI baked — phase 10 will find it, decline to
+overwrite it, and once phase 12's workers are Ready that entry is flippable. By
+the same rule 4.18.54 is not: its payload predates the 08-24 bump by three days.
 
 What the deployed image does and does not get:
 
@@ -164,25 +172,61 @@ there, the filenames are not) instead of silently truncating the scan.
 
 ## Choosing a version to deploy (operator)
 
-`bootimage/provenance/` is the **menu**: every entry is a baked, gate-passed image
-for a version that satisfies both AI (`--ai-versions` intersect) and CAPA (the
-re-stamp + gate). `ocpVersion` is the precise, deployable z-stream and
-`rhcosVersion` is the exact boot image behind it.
+`bootimage/provenance/` is the **menu**, and it is a menu of **minors**, not of
+z-streams. Every entry is a baked, gate-passed **bootimage** for one minor that
+satisfies both AI (`--ai-versions` intersect) and CAPA (the re-stamp + gate).
 
-1. Look at `bootimage/provenance/*.yaml`, pick an `ocpVersion` (e.g. `4.20.22`).
-2. Put that in the operator's local `ansible/group_vars/all.yml` →
-   `openshift_version`. AI installs that z-stream; CAPA workers boot the matching
-   `rhcosVersion` aliyun image — no drift, because the recorded z is the one whose
-   RHCOS == the baked image.
+1. Look at `bootimage/provenance/*.yaml`, pick an `ocpMinor` (e.g. `4.22`).
+2. Put any z of that minor in the operator's `ansible/group_vars/all.yml` →
+   `openshift_version`. Phase 10 re-stamps and gates the bootimage that **that
+   cluster actually pins**, so any z of a baked minor is covered.
+
+### Why the menu is not keyed on a z
+
+It was, and the field it used could be false. There are two RHCOS numbers per
+release and they are different artifacts:
+
+| | what it is | how it moves |
+| --- | --- | --- |
+| **bootimage** | the disk image a node first boots from — `openshift/installer` `data/data/coreos/*.json`, shipped in the payload as the `coreos-bootimages` ConfigMap | discrete "bump" commits, roughly monthly |
+| **machine-os** | the OS the MCO pivots the node onto right after first boot | every z-stream |
+
+4.21 makes the gap impossible to miss: it boots a RHEL **9.6** bootimage and then
+runs RHEL **10.2**. Nothing in this supply chain reads machine-os; both halves
+(CI and phase 10) read the bootimage, so they are comparing like with like.
+
+But bumps and payloads move on different clocks, so `release-X.Y` HEAD — what CI
+bakes — and the bootimage inside a given z can name different builds. Measured
+2026-09-15:
+
+| z | payload built | last bootimage bump | boots what CI baked? |
+| --- | --- | --- | --- |
+| 4.22.12 | 08-27 | 07-16 | **yes** |
+| 4.18.54 | 08-21 | 08-24 (3 days later) | no — it boots `418.94.202602022246-0` |
+| 4.20.22 | — | 3 bumps since | no — it boots `9.6.20260217-1` |
+
+Under `schemaVersion: 1` the entry carried `ocpVersion`, written as "the newest z
+of this minor at bake time" but reading like "the version this image is for". For
+4.18 those differ, so the file asserted something untrue. `schemaVersion: 2`
+splits it by who can prove what:
+
+| field | written by | means |
+| --- | --- | --- |
+| `ocpMinor` | both | which minor's bootimage this is — provable from the stream's own `stream:` field |
+| `latestZ` | CI (`refKind: branch-head`) | newest z of that minor at bake time. Information, **not** a claim about what that z boots |
+| `bootedBy` | phase 10 (`refKind: payload`) | a cluster running this version provably booted this image |
+
+`source.kind: bootimage` is stated explicitly so the machine-os confusion cannot
+be made silently again.
 
 `bootimage/oldest-supported-minor` (the committed FLOOR) only bounds what the matrix
 bakes; it is
 **not** the deploy version — the deploy version comes from this menu.
 
-The menu stays current automatically: the scheduled workflow runs
-`normalize_provenance.py` after the bake, so when a newer z of a minor ships on the
-*same* RHCOS (e.g. `4.21.12` → `4.21.13`), the recorded `ocpVersion` follows; when
-it ships a *new* RHCOS, the matrix bakes a fresh entry and the old one stays pinned.
+`normalize_provenance.py` keeps `latestZ` current after each bake (guarded: only
+while `release-X.Y` still points at that entry's `rhcosVersion`). That guard proves
+the image is still the branch head — it does **not** prove that installing `latestZ`
+gets you this image, which is exactly why the menu is keyed on `ocpMinor`.
 
 ## Status
 

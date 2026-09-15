@@ -77,6 +77,16 @@ jobs:
         run: |
           python3 scripts/bootimage_detect_test.py
 
+      - name: Provenance writer unit test
+        # provenance 里和 z 版有关的那个字段会说假话:schemaVersion 1 的
+        # `ocpVersion` 写的是「烤的时候该 minor 最新的 z」,读起来却像「这张镜像是
+        # 给这个版本的」。实测 release-4.18 在 08-24 bump,而 4.18.54 是 08-21 构建
+        # 的 —— 那条 provenance 标着 4.18.54,可 4.18.54 根本不 boot 它。
+        # v2 拆成 latestZ(信息)和 bootedBy(实证),这里钉住「谁写的谁负责」:
+        # branch-head 永远不许写 bootedBy。
+        run: |
+          python3 scripts/write_provenance_test.py
+
       - name: Baseline picker unit test
         # 上游在 4.19 换了 RHCOS 命名方案(418.94.* -> 9.6.*),于是 provenance 目录
         # 的字典序变成 10.2 < 418.94 < 9.6 —— 原来的 `sort | tail -1` 永远挑到 9.x,
