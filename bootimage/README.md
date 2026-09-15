@@ -86,10 +86,32 @@ What the deployed image does and does not get:
 So the deployed image is format-checked; what it lacks is the early warning for
 a changed kernel-arg scheme, and any record that it was checked at all.
 
-Phase 10 now records `worker_rhcos_version` in `state.yml` and says on every run
-whether provenance covers it, so the size of the gap is visible instead of
-inferred.  Closing it means baking the deployed patch version's RHCOS as well as
-the branch head's.
+### How the gap is closed
+
+Not by baking twice in CI.  The deploy path already has everything: it resolves
+the version, downloads the qcow, re-stamps it and runs the gate.  What it lacked
+was a baseline and a record.  Phase 10 now:
+
+1. picks the newest provenance entry **of the same RHCOS generation** and feeds
+   its karg keys to the gate, so the diff guard runs on the deployed image too.
+   Same generation matters — 9.x and 10.x are different RHEL bases whose karg
+   sets may legitimately differ, and a cross-generation comparison would fail a
+   good image and block an install;
+2. writes a provenance entry for that version when none exists, with the gate
+   result in it — the same `write_provenance.py` CI uses.
+
+It never overwrites an existing entry (that one is the supply chain's, and may
+already carry a `bootSmoke` result) and it never commits: pushing to the repo is
+an outward action, so the file is written and the commit left to a person.
+
+So a deployed version now ends up in `bootimage/provenance/` with
+`gate: passed`, and **once phase 12's workers reach Ready that is its boot
+smoke** — set `bootSmoke: passed` in that file and commit.  There is finally
+something to record it on.
+
+CI keeps baking the branch head, which is what makes it an early warning for a
+new RHCOS; the deploy path covers what is actually deployed.  Neither replaces
+the other.
 
 ## The self-hosted runner (internal RHEL, zero inbound)
 

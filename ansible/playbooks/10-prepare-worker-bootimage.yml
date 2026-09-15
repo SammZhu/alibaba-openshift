@@ -399,11 +399,60 @@
         # uploaded/imported unless every BLS entry + grub.cfg carries
         # ignition.platform.id=aliyun and qemu-img check passes. No new cloud code —
         # just the same scripts/bootimage-gate.sh the supply chain already validated.
-        - name: Offline format gate before upload
-          environment: "{{ _bi_guestfs_env }}"
-          ansible.builtin.command:
-            argv: [bash, "{{ playbook_dir }}/../../scripts/bootimage-gate.sh", "{{ qcow }}"]
+        # The diff guard needs a baseline — the karg KEY set of an
+        # already-recorded version.  CI passes one (bake-one.sh); the deploy
+        # path never did, so the gate ran here with its absolute checks only and
+        # a changed kernel-arg scheme would have gone through unnoticed.
+        #
+        # Baseline must come from the SAME RHCOS generation.  9.x and 10.x are
+        # different RHEL bases and their karg key sets may legitimately differ;
+        # comparing across them would fail a perfectly good image and, here on
+        # the deploy path, block an install.  No same-generation entry -> no
+        # baseline, which is exactly today's behaviour.
+        - name: Baseline for the diff guard — newest entry of the same RHCOS generation
+          ansible.builtin.shell: |
+            set -o pipefail
+            ver='{{ _worker_rhcos_version | default("") }}'
+            [ -n "$ver" ] || exit 0
+            gen=${ver%%.*}
+            ls -1 '{{ playbook_dir }}/../../bootimage/provenance/'*.yaml 2>/dev/null \
+              | xargs -r -n1 basename | sed 's/\.yaml$//' \
+              | grep -v '^example$' | grep "^${gen}\." | grep -vx "$ver" \
+              | sort -V | tail -1
+          args:
+            executable: /bin/bash
+          register: _bi_prev_prov
           changed_when: false
+          when: not (skip_upload_until_gate | bool)
+
+        - name: Render that baseline
+          ansible.builtin.shell:
+            cmd: >-
+              python3 '{{ playbook_dir }}/../../scripts/print_baseline.py'
+              '{{ playbook_dir }}/../../bootimage/provenance/{{ _bi_prev_prov.stdout | trim }}.yaml'
+              > '{{ work_dir }}/baseline.keys'
+          changed_when: false
+          when:
+            - not (skip_upload_until_gate | bool)
+            - (_bi_prev_prov.stdout | default('') | trim) | length > 0
+
+        - name: Offline format gate before upload
+          environment: >-
+            {{ _bi_guestfs_env | combine({'BOOTIMAGE_EMIT_BASELINE': work_dir + '/kargs.baseline'}) }}
+          ansible.builtin.command:
+            argv: >-
+              {{ [ 'bash', playbook_dir + '/../../scripts/bootimage-gate.sh', qcow ]
+                 + ([ work_dir + '/baseline.keys' ]
+                    if ((_bi_prev_prov.stdout | default('') | trim) | length > 0) else []) }}
+          changed_when: false
+          when: not (skip_upload_until_gate | bool)
+
+        - name: What the gate compared against
+          ansible.builtin.debug:
+            msg: >-
+              {{ ('diff guard ran against RHCOS ' ~ (_bi_prev_prov.stdout | trim))
+                 if ((_bi_prev_prov.stdout | default('') | trim) | length > 0)
+                 else 'no same-generation provenance entry yet — absolute checks only, no karg-drift comparison' }}
           when: not (skip_upload_until_gate | bool)
 
         # ── Upload + import as an ECS custom image (standalone only) ────────────
@@ -553,6 +602,62 @@
           See bootimage/README.md.
           {% endif %}
       when: not (skip_upload_until_gate | bool)
+
+    # ── Record this image, when nothing has recorded it ────────────────────────
+    # The gate above just passed on the image this cluster will actually boot.
+    # If the supply chain has no entry for it, that evidence would otherwise be
+    # thrown away — and `bootSmoke` for this version would stay unrecordable
+    # because there is no file to record it on.  Same two scripts CI uses.
+    #
+    # Never overwrites: write_provenance.py opens the file "w", and an existing
+    # entry is the supply chain's (possibly already carrying a bootSmoke result).
+    # Never commits either — pushing to the repo is an outward action, so the
+    # file is written and the commit left to a person.
+    - name: Checksum the raw qcow (provenance trust anchor)
+      ansible.builtin.shell:
+        cmd: "sha256sum '{{ qcow_gz }}' | awk '{print $1}'"
+      register: _bi_qcow_sha
+      changed_when: false
+      when:
+        - not (skip_upload_until_gate | bool)
+        - (_worker_rhcos_version | default('')) | length > 0
+        - not (_rhcos_prov.stat.exists | default(false))
+
+    - name: Write a provenance entry for the image this cluster boots
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../../scripts/write_provenance.py"
+          - --rhcos
+          - "{{ _worker_rhcos_version }}"
+          - --ocp
+          - "{{ openshift_version }}"
+          - --url
+          - "{{ _qcow_url.stdout | trim }}"
+          - --sha256
+          - "{{ _bi_qcow_sha.stdout | trim }}"
+          - --baseline
+          - "{{ work_dir }}/kargs.baseline"
+          - --provenance-dir
+          - "{{ playbook_dir }}/../../bootimage/provenance"
+      changed_when: true
+      when:
+        - not (skip_upload_until_gate | bool)
+        - (_worker_rhcos_version | default('')) | length > 0
+        - not (_rhcos_prov.stat.exists | default(false))
+
+    - name: A provenance entry was written and is not committed
+      ansible.builtin.debug:
+        msg: >-
+          Wrote bootimage/provenance/{{ _worker_rhcos_version }}.yaml — the image
+          this cluster boots now has a record, and its gate result is in it.
+          It is NOT committed: review and commit it yourself. Once phase 12's
+          workers reach Ready, that is this version's boot smoke; set
+          bootSmoke: passed in the same file.
+      when:
+        - not (skip_upload_until_gate | bool)
+        - (_worker_rhcos_version | default('')) | length > 0
+        - not (_rhcos_prov.stat.exists | default(false))
 
     - name: Done
       ansible.builtin.debug:
