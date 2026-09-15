@@ -3,9 +3,11 @@ schemaVersion: 2
 ocpMinor: "4.20"
 rhcosVersion: "9.6.20260818-0"
 latestZ: "4.20.36"
+latestZBuiltAt: "2026-08-31"
 source:
   kind: bootimage          # 不是 machine-os —— 见 scripts/write_provenance.py
   refKind: branch-head
+  bumpedAt: "2026-08-24"
   ref: "release-4.20"
   format: openstack-qcow2.gz
   url: "https://rhcos.mirror.openshift.com/art/storage/prod/streams/rhel-9.6/builds/9.6.20260818-0/x86_64/rhcos-9.6.20260818-0-openstack.x86_64.qcow2.gz"

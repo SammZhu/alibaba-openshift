@@ -77,6 +77,14 @@ jobs:
         run: |
           python3 scripts/bootimage_detect_test.py
 
+      - name: Upstream date lookup unit test
+        # 「哪次 bump 设定了这个构建」不能图省事取最近一次:对当前分支头那条没错,
+        # 对历史条目就是另一次 bump 的日期 —— 一样是合法日期、一样能拿去比大小、
+        # 一样给出看着合理的错结论。实测 9.6.20260512-0 的 bump 是 05-28,而
+        # release-4.20 最近一次是 08-24。这里钉住按构建号精确匹配。
+        run: |
+          python3 scripts/upstream_dates_test.py
+
       - name: Provenance writer unit test
         # provenance 里和 z 版有关的那个字段会说假话:schemaVersion 1 的
         # `ocpVersion` 写的是「烤的时候该 minor 最新的 z」,读起来却像「这张镜像是
