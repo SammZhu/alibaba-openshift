@@ -409,26 +409,20 @@
         # comparing across them would fail a perfectly good image and, here on
         # the deploy path, block an install.  No same-generation entry -> no
         # baseline, which is exactly today's behaviour.
+        # `gen=${ver%%.*}` used to derive the generation here, and it is wrong for
+        # the pre-4.19 naming scheme: `418.94.202608142238-0` is RHEL **9**.4, but
+        # that expression yields `418` (the OCP minor).  So a 4.18 deploy matched
+        # nothing, skipped the diff guard, and logged "no same-generation
+        # provenance entry yet" — which was simply false, there are six 9.x
+        # entries.  An unfounded assertion in the log is worse than no comparison.
+        # The scheme-aware picker is shared with bake-one.sh and unit-tested; it
+        # prints nothing (exit 0) when this generation has no entry yet, which is
+        # the normal state the first time a generation is deployed.
         - name: Baseline for the diff guard — newest entry of the same RHCOS generation
-          ansible.builtin.shell: |
-            set -o pipefail
-            ver='{{ _worker_rhcos_version | default("") }}'
-            [ -n "$ver" ] || exit 0
-            gen=${ver%%.*}
-            # awk, not a grep chain: grep exits 1 when it matches nothing, and
-            # `set -o pipefail` turns that into a failed task — so "there is no
-            # same-generation entry yet" would abort the install.  That is the
-            # normal state the first time a generation is deployed, which is
-            # exactly the 4.22 / RHEL 10 case this same-generation rule exists
-            # to protect.  awk exits 0 with no output, and pipefail still
-            # catches a real failure in ls/sed.
-            ls -1 '{{ playbook_dir }}/../../bootimage/provenance/'*.yaml 2>/dev/null \
-              | xargs -r -n1 basename | sed 's/\.yaml$//' \
-              | awk -v gen="$gen." -v self="$ver" \
-                    '$0 != "example" && index($0, gen) == 1 && $0 != self' \
-              | sort -V | tail -1
-          args:
-            executable: /bin/bash
+          ansible.builtin.command:
+            argv: ["python3", "{{ playbook_dir }}/../../scripts/pick_baseline.py",
+                   "{{ playbook_dir }}/../../bootimage/provenance",
+                   "{{ _worker_rhcos_version | default('') }}"]
           register: _bi_prev_prov
           changed_when: false
           when: not (skip_upload_until_gate | bool)

@@ -14,12 +14,23 @@ curl -fSL --retry 3 "$URL" -o "$WORK/rhcos.qcow2.gz"
 echo "$SHA  $WORK/rhcos.qcow2.gz" | sha256sum -c -          # trust anchor
 gunzip -f "$WORK/rhcos.qcow2.gz"
 
-# Diff-guard baseline = the latest already-recorded version's karg keys.
-PREV="$(ls -1 bootimage/provenance/*.yaml 2>/dev/null | grep -v example | sort | tail -1 || true)"
+# Diff-guard baseline = the newest recorded version OF THE SAME RHEL GENERATION.
+# It used to be `ls | sort | tail -1`, which is lexicographic and therefore wrong:
+# upstream changed the RHCOS naming scheme at 4.19, so the directory sorts
+#   10.2.20260715-0  <  418.94.202608142238-0  <  9.6.20260818-0
+# and `tail -1` always lands on a 9.x entry. Every 10.x bake — i.e. 4.22 and
+# everything after it — would be diffed against a RHEL 9 baseline, which is the
+# cross-generation comparison the same-generation rule exists to prevent (two
+# RHEL bases may legitimately carry different karg sets, so it can fail a good
+# image). The 4.22 bake did exactly that and passed only because the keys matched.
+PREV="$(python3 scripts/pick_baseline.py bootimage/provenance "$RHCOS")"
 BASELINE=""
 if [ -n "$PREV" ]; then
-  python3 scripts/print_baseline.py "$PREV" > "$WORK/baseline.keys"
+  python3 scripts/print_baseline.py "bootimage/provenance/$PREV.yaml" > "$WORK/baseline.keys"
   BASELINE="$WORK/baseline.keys"
+  echo "[bake] diff guard baseline: $PREV (same RHEL generation)"
+else
+  echo "[bake] no same-generation provenance entry yet — absolute checks only"
 fi
 
 ansible-playbook -i ansible/inventory.yml ansible/playbooks/10-prepare-worker-bootimage.yml \
