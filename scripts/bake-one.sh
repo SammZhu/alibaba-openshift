@@ -42,9 +42,22 @@ scripts/bootimage-gate.sh "$WORK/rhcos.qcow2" $BASELINE     # hard gate before a
 # --ref-kind branch-head:CI 烤的是 openshift/installer release-X.Y 的**分支头**,
 # 所以 --ocp 只是「当时该 minor 最新的 z」,不是「装那个 z 会拿到这张镜像」。
 # 两者只在 payload 切出来之后又发生过 bootimage bump 时才分家 —— 见 write_provenance.py。
+# 两个日期决定「--ocp 那个 z 到底 boot 不 boot 这张镜像」,而它们不在别处。
+# 查不到就空着 —— 少一个字段,好过写一个猜的日期让人拿去比大小。
+DATES="$(python3 scripts/upstream_dates.py --branch "${OCP%.*}" --z "$OCP" \
+          --rhcos "$RHCOS" 2>/dev/null || true)"
+BUMPED=""; ZBUILT=""
+for kv in $DATES; do
+  case "$kv" in
+    bumpedAt=*)       BUMPED="--bumped-at=${kv#*=}" ;;
+    latestZBuiltAt=*) ZBUILT="--latest-z-built-at=${kv#*=}" ;;
+  esac
+done
+echo "[bake] upstream dates: ${DATES:-（查不到)}"
+
 python3 scripts/write_provenance.py \
   --rhcos "$RHCOS" --ocp "$OCP" --url "$URL" --sha256 "$SHA" \
-  --ref-kind branch-head --ref "release-${OCP%.*}" \
+  --ref-kind branch-head --ref "release-${OCP%.*}" $BUMPED $ZBUILT \
   --baseline "$WORK/kargs.baseline" --provenance-dir bootimage/provenance \
   --guestfish "$(guestfish --version | awk '{print $2}')" \
   --qemu-img "$(qemu-img --version | head -1 | awk '{print $3}')" \

@@ -57,6 +57,10 @@ def main(argv=None):
     ap.add_argument("--ref-kind", choices=("branch-head", "payload"),
                     default="branch-head",
                     help="where this RHCOS was resolved from — see the module docstring")
+    ap.add_argument("--bumped-at", default="",
+                    help="branch-head 专用:分支头变成这个构建的那次提交的日期")
+    ap.add_argument("--latest-z-built-at", default="",
+                    help="branch-head 专用:--ocp 那个 z 的 payload 构建日期")
     ap.add_argument("--ref", default="",
                     help="branch-head: the installer branch (release-4.22); "
                          "payload: the cluster's openshift_version")
@@ -89,9 +93,16 @@ def main(argv=None):
         #   latestZ  = 烤的时候该 minor 最新的 z。**不保证**装那个 z 会拿到这张镜像。
         #   bootedBy = 真有一个跑着这个版本的集群 boot 了它。实证。
         (f'latestZ: "{args.ocp}"' if head else f'bootedBy: "{args.ocp}"'),
+        # 光有 latestZ 判断不出它到底 boot 不 boot 这张镜像 —— 那取决于两个
+        # 日期,而它们原来一个都不在文件里(`bakedAt` 顶不上:那是**我们**第一次
+        # 烤到它的时间,取决于我们的下沿。实测 4.18:上游 08-24 bump,我们 09-15
+        # 才烤,差三周)。查不到就不写,绝不写一个猜的日期进来。
+        *([f'latestZBuiltAt: "{args.latest_z_built_at}"']
+          if head and args.latest_z_built_at else []),
         "source:",
         "  kind: bootimage          # 不是 machine-os —— 见本文件生成脚本的模块注释",
         f"  refKind: {args.ref_kind}",
+        *([f'  bumpedAt: "{args.bumped_at}"'] if head and args.bumped_at else []),
         *([f'  ref: "{args.ref}"'] if args.ref else []),
         "  format: openstack-qcow2.gz",
         f'  url: "{args.url}"',

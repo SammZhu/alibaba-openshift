@@ -47,11 +47,31 @@ rhcosVersion: "420.96.202xxxxxxx-0"      # = coreos-bootimages architectures.x86
 # 而 4.18.54 是 08-21 构建的 —— 那条 provenance 标着 "4.18.54",可 4.18.54 实际
 # boot 的是 418.94.202602022246-0。
 latestZ: "4.20.36"
+latestZBuiltAt: "2026-08-31"   # 那个 z 的 payload 构建日期(release.txt 的 Created)
+
+# 把 latestZBuiltAt 和 source.bumpedAt 一比,就知道 latestZ 到底 boot 不 boot 这张
+# 镜像 —— 这是**光看 latestZ 判断不出来**的事:
+#
+#   latestZBuiltAt > bumpedAt   payload 是在分支头换成这张之后切的 → boot 它
+#   latestZBuiltAt < bumpedAt   bump 打了,可用它的 payload 还没出 → **不** boot 它
+#
+# 后者是常态,不是异常:bump 和下一个 z 版之间总有窗口。实测 2026-09-15 的 4.18 就
+# 在窗口里 —— bumpedAt 08-24,而 latestZ 4.18.54 是 08-21 构建的,早三天。
+#
+# `bakedAt` 顶替不了 bumpedAt:那是**我们**第一次烤到这个构建的时间,取决于我们的
+# 下沿。同一个 4.18:上游 08-24 bump,我们 09-15 才烤,差三周。
+#
+# 注意这条比较对**当前分支头**那条是完整的;对已经被后续 bump 顶下去的历史条目,
+# 严格说还要看下一次 bump 的日期。不过历史条目的 latestZ 本来就被 normalize 冻在
+# 它还是分支头的那一刻,所以上界天然成立。
+#
+# 想要确定答案而不是推断,只有一个来源:bootedBy —— 真装过的集群。
 
 # The verified Red Hat source (the trust anchor — re-bake verifies this sha).
 source:
   kind: bootimage            # 不是 machine-os
   refKind: branch-head       # branch-head = CI 从 installer 分支头解析;payload = 从集群的 coreos-bootimages
+  bumpedAt: "2026-08-24"     # 分支头**变成这个构建**的那次提交(不是最近一次 bump)
   ref: "release-4.20"        # branch-head 时是分支名;payload 时是那个集群的 openshift_version
   format: openstack-qcow2.gz
   # architectures.x86_64.artifacts.openstack.formats["qcow2.gz"].disk.location

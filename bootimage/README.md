@@ -75,13 +75,32 @@ The branch head moves; a deployment stays on its patch.  Measured 2026-09-14: a
 `9.6.20260512-0`, `-20260520-0`, `-20260616-0`, `-20260815-0`, `-20260818-0` and
 `10.2.20260715-0` — **no overlap at all**.  So there was no entry to flip.
 
-That is not a permanent condition, and the rule for when it lifts is exact:
-**the two coincide for any z whose payload was built after the most recent
-bootimage bump on its branch.** Measured 2026-09-15: release-4.22 was last bumped
-2026-07-16 to `10.2.20260715-0` and 4.22.12 was built 2026-08-27, so a 4.22.12
-cluster boots precisely the entry CI baked — phase 10 will find it, decline to
-overwrite it, and once phase 12's workers are Ready that entry is flippable. By
-the same rule 4.18.54 is not: its payload predates the 08-24 bump by three days.
+That was true of the cluster measured — a **4.20.22** cluster, an old z. It is not
+a general fact, and the rule is exact: **a z boots the branch-head image iff its
+payload was built after the bump that set it.** Both dates are now recorded in
+every branch-head entry (`source.bumpedAt` and `latestZBuiltAt`), so the question
+is answerable from the file instead of two web lookups. Measured 2026-09-15:
+
+| entry | bumpedAt | latestZ | built | latestZ boots it |
+| --- | --- | --- | --- | --- |
+| `10.2.20260715-0` | 07-16 | 4.22.12 | 08-27 | yes |
+| `9.6.20260818-0` | 08-24 | 4.20.36 | 08-31 | yes |
+| `9.6.20260815-0` | 08-24 | 4.21.31 | 08-27 | yes |
+| `9.6.20260616-0` | 06-23 | 4.20.33 | 08-06 | yes |
+| `9.6.20260512-0` | 05-28 | 4.20.25 | 06-11 | yes |
+| `418.94.202608142238-0` | **08-24** | 4.18.54 | **08-21** | **no** |
+
+So six of the seven entries do correspond to a current z; deploying any of those
+makes that entry flippable. 4.18 is the one in the gap — bumped, but no payload
+built with it yet. That window is normal, not a fault: it exists after every bump
+until the next z ships.
+
+`bakedAt` is not a substitute for `bumpedAt`. It records when *we* first baked a
+build, which depends on our own floor: upstream bumped 4.18 on 08-24 and we baked
+it on 09-15, three weeks later, because that is when the floor reached 4.18.
+
+None of this is proof. The only proof that a z boots an image is a cluster that
+did it — `bootedBy`, written by phase 10.
 
 What the deployed image does and does not get:
 

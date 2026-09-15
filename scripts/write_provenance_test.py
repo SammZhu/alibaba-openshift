@@ -62,6 +62,23 @@ with tempfile.TemporaryDirectory() as t:
     check("karg 基线照写", "  - console" in out and "  - rw" in out)
     check("bootSmoke 仍是 pending", "bootSmoke: pending" in out)
 
+print("两个日期:branch-head 才写,而且给了才写")
+with tempfile.TemporaryDirectory() as t:
+    _, out = run(t, "--ref-kind", "branch-head", "--ref", "release-4.18",
+                 "--bumped-at", "2026-08-24", "--latest-z-built-at", "2026-08-21")
+    check('bumpedAt 写进 source', 'bumpedAt: "2026-08-24"' in out, out[:300])
+    check('latestZBuiltAt 写在 latestZ 旁边',
+          'latestZBuiltAt: "2026-08-21"' in out, out[:300])
+with tempfile.TemporaryDirectory() as t:
+    _, out = run(t, "--ref-kind", "branch-head")
+    check("没给就一个字段都不写(不留空值让人去比大小)",
+          "bumpedAt" not in out and "latestZBuiltAt" not in out, out[:300])
+with tempfile.TemporaryDirectory() as t:
+    _, out = run(t, "--ref-kind", "payload", "--ref", "4.22.12",
+                 "--bumped-at", "2026-07-16", "--latest-z-built-at", "2026-08-27")
+    check("payload 条目不写这两个日期(bootedBy 是实证,用不着推)",
+          "bumpedAt" not in out and "latestZBuiltAt" not in out, out[:300])
+
 print("phase 10(payload):写 bootedBy,绝不写 latestZ")
 with tempfile.TemporaryDirectory() as t:
     rc, out = run(t, "--ref-kind", "payload", "--ref", "4.22.12")
