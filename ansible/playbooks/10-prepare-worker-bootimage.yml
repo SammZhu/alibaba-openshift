@@ -614,8 +614,11 @@
     # Never commits either — pushing to the repo is an outward action, so the
     # file is written and the commit left to a person.
     - name: Checksum the raw qcow (provenance trust anchor)
-      ansible.builtin.shell:
-        cmd: "sha256sum '{{ qcow_gz }}' | awk '{print $1}'"
+      ansible.builtin.shell: |
+        set -o pipefail
+        sha256sum '{{ qcow_gz }}' | awk '{print $1}'
+      args:
+        executable: /bin/bash
       register: _bi_qcow_sha
       changed_when: false
       when:
