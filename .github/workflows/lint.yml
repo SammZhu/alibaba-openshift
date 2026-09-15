@@ -77,6 +77,16 @@ jobs:
         run: |
           python3 scripts/bootimage_detect_test.py
 
+      - name: Baseline picker unit test
+        # 上游在 4.19 换了 RHCOS 命名方案(418.94.* -> 9.6.*),于是 provenance 目录
+        # 的字典序变成 10.2 < 418.94 < 9.6 —— 原来的 `sort | tail -1` 永远挑到 9.x,
+        # 烤 10.x 镜像(4.22 及以后全部)时就成了跨代比 karg,而那正是同代规则要防的
+        # 事,可以否掉一个好镜像。另一半是 `${ver%%.*}` 把 418.94.* 的代次解成 418,
+        # 让 4.18 找不到同代条目、还在日志里断言「本代尚无条目」——那是假话。
+        # 两处调用共用这一个脚本,所以这里是唯一能钉住它的地方。
+        run: |
+          python3 scripts/pick_baseline_test.py
+
       - name: Red Hat lifecycle unit test
         # bootimage/oldest-supported-minor 现在是机器写的,而它决定了每天烤哪些
         # RHCOS —— 也就决定了用户装机时菜单上有哪些版本。生命周期接口里 EOL 和
