@@ -30,7 +30,15 @@ jobs:
           AI_ARG=""
           if python3 scripts/ai_versions.py --group-vars "$OP_GV" > /tmp/ai-versions.txt 2>/tmp/ai.err; then
             AI_ARG="--ai-versions /tmp/ai-versions.txt"
-            echo "AI-supported: $(tr '\n' ' ' < /tmp/ai-versions.txt)"
+            # 只打每个 minor 的最新 z + 总数。全量是七百多个版本(4.11 一直到
+            # 5.0-rc),把日志淹掉而检测只用得到每 minor 的最新一个 —— 2026-09-15
+            # 手动触发那次,ai_filtered_out=[] 这行就差点被它埋掉。
+            echo "AI-supported: $(grep -vE -- '-(multi|ec|rc)\b' /tmp/ai-versions.txt \
+              | awk -F. '{print $1"."$2}' | sort -u -t. -k1,1n -k2,2n \
+              | while read -r m; do
+                  grep -E "^${m}\.[0-9]+$" /tmp/ai-versions.txt \
+                    | sort -t. -k3,3n | tail -1;
+                done | tr '\n' ' ')($(wc -l < /tmp/ai-versions.txt) 个版本,只列每个 minor 的最新 z)"
           else
             echo "::warning::AI 拉取失败 — 不做 AI 交集,仅按 floor 烤"; cat /tmp/ai.err 2>/dev/null || true
           fi
