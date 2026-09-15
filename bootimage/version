@@ -9,5 +9,14 @@
 #   optionally AND the AI-supported set (--ai-versions). GA-only by default.
 # Single-version mode uses this line as the version to bake.
 #
+# Only the MINOR is used.  Both modes call minor() on this line before doing
+# anything with it — matrix mode enumerates release-X.Y branches from here, and
+# single mode resolves a stream by branch too — so the patch component, if you
+# write one, is silently discarded.  It used to say 4.20.22, which read like a
+# recommended version and was not one: it is not the deploy version (that is
+# openshift_version in the operator's group_vars/all.yml), and since the menu
+# check landed it was not even installable, because 4.20.22 is not in
+# bootimage/provenance/.
+#
 # detect reads the first non-comment, non-blank line below.
-4.20.22
+4.20
