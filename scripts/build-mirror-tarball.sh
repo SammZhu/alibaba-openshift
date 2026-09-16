@@ -183,15 +183,62 @@ esac
 mkdir -p "$WORK_DIR"
 cd "$WORK_DIR"
 
-# ── Install oc + oc-mirror if missing ─────────────────────────────────────────
-if ! command -v oc-mirror >/dev/null; then
-  echo "[1/6] Installing oc + oc-mirror (versioned URLs — /latest/ is now 404)..."
+# ── Install oc + oc-mirror unless the installed ones MATCH THIS RELEASE ───────
+# It used to be `if ! command -v oc-mirror`, i.e. "is one present?".  Presence is
+# not the question — the version is.  A binary left over from an earlier release
+# silently stays, and mirrors the new payload with the old tool's feature set.
+#
+# 2026-09-16, ste2: an oc-mirror from Apr 25 (4.20.0-...el9) built the mirror for
+# 4.22.12.  The build "succeeded".  What it did NOT do is copy the **sigstore
+# signature attachments** — its own log mentions signature/sigstore zero times.
+# 4.22's MCO then writes /etc/containers/registries.d/sigstore-registries.yaml
+# with `use-sigstore-attachments: true` FOR THE MIRROR ITSELF, so every node
+# verifies release images against signatures that were never mirrored:
+#
+#   machine-config-daemon-pull.service:
+#     Error: Source image rejected: A signature was required, but no signature exists
+#
+# That service is `while ! podman pull; do sleep 1; done`, so it never gives up:
+# 22 systemd jobs queue behind it including kubelet-dependencies.target, kubelet
+# never starts, no CSR is ever issued, no node joins, the MCO never gets a node
+# to run on — and the MachineConfig that would have relaxed the policy can never
+# be rendered.  The install deadlocks with every master up and sshable.
+#
+# Version-matching is checked on the MINOR.  Comparing the full x.y.z would
+# reinstall on every z-stream bump for no benefit; comparing nothing at all is
+# what produced the deadlock above.
+# stdout 只有 `Client Version: version.Info{... GitVersion:"4.20.0-..." ...}`;
+# 三行弃用警告走的是 stderr,所以必须 2>/dev/null,否则会从时间戳里抓出数字。
+# 锚在 GitVersion 上,而不是「输出里第一对数字」—— 后者今天碰巧对。
+_ocm_minor() {
+  "$1" version 2>/dev/null \
+    | grep -oE 'GitVersion:"[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+' | head -1
+}
+_want_minor="${OPENSHIFT_VERSION}"
+_have_minor="$(command -v oc-mirror >/dev/null && _ocm_minor oc-mirror || true)"
+if [ "$_have_minor" != "$_want_minor" ]; then
+  if [ -n "$_have_minor" ]; then
+    echo "[1/6] oc-mirror is $_have_minor but this build is $_want_minor — replacing it."
+  elif command -v oc-mirror >/dev/null; then
+    echo "[1/6] oc-mirror is installed but its version could not be parsed — replacing it."
+  else
+    echo "[1/6] Installing oc + oc-mirror (versioned URLs — /latest/ is now 404)..."
+  fi
   curl -sL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OPENSHIFT_PATCH_VERSION/openshift-client-linux.tar.gz" | tar -xz oc
   curl -sLO "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OPENSHIFT_PATCH_VERSION/oc-mirror.tar.gz"
   tar -xzf oc-mirror.tar.gz
   chmod +x oc oc-mirror
   sudo mv oc oc-mirror /usr/local/bin/
+  _have_minor="$(_ocm_minor oc-mirror)"
+  # 刚从带版本号的 URL 装下来的,版本由 URL 保证。解析不出来只说明输出格式变了 ——
+  # 那是该提醒的事,不是该让整条构建停下来的事;解析出来却不匹配才是真出问题。
+  if [ -z "$_have_minor" ]; then
+    echo "      WARNING: could not parse the freshly installed oc-mirror's version (output format changed?)"
+  elif [ "$_have_minor" != "$_want_minor" ]; then
+    echo "ERROR: installed oc-mirror reports $_have_minor, expected $_want_minor" >&2; exit 1
+  fi
 fi
+echo "      oc-mirror : minor ${_have_minor:-unknown} (build $OPENSHIFT_PATCH_VERSION)"
 
 # Make pull-secret discoverable by oc-mirror.  oc-mirror reads
 # $DOCKER_CONFIG/config.json, so stage the pull-secret under that exact name — the
