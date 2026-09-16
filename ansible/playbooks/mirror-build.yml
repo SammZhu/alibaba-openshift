@@ -97,6 +97,26 @@
           the build needs ~60 GB (30 GB tarball + oc-mirror working set/cache).
           Free space or set WORK_DIR to a larger volume.
 
+    # Apsara 的跨境链路上,oc-mirror 自己的默认(4 并发 / 每镜像 10m)是会失败的:
+    # 四路并发把带宽分掉,几个 GB 级的 release 镜像跑不完 10m 就 context deadline
+    # exceeded。这一点 build-mirror-tarball.sh 的注释里早就写着(「seen on Apsara:
+    # 17/192 mirrored」),旋钮也早就做好了 —— 但它只作为注释躺在公有云的
+    # all.yml.example 里,Apsara 的模板里一句都没有,于是默认值照旧生效。
+    # 2026-09-16 一次 4.22.12 装机就这么死在这儿:跑了 24 分 33 秒,192 个镜像里
+    # **只差一个** ocpReleaseContent 超时,整轮 rc=10。
+    #
+    # 所以把慢链路的值做成 Apsara 的**兜底**,而不是模板里的一条建议:模板救不了
+    # 已经存在的 all.yml。显式设过的仍然优先(见下面 combine 的顺序)。
+    - name: Slow-link oc-mirror defaults (apsara only)
+      ansible.builtin.set_fact:
+        _mb_oc_mirror_defaults: >-
+          {{ {
+               'OC_MIRROR_PARALLEL_IMAGES': '2',
+               'OC_MIRROR_PARALLEL_LAYERS': '4',
+               'OC_MIRROR_IMAGE_TIMEOUT':   '45m',
+               'OC_MIRROR_RETRIES':         '10'
+             } if (cloud_platform | default('public')) == 'apsara' else {} }}
+
     - name: Assemble build-mirror-tarball.sh environment (per platform)
       ansible.builtin.set_fact:
         _mb_env: >-
@@ -113,6 +133,8 @@
                'OPENSHIFT_CAPI_IMAGE': capa_image_repo ~ ':' ~ capa_image_tag,
                'CSI_OPERATOR_VERSION': csi_operator_image_tag
              } | combine(
+               _mb_oc_mirror_defaults
+             ) | combine(
                {
                  'OC_MIRROR_PARALLEL_IMAGES': oc_mirror_parallel_images | default('') | string,
                  'OC_MIRROR_PARALLEL_LAYERS': oc_mirror_parallel_layers | default('') | string,
