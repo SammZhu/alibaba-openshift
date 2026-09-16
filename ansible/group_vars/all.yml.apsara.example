@@ -288,3 +288,18 @@ teardown_confirmed:  false
 # ═══════════════════════════════════════════════════════════════════════════
 assisted_api:  https://api.openshift.com/api/assisted-install/v2
 sso_url:       https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
+
+# ── oc-mirror 慢链路调优(playbooks/mirror-build.yml)────────────────────────
+# **这四个在专有云上已有兜底,不设也能跑** —— mirror-build.yml 在
+# cloud_platform=apsara 时自动用 2 并发 / 4 层 / 45m / 10 次重试。
+# 写在这里是为了让你知道它存在,以及怎么改。
+#
+# 为什么需要:oc-mirror 自己的默认是 4 并发 + 每镜像 10m。跨境链路上四路并发把
+# 带宽分掉,几个 GB 的 release 镜像跑不完 10m,就是 `context deadline exceeded`。
+# 2026-09-16 一次 4.22.12 装机死在这儿:跑了 24 分 33 秒,192 个镜像里**只差一个**
+# 超时,整轮失败。
+#
+# 链路特别慢就往下调并发、往上调超时(显式设置优先于兜底):
+# oc_mirror_parallel_images: 1
+# oc_mirror_image_timeout:   90m
+
