@@ -204,6 +204,17 @@ cd "$WORK_DIR"
 # to run on — and the MachineConfig that would have relaxed the policy can never
 # be rendered.  The install deadlocks with every master up and sshable.
 #
+# WHY the old binary broke it, precisely — it is one flipped default:
+#
+#   4.20:  --remove-signatures   Do not copy image signature (default true)
+#   4.22:  --remove-signatures   Do not copy image signature
+#
+# cobra only prints "(default X)" for a non-zero default, and both binaries do
+# print it for other bool flags (--dest-tls-verify, --src-tls-verify), so the
+# absence in 4.22 means the default became false.  In other words 4.20
+# **strips signatures by default** and 4.22 keeps them.  Same sigstore code in
+# both (2783 vs 2784 matching strings) — only the default moved.
+#
 # Version-matching is checked on the MINOR.  Comparing the full x.y.z would
 # reinstall on every z-stream bump for no benefit; comparing nothing at all is
 # what produced the deadlock above.
