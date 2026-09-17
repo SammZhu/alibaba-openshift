@@ -566,10 +566,28 @@
           changed_when: true
 
     # ── 3. Mirror-stack teardown ─────────────────────────────────────────
+    # 守卫为什么不是「stack 还在」:这个 block 里除了 DeleteStack 本身,还装着
+    # **删快照**和**按名兜底的 stale-sweep** —— 而那两件事按定义是 stack 没了之后
+    # 才做得成的(本块内注释原话:"Now that DeleteStack above freed the ECS +
+    # disks, those old snapshots are finally deletable")。把它们锁在「stack 还在」
+    # 里面,就造出一个回不去的状态:
+    #
+    #   delete_mirror_snapshots=false 拆一次 → 快照留着,但 id 从 state 清掉
+    #     → 快照成了无人引用的孤儿
+    #   事后 delete_mirror_snapshots=true 再拆 → 按 id 删:id 没了,跳过
+    #                                          → 按名兜底:被这条守卫挡在门外
+    #     → 整块 skipped,changed=0,审计正确地报「≤0 期望 / 实际 1」然后失败
+    #
+    # 2026-09-17 ste2 实测撞上:target=both 拆完留了 1 个 mirror 快照,再用
+    # target=mirror + delete_mirror_snapshots=true 去删,什么也删不掉。
+    #
+    # 所以:要删快照时,即便 stack 已经没了也要进来。真正依赖 stack 的那两个
+    # 任务(DeleteStack / Poll until gone)各自带守卫。
     - name: Delete mirror-stack
       when:
         - teardown_target in ['mirror', 'both']
-        - mirror_stack_id is defined and mirror_stack_id | length > 0
+        - (mirror_stack_id is defined and mirror_stack_id | length > 0)
+          or (delete_mirror_snapshots | default(false) | bool)
       block:
         # CSI dynamically provisions NAS filesystems + mount targets in the cluster
         # VPC (filesystem-mode NAS SC / live-migration RWX). They are NOT stack-
@@ -724,6 +742,7 @@
           when: (cloud_platform | default('public')) == 'apsara'
 
         - name: DeleteStack — mirror
+          when: mirror_stack_id is defined and mirror_stack_id | length > 0
           ansible.builtin.command:
             argv:
               - "{{ cloud_cli }}"
@@ -741,6 +760,7 @@
           failed_when: false
 
         - name: Poll mirror-stack until gone
+          when: mirror_stack_id is defined and mirror_stack_id | length > 0
           ansible.builtin.command:
             argv:
               - "{{ cloud_cli }}"
