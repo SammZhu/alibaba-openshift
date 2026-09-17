@@ -149,6 +149,15 @@
      | selectattr('RouterInterfaceId','equalto', _peer_ri_init) | list | first | default({})).Status | default('') == 'Active'
 
 # ── Routes: operator -> mirror CIDR, mirror -> operator CIDR ──────────────────
+# 「这条路由已经在了」在这个网关上有**两种**错误码,只认一种等于没有幂等:
+#
+#   RouteEntryAlreadyExist   同 CIDR + 同下一跳,已存在
+#   Duplicated.VpcNextHop    "Route entry nexthop duplicate" —— 实际回的是这个
+#
+# 2026-09-16 实测:13:35:40 那次跑成功建了 dst=10.0.0.0/16 -> ri-x4svq3izg…;
+# 同一天 18:19:50 重跑,RI 被正确复用(上面 "settle on the RI ids" 就是干这个的),
+# 路由却拿 Duplicated.VpcNextHop 直接 fail —— **自己上一轮的成果挡住了自己**,
+# 而且每一次重跑都会撞,装机一旦在后面某步断掉就再也续不上。
 - name: "peer: route on operator (dst = mirror VPC CIDR -> initiating RI)"
   ansible.builtin.command:
     argv: ["{{ cloud_cli }}", vpc, CreateRouteEntry, --RegionId, "{{ region }}",
@@ -157,10 +166,13 @@
            --NextHopType, RouterInterface, --NextHopId, "{{ _peer_ri_init }}",
            --profile, "{{ aliyun_profile }}"]
   register: _peer_op_route
-  changed_when: "'RouteEntryAlreadyExist' not in (_peer_op_route.stderr | default(''))"
+  changed_when: >-
+    not (_peer_op_route.stderr | default('')
+         is search('RouteEntryAlreadyExist|Duplicated\\.VpcNextHop'))
   failed_when:
     - _peer_op_route.rc != 0
-    - "'RouteEntryAlreadyExist' not in (_peer_op_route.stderr | default(''))"
+    - not (_peer_op_route.stderr | default('')
+           is search('RouteEntryAlreadyExist|Duplicated\\.VpcNextHop'))
 
 - name: "peer: route on mirror (dst = operator CIDR -> accepting RI)"
   ansible.builtin.command:
@@ -170,10 +182,13 @@
            --NextHopType, RouterInterface, --NextHopId, "{{ _peer_ri_accept }}",
            --profile, "{{ aliyun_profile }}"]
   register: _peer_mr_route
-  changed_when: "'RouteEntryAlreadyExist' not in (_peer_mr_route.stderr | default(''))"
+  changed_when: >-
+    not (_peer_mr_route.stderr | default('')
+         is search('RouteEntryAlreadyExist|Duplicated\\.VpcNextHop'))
   failed_when:
     - _peer_mr_route.rc != 0
-    - "'RouteEntryAlreadyExist' not in (_peer_mr_route.stderr | default(''))"
+    - not (_peer_mr_route.stderr | default('')
+           is search('RouteEntryAlreadyExist|Duplicated\\.VpcNextHop'))
 
 # ── Mirror SG: allow the operator CIDR (mirror binds SG rules to VpcCidr, which
 #    does NOT cover the operator's subnet across the peering). ──────────────────
