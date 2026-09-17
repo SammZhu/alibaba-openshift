@@ -204,6 +204,13 @@ cd "$WORK_DIR"
 # to run on — and the MachineConfig that would have relaxed the policy can never
 # be rendered.  The install deadlocks with every master up and sshable.
 #
+# Belt AND braces: the flag is also passed EXPLICITLY at the oc-mirror
+# invocation below rather than left to the version's default.  We need the
+# signatures copied; a default is upstream's opinion, and upstream just changed
+# theirs — in the direction that broke us, and it could change back.  If a future
+# release drops the flag the build fails loudly with "unknown flag", which is the
+# good outcome; the silent one is a mirror without signatures.
+#
 # WHY the old binary broke it, precisely — it is one flipped default:
 #
 #   4.20:  --remove-signatures   Do not copy image signature (default true)
@@ -548,6 +555,7 @@ oc-mirror \
   --parallel-images "${OC_MIRROR_PARALLEL_IMAGES:-4}" \
   --parallel-layers "${OC_MIRROR_PARALLEL_LAYERS:-5}" \
   --image-timeout "${OC_MIRROR_IMAGE_TIMEOUT:-10m}" \
+  --remove-signatures=false \
   file://./openshift-mirror --v2
 OCM_RC=$?
 # Mirror v2's internal log captures everything (with timestamps) for the post-run
