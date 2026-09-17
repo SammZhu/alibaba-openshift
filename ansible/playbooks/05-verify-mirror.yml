@@ -130,6 +130,79 @@
           OFFLINE_TOKEN_FILE auto-discovery includes all 3 rhai images),
           upload to OSS, then `ansible-playbook ansible/playbooks/mirror-rebuild.yml`.
 
+    # ── sigstore 附件必须真的在 mirror 上 ─────────────────────────────────
+    # 这一条是 2026-09-16 那次事故的防线,而且是唯一一条挡得住它的:
+    #
+    # 一个 4.20 的 oc-mirror 镜像了 4.22.12 的 payload。它 **--remove-signatures
+    # 默认 true**,把签名全剥了,然后**报告成功**。4.22 的 MCO 却给 mirror 本身
+    # 写 use-sigstore-attachments: true,于是每个节点都去验一个不存在的签名:
+    #   machine-config-daemon-pull: "A signature was required, but no signature exists"
+    # 那个单元是 `while ! podman pull; do sleep 1; done`,永不放弃 → kubelet 永不
+    # 启动 → 零 CSR → 零节点 → MCO 无处调度。八小时后才以「bootstrap 超时」暴露,
+    # 中间隔着五台看起来完全正常的机器。
+    #
+    # 版本匹配和显式传参都是**输入**侧的防护,挡不住下一个没预料到的变化。
+    # 这里验的是**产物**:tag 列表里必须有 sigstore 附件(`sha256-<digest>.sig`)。
+    # 没有就在这里失败 —— 构建后几分钟,而不是装机中途第八小时。
+    - name: Probe the release repo's tag list for sigstore attachments
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -i
+          - "{{ ssh_priv_key_file }}"
+          - -o
+          - StrictHostKeyChecking=no
+          - -o
+          - UserKnownHostsFile=/dev/null
+          - -o
+          - "{{ _pc_opt }}"
+          - "root@{{ mirror_private_ip }}"
+          - >-
+            TOKEN=$(curl -ks -u '{{ mirror_init_user }}:{{ mirror_init_password }}'
+            "https://{{ mirror_private_ip }}:8443/v2/auth?service={{ mirror_private_ip }}:8443&scope=repository:{{ item }}:pull"
+            | jq -r .token);
+            curl -ks -H "Authorization: Bearer $TOKEN"
+            "https://{{ mirror_private_ip }}:8443/v2/{{ item }}/tags/list?n=10000"
+            | jq -r '[.tags[]? | select(test("^sha256-.*\\.sig$"))] | length'
+      loop:
+        - openshift/release
+        - openshift/release-images
+      register: sig_probes
+      changed_when: false
+      no_log: true   # mirror password is in argv
+
+    - name: Show sigstore attachment counts
+      ansible.builtin.debug:
+        msg: |
+          sigstore 附件数(0 = 签名没被镜像过来):
+          {% for r in sig_probes.results %}
+            {{ r.item }}: {{ r.stdout | default('?') | trim }}
+          {% endfor %}
+
+    - name: Verify the mirror actually carries sigstore signatures
+      ansible.builtin.assert:
+        that:
+          - sig_probes.results
+            | map(attribute='stdout')
+            | map('trim') | select('match', '^[1-9][0-9]*$') | list | length > 0
+        fail_msg: |
+          mirror 上一个 sigstore 附件都没有 —— 装机会在 firstboot 死锁。
+
+          每台节点的 machine-config-daemon-pull.service 会无限重试并报:
+            "Source image rejected: A signature was required, but no signature exists"
+          它永不放弃,kubelet 因此永不启动,不会有 CSR,不会有节点注册,MCO 也就
+          没有节点可调度 —— 五台机器全都开着、ssh 得进、时钟正常,但集群起不来。
+
+          最常见的原因:建 mirror 的 oc-mirror 版本和 payload 不匹配。4.20 的
+          oc-mirror 的 --remove-signatures 默认是 true(默认剥掉签名),而 4.22
+          的 MCO 要求这些签名存在。scripts/build-mirror-tarball.sh 现在会按 minor
+          校验版本并显式传 --remove-signatures=false,但请确认构建机上跑的确实是
+          更新后的脚本。
+
+          重建:scripts/build-mirror-tarball.sh → 上传 OSS →
+                ansible-playbook ansible/playbooks/mirror-rebuild.yml
+      when: not (skip_signature_check | default(false) | bool)
+
     - name: All checks passed
       ansible.builtin.debug:
         msg: |
