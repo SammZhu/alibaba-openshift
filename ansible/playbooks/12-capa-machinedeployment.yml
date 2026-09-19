@@ -102,12 +102,47 @@
     # observed 2026-06-13 on cn-wulanchabu-c: NodeGetInfo sent unsigned ECS requests
     # "Timestamp not supplied" only there). Operational band-aid; the real fix is in
     # the driver credential init.
+    # 「API 什么都没说」和「API 说没库存」是两回事,分开判。
+    #
+    # 2026-09-19 ste2 实测:这个网关对 DescribeAvailableResource 回了一个**只有
+    # 信封、没有 AvailableZones 字段**的成功响应:
+    #   {"eagleEyeTraceId":"…","asapiSuccess":true,"asapiRequestId":"…","RequestId":"…"}
+    # 于是 `| default([])` 把「字段不存在」吃成了「空列表」,assert 判定
+    # 「没有任何可用区有库存」,还建议操作者去换规格 —— 而当时那个规格、那个
+    # 可用区,**两台 worker 正在运行**。探不到 ≠ 不存在。
+    #
+    # 所以先看响应里到底有没有这个字段:
+    #   有 → 相信它,没有 Available 的可用区就是真没库存,照旧拦住
+    #   没有 → 我们什么都没学到,不能据此断言。退回到 mirror 所在可用区
+    #          (它已被证明能开出这个规格 —— mirror ECS 就在那儿),并明确
+    #          告知这次没有拿到库存信息。
+    - name: Did the API actually tell us anything about zones?
+      ansible.builtin.set_fact:
+        _avail_has_data: >-
+          {{ 'AvailableZones' in (_avail_q.stdout | from_json) }}
+
     - name: Derive the set of zones with stock of the worker instance type
       ansible.builtin.set_fact:
         _type_zones: >-
           {{ ((_avail_q.stdout | from_json).AvailableZones.AvailableZone | default([])
              | selectattr('Status', 'equalto', 'Available') | map(attribute='ZoneId') | list)
              | difference(worker_exclude_zones | default([])) }}
+      when: _avail_has_data | bool
+
+    - name: No stock data — fall back to the mirror zone rather than claim there is none
+      ansible.builtin.set_fact:
+        _type_zones: "{{ [mirror_zone_id] | difference(worker_exclude_zones | default([])) }}"
+      when: not (_avail_has_data | bool)
+
+    - name: Say so when the stock probe returned nothing
+      ansible.builtin.debug:
+        msg: >-
+          DescribeAvailableResource returned no AvailableZones for {{ _worker_type }}
+          on this gateway — that is an absent answer, not "no stock", so it is not
+          treated as one. Falling back to the mirror zone {{ mirror_zone_id }},
+          which demonstrably runs this family. If RunInstances later fails with a
+          capacity error, THAT is the real signal.
+      when: not (_avail_has_data | bool)
 
     - name: Order supported zones with the mirror zone first
       ansible.builtin.set_fact:
@@ -119,9 +154,16 @@
       ansible.builtin.assert:
         that: _target_zones | length > 0
         fail_msg: >-
+          {% if _avail_has_data | bool %}
           No zone in {{ region }} has stock of {{ _worker_type }}
           (zones seen: {{ _all_zone_ids }}; with-stock: {{ _type_zones }}).
           Choose a different worker_instance_type.
+          {% else %}
+          The stock probe told us nothing (no AvailableZones in the response) AND
+          the fallback zone is unusable: mirror_zone_id={{ mirror_zone_id | default('(unset)') }},
+          worker_exclude_zones={{ worker_exclude_zones | default([]) }}.
+          Do not read this as "no stock" — the API never said that.
+          {% endif %}
 
     # ── Inventory existing vSwitches in the VPC (zone -> vsw, used /24s) ─────────
     - name: Describe existing vSwitches in the VPC
