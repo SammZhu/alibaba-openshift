@@ -347,6 +347,9 @@
         md_cp_host: "{{ api_lb_endpoint }}"
         md_worker_zones: "{{ worker_zones }}"
         md_replicas_per_zone: "{{ replicas_per_zone | default(1) }}"
+        # Carried so the elasticity probe downstream can pick a direction that
+        # does not depend on stock this environment may not have.
+        md_stock_zones: "{{ _stock_zones | default([]) }}"
 
 - name: Apply + validate multi-AZ worker pools (jump host)
   hosts: jumphost
@@ -354,6 +357,11 @@
   gather_facts: false
   vars:
     ns: default
+    # The guard's verdict, read once.  Its last stdout line is either
+    # "VERDICT=match" or "VERDICT=rebuild reason=<what differed>".
+    _chain_match: >-
+      {{ (_chain_state.stdout_lines | default([]) | last | default(''))
+         == 'VERDICT=match' }}
     # Provider repo on the operator host (RHEL8); CRDs are rendered there via
     # delegate_to: local. No checkout / git pull on the jump host.
     capi_repo: "{{ playbook_dir }}/../../../openshift-capi-alicloud"
@@ -463,12 +471,86 @@
       changed_when: true
       failed_when: false
 
+    # 2026-09-19 ste2: this delete took out two Ready workers, and the zone then
+    # had no stock for the next 22 minutes — the run failed on a pool that had
+    # been correct before it started.  Nothing about the desired state had
+    # changed; the rebuild was pure churn that happened to land in a capacity
+    # window.  In a shared single-AZ environment whose worker type sits at
+    # SoldOut most of the day, "delete then recreate" is a bet, and this play
+    # was placing it on every run.
+    #
+    # CAPI machine templates are immutable, which is WHY the chain is applied
+    # delete-first.  But immutability is a reason not to edit an object, not a
+    # reason to destroy one that already says what we want it to say.  So look
+    # first, and only rebuild when something we actually set differs.
+    #
+    # Compared against intent, not against `oc diff`: a server-side diff reports
+    # every defaulted field and would call an untouched chain "changed" forever.
+    - name: Does the live chain already match what we rendered?
+      ansible.builtin.shell: |
+        set -uo pipefail
+        export KUBECONFIG=/root/kubeconfig
+        verdict() { echo "VERDICT=$1"; exit 0; }
+
+        want_rep={{ md_replicas_per_zone | int }}
+        want_zones="{{ md_worker_zones | sort | join(' ') }}"
+
+        have_zones=$(oc -n {{ ns }} get machinedeployment -l cluster.x-k8s.io/cluster-name=caworkers \
+          -o jsonpath='{range .items[*]}{.spec.template.spec.failureDomain}{"\n"}{end}' 2>/dev/null \
+          | sort | tr '\n' ' ' | sed 's/ *$//')
+        [ -n "$have_zones" ] || verdict "rebuild reason=no-live-pools"
+        [ "$have_zones" = "$want_zones" ] || verdict "rebuild reason=zones[$have_zones]!=[$want_zones]"
+
+        # Both the requested replicas AND the achieved ones: a pool sitting at
+        # 2 desired / 0 ready is not a pool we should leave alone.
+        for row in $(oc -n {{ ns }} get machinedeployment -l cluster.x-k8s.io/cluster-name=caworkers \
+          -o jsonpath='{range .items[*]}{.metadata.name}:{.spec.replicas}:{.status.readyReplicas}{"\n"}{end}' 2>/dev/null); do
+          n=${row%%:*}; rest=${row#*:}; rep=${rest%%:*}; rdy=${rest#*:}
+          [ "${rep:-0}" = "$want_rep" ] || verdict "rebuild reason=$n-replicas-${rep:-0}-want-$want_rep"
+          [ "${rdy:-0}" = "$want_rep" ] || verdict "rebuild reason=$n-ready-${rdy:-0}-want-$want_rep"
+        done
+
+        have_type=$(oc -n {{ ns }} get alibabacloudmachinetemplate caworkers-worker \
+          -o jsonpath='{.spec.template.spec.instanceType}' 2>/dev/null)
+        [ "$have_type" = "{{ md_instance_type }}" ] \
+          || verdict "rebuild reason=instanceType[$have_type]!=[{{ md_instance_type }}]"
+        have_sg=$(oc -n {{ ns }} get alibabacloudmachinetemplate caworkers-worker \
+          -o jsonpath='{.spec.template.spec.securityGroupIDs[0]}' 2>/dev/null)
+        [ "$have_sg" = "{{ md_sg }}" ] || verdict "rebuild reason=sg[$have_sg]!=[{{ md_sg }}]"
+        have_img=$(oc -n {{ ns }} get alibabacloudcluster caworkers \
+          -o jsonpath='{.spec.bootImageID}' 2>/dev/null)
+        [ "$have_img" = "{{ md_boot_image }}" ] \
+          || verdict "rebuild reason=bootImage[$have_img]!=[{{ md_boot_image }}]"
+        have_cp=$(oc -n {{ ns }} get alibabacloudcluster caworkers \
+          -o jsonpath='{.spec.controlPlaneEndpoint.host}' 2>/dev/null)
+        [ "$have_cp" = "{{ md_cp_host }}" ] || verdict "rebuild reason=cpHost[$have_cp]!=[{{ md_cp_host }}]"
+
+        verdict match
+      register: _chain_state
+      changed_when: false
+
+    - name: Say whether the chain is being rebuilt, and why
+      ansible.builtin.debug:
+        msg: >-
+          {% if _chain_match | bool %}
+          Live chain already matches the rendered one and every pool is at
+          {{ md_replicas_per_zone }} ready — skipping the destructive
+          delete/recreate. Re-running this play against a healthy pool is a
+          no-op, which is the point: on 2026-09-19 the unconditional delete
+          destroyed a working pool it could not rebuild.
+          {% else %}
+          Rebuilding: {{ (_chain_state.stdout_lines | default([]) | last | default('')) }}.
+          The existing ECS for these pools will be released and recreated, which
+          needs stock in {{ md_worker_zones | join(', ') }}.
+          {% endif %}
+
     - name: Pre-clean any stale multi-AZ objects
       ansible.builtin.command:
         argv: [oc, "--kubeconfig", /root/kubeconfig, delete, -f, /root/caworkers-chain.yaml,
                --ignore-not-found, "--wait=true", "--timeout=300s"]
       changed_when: true
       failed_when: false
+      when: not (_chain_match | bool)
 
     - name: Apply + validate the multi-AZ worker pools
       block:
@@ -541,7 +623,8 @@
             # half an hour tells the operator nothing.
             why=$(oc -n {{ ns }} get alibabacloudmachine \
               -o jsonpath='{range .items[*]}{.metadata.name}={.status.failureReason}{" "}{end}' 2>/dev/null || true)
-            echo "ready=$ready want=$want failureReasons=[${why:-none}]"
+            echo "ready=$ready want=$want failureReasons=[${why:-none}]" \
+                 "stockAtStart={{ (md_stock_zones | default([])) | length > 0 }}"
             test "$ready" -ge "$want"
           register: _mdready
           retries: "{{ md_ready_retries | default(90) | int }}"
@@ -590,17 +673,29 @@
                    caworkers-a, "--replicas={{ md_replicas_per_zone | int }}"]
           changed_when: true
 
+        # 2026-09-19: this used to be `test ready -le want`, and it passed 0.8s
+        # after `oc scale` — before anything had been reclaimed.  Worse, "not
+        # more than 2" is also true at 0, so a pool that collapsed entirely
+        # would have gone green.  The claim being made is "settled BACK TO
+        # baseline", so assert that: exactly `want` ready, AND exactly `want`
+        # Machines left, so a replica still terminating cannot be counted as
+        # gone.  See feedback_green_but_did_nothing.
         - name: Wait for pool 'a' to settle back to baseline (extra ECS terminated)
           ansible.builtin.shell: |
             set -euo pipefail
             export KUBECONFIG=/root/kubeconfig
             want={{ md_replicas_per_zone | int }}
-            ready=$(oc -n {{ ns }} get machinedeployment caworkers-a -o jsonpath='{.status.readyReplicas}')
-            echo "pool-a ready=${ready:-0} want=$want"
-            test "${ready:-0}" -le "$want"
+            ready=$(oc -n {{ ns }} get machinedeployment caworkers-a \
+              -o jsonpath='{.status.readyReplicas}')
+            # Machines still carrying a deletionTimestamp are still Machines, and
+            # their ECS is still billed — count them.
+            machines=$(oc -n {{ ns }} get machine \
+              -l cluster.x-k8s.io/deployment-name=caworkers-a --no-headers 2>/dev/null | wc -l)
+            echo "pool-a ready=${ready:-0} machines=$machines want=$want"
+            test "${ready:-0}" -eq "$want" && test "$machines" -eq "$want"
           register: _scaledown
-          retries: 60
-          delay: 20
+          retries: "{{ md_ready_retries | default(90) | int }}"
+          delay: "{{ md_ready_delay | default(20) | int }}"
           until: _scaledown.rc == 0
           changed_when: false
 
