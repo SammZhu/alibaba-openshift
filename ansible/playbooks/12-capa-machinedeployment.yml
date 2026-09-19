@@ -88,11 +88,22 @@
     # ecs.g7.xlarge, so a MachineDeployment pinned there fails RunInstances with
     # InvalidResourceType.NotSupported and that worker never appears (observed
     # 2026-06-10: caworkers-c stuck on cn-wulanchabu-d). Ask Alibaba which zones
-    # actually have stock of the worker instance type and keep only those.
+    # offer the worker instance type, and keep only those.  "Offers" and "has
+    # stock right now" are separated below — they are not the same question and
+    # they do not deserve the same consequence.
+    # DestinationResource matters, and not in the way the API docs suggest.
+    # 2026-09-19 ste2, same gateway, same instance type, back to back:
+    #   --DestinationResource Zone          -> {"eagleEyeTraceId":…,"asapiSuccess":true,…}
+    #                                          a 200 with no AvailableZones key at all
+    #   --DestinationResource InstanceType  -> AvailableZones populated, and it
+    #                                          enumerates the zones even without --ZoneId
+    # So the silence that #102 taught us not to misread was not the gateway
+    # refusing to answer — it was us asking the wrong question.  Ask the one it
+    # answers.  #102's fallback stays: another deployment may still say nothing.
     - name: Query zones that offer the worker instance type
       ansible.builtin.command:
         argv: ["{{ cloud_cli }}", ecs, DescribeAvailableResource, --RegionId, "{{ region }}",
-               --DestinationResource, Zone, --InstanceType, "{{ _worker_type }}",
+               --DestinationResource, InstanceType, --InstanceType, "{{ _worker_type }}",
                --profile, "{{ aliyun_profile }}"]
       register: _avail_q
       changed_when: false
@@ -121,12 +132,60 @@
         _avail_has_data: >-
           {{ 'AvailableZones' in (_avail_q.stdout | from_json) }}
 
-    - name: Derive the set of zones with stock of the worker instance type
+    # The answer is nested, and the two levels do NOT mean the same thing:
+    #   AvailableZone[].Status                  -> is the ZONE usable
+    #   …AvailableResources.AvailableResource[]
+    #     .SupportedResources.SupportedResource[]
+    #     {Value, Status}                       -> does THIS TYPE have stock
+    # 2026-09-19 ste2: the zone read Available/WithStock while the type under it
+    # read SoldOut/WithoutStock.  Filtering on the zone's own Status — which is
+    # what this task used to do — would have reported stock that did not exist.
+    #
+    # Two different facts come out of one answer, and they gate different things:
+    #   _type_zones  = zones that OFFER the type.  Absence here is the 2026-06-10
+    #                  bug (cn-wulanchabu-d has no ecs.g7.xlarge -> RunInstances
+    #                  fails InvalidResourceType.NotSupported forever).  Worth
+    #                  aborting on.
+    #   _stock_zones = zones that offer it AND have stock right now.  This is a
+    #                  SNAPSHOT of a number that moves.  NOT worth aborting on:
+    #                  on 2026-09-19 this environment answered SoldOut for the
+    #                  very type that two workers were being created with a
+    #                  moment later.  Use it to order zones and to say out loud
+    #                  what we are waiting for — never to refuse to try.
+    - name: Zones that offer the worker instance type at all
       ansible.builtin.set_fact:
         _type_zones: >-
           {{ ((_avail_q.stdout | from_json).AvailableZones.AvailableZone | default([])
-             | selectattr('Status', 'equalto', 'Available') | map(attribute='ZoneId') | list)
+             | map(attribute='ZoneId') | list)
              | difference(worker_exclude_zones | default([])) }}
+      when: _avail_has_data | bool
+
+    - name: Zones that have stock of it right now (a snapshot, not a verdict)
+      ansible.builtin.set_fact:
+        _stock_zones: "{{ _sz_raw | difference(worker_exclude_zones | default([])) }}"
+      vars:
+        _sz_raw: >-
+          {%- set out = [] -%}
+          {%- for z in ((_avail_q.stdout | from_json).AvailableZones.AvailableZone | default([])) -%}
+          {%- for ar in ((z.AvailableResources | default({})).AvailableResource | default([])) -%}
+          {%- for sr in ((ar.SupportedResources | default({})).SupportedResource | default([])) -%}
+          {%- if sr.Value | default('') == _worker_type and sr.Status | default('') == 'Available' -%}
+          {%- set _ = out.append(z.ZoneId) -%}
+          {%- endif -%}
+          {%- endfor -%}{%- endfor -%}{%- endfor -%}
+          {{ out | unique | list }}
+      when: _avail_has_data | bool
+
+    - name: Say what the stock snapshot showed (information, not a gate)
+      ansible.builtin.debug:
+        msg: >-
+          {{ _worker_type }}: offered in {{ _type_zones }}, in stock right now in
+          {{ _stock_zones | default([]) }}.
+          {% if (_stock_zones | default([])) | length == 0 %}
+          No zone reports stock at this instant. That is NOT a reason to stop:
+          RunInstances is the only authority, stock moves, and on 2026-09-19 a
+          create succeeded ~20 minutes after this same answer. Proceeding.
+          {% endif %}
       when: _avail_has_data | bool
 
     - name: No stock data — fall back to the mirror zone rather than claim there is none
@@ -144,20 +203,27 @@
           capacity error, THAT is the real signal.
       when: not (_avail_has_data | bool)
 
-    - name: Order supported zones with the mirror zone first
+    # Mirror zone first (it demonstrably runs this family), then zones that
+    # report stock, then the rest.  Ordering only — nothing is dropped for being
+    # out of stock, because that answer expires.
+    - name: Order supported zones — mirror first, then whatever has stock
       ansible.builtin.set_fact:
         _target_zones: >-
           {{ (([mirror_zone_id] if mirror_zone_id in _type_zones else [])
-              + (_type_zones | difference([mirror_zone_id])))[:desired_zone_count | int] }}
+              + ((_stock_zones | default([])) | difference([mirror_zone_id]))
+              + (_type_zones | difference([mirror_zone_id])
+                             | difference(_stock_zones | default([]))))[:desired_zone_count | int] }}
 
     - name: Assert at least one usable worker zone was found
       ansible.builtin.assert:
         that: _target_zones | length > 0
         fail_msg: >-
           {% if _avail_has_data | bool %}
-          No zone in {{ region }} has stock of {{ _worker_type }}
-          (zones seen: {{ _all_zone_ids }}; with-stock: {{ _type_zones }}).
-          Choose a different worker_instance_type.
+          No zone in {{ region }} OFFERS {{ _worker_type }} at all
+          (zones seen: {{ _all_zone_ids }}; offering it: {{ _type_zones }};
+          in stock right now: {{ _stock_zones | default([]) }}).
+          This is not a stock problem — the type is not sold here — so waiting
+          will not help. Choose a different worker_instance_type.
           {% else %}
           The stock probe told us nothing (no AvailableZones in the response) AND
           the fallback zone is unusable: mirror_zone_id={{ mirror_zone_id | default('(unset)') }},
@@ -452,6 +518,18 @@
           until: _fd.stdout | length > 2
           changed_when: false
 
+        # 2026-09-19 ste2, why this is 30 minutes and not 20:
+        #   08:57:10Z  pre-clean deleted two Ready workers
+        #   08:57:13Z  RunInstances -> "Instance capacity exhausted in current zone"
+        #   09:18:08Z  this wait gave up at 20 minutes -> failed=1
+        #   09:19Z     CAPA's next reconcile created both instances; they joined
+        #              and went Ready minutes later
+        # The run missed by about one minute.  CAPA calls that error "terminal"
+        # for the CALL, not for the type — it keeps retrying, and in a tight
+        # shared zone the stock does come back.  So: wait longer, and print what
+        # we are waiting for, rather than failing fast on a condition that clears
+        # itself.  Failing fast here would have turned a near-miss into a
+        # guaranteed failure.
         - name: Wait for all worker MachineDeployments to reach desired replicas
           ansible.builtin.shell: |
             set -euo pipefail
@@ -459,11 +537,15 @@
             want={{ (md_worker_zones | length) * (md_replicas_per_zone | int) }}
             ready=$(oc -n {{ ns }} get machinedeployment -l cluster.x-k8s.io/cluster-name=caworkers \
               -o jsonpath='{range .items[*]}{.status.readyReplicas}{"\n"}{end}' | awk '{s+=$1} END{print s+0}')
-            echo "ready=$ready want=$want"
+            # Say WHY we are still waiting: a bare "ready=0 want=2" repeated for
+            # half an hour tells the operator nothing.
+            why=$(oc -n {{ ns }} get alibabacloudmachine \
+              -o jsonpath='{range .items[*]}{.metadata.name}={.status.failureReason}{" "}{end}' 2>/dev/null || true)
+            echo "ready=$ready want=$want failureReasons=[${why:-none}]"
             test "$ready" -ge "$want"
           register: _mdready
-          retries: 60
-          delay: 20
+          retries: "{{ md_ready_retries | default(90) | int }}"
+          delay: "{{ md_ready_delay | default(20) | int }}"
           until: _mdready.rc == 0
           changed_when: false
 
@@ -493,8 +575,8 @@
             echo "pool-a ready=${ready:-0} want=$want"
             test "${ready:-0}" -ge "$want"
           register: _scaleup
-          retries: 60
-          delay: 20
+          retries: "{{ md_ready_retries | default(90) | int }}"
+          delay: "{{ md_ready_delay | default(20) | int }}"
           until: _scaleup.rc == 0
           changed_when: false
 
