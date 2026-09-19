@@ -154,9 +154,88 @@
       ansible.builtin.set_fact:
         _mb_log: "{{ repo_root }}/mirror-build-{{ cluster_name }}-{{ openshift_version }}.log"
 
+    # 2026-09-19: a full-chain run rebuilt a tarball that was already on OSS,
+    # same cluster, same 4.22.12, built two days earlier by a matching
+    # oc-mirror.  Measured cost of that rebuild: 1:59:52 (09-16) and 1:32:16
+    # (09-17, with a warm cache) — a warm cache does not save you.  The only way
+    # to skip was for a human to notice and hand-add apsara_skip=[mirror-build],
+    # which is a judgement the pipeline is better placed to make than the
+    # operator is at 23:00.
+    #
+    # The signal is the OSS OBJECT, not the local tarball.  Skipping this phase
+    # skips the upload too, so "the tar is on disk" is precisely the wrong
+    # question — a local tar that was never shipped would make 04 fail to fetch
+    # anything.  Ask whether the thing 04 will download is already there.
+    #
+    # And "same version" is not enough.  The 4.20 oc-mirror produced a
+    # byte-complete 4.22.12 tarball with the signatures stripped (#97/#98); the
+    # version matched and the install deadlocked.  So the builder's version has
+    # to match too, which is what the .buildinfo sidecar records.
+    #
+    # No buildinfo -> build.  An object we cannot describe is not an object we
+    # may reuse: here the conservative direction is to rebuild, because reusing
+    # an unknown tarball is the failure that cost days.
+    - name: Is a matching tarball already on OSS?
+      ansible.builtin.shell: |
+        set -uo pipefail
+        obj="mirror-tarballs/{{ cluster_name }}-{{ openshift_version }}.tar"
+        # An unusable OSS client is not an absent object.  Prove we can talk to
+        # the bucket at all first; if we cannot, say so and build — but say the
+        # true reason, so nobody reads a broken probe as an empty bucket.
+        if ! {{ oss_cli }} ls "oss://{{ oss_bucket }}/" >/dev/null 2>&1; then
+          echo "MISS=oss-unusable"; exit 0
+        fi
+        if ! {{ oss_cli }} stat "oss://{{ oss_bucket }}/$obj" >/dev/null 2>&1; then
+          echo "MISS=no-object"; exit 0
+        fi
+        tmp=$(mktemp)
+        if ! {{ oss_cli }} cp "oss://{{ oss_bucket }}/$obj.buildinfo" "$tmp" --force >/dev/null 2>&1; then
+          echo "MISS=no-buildinfo"; rm -f "$tmp"; exit 0
+        fi
+        got_ver=$(grep -E '^openshift_patch_version=' "$tmp" | cut -d= -f2-)
+        got_ocm=$(grep -E '^oc_mirror_minor=' "$tmp" | cut -d= -f2-)
+        rm -f "$tmp"
+        want_ver="{{ openshift_version }}"
+        want_ocm="{{ openshift_version.split('.')[0:2] | join('.') }}"
+        [ "$got_ver" = "$want_ver" ] || { echo "MISS=version[$got_ver]!=[$want_ver]"; exit 0; }
+        [ "$got_ocm" = "$want_ocm" ] || { echo "MISS=oc-mirror[$got_ocm]!=[$want_ocm]"; exit 0; }
+        echo "HIT"
+      # Same environment the build itself gets.  apsara-oss refuses to run
+      # without an endpoint ("need --endpoint (or OSS_ENDPOINT)") and a bare
+      # call would fail — which this guard would then have read as "no object"
+      # and rebuilt, every single time, silently.  That is exactly how #104's
+      # guard managed to never fire; caught here by running it against the real
+      # bucket before merging rather than after.
+      environment: "{{ (cloud_env | default({})) | combine(_mb_env) }}"
+      register: _mb_have
+      changed_when: false
+      when: not (mirror_build_force | default(false) | bool)
+
+    - name: Decide whether to build
+      ansible.builtin.set_fact:
+        _mb_reuse: >-
+          {{ (not (mirror_build_force | default(false) | bool))
+             and ((_mb_have.stdout | default('') | trim) == 'HIT') }}
+
+    - name: Say which way this went, and why
+      ansible.builtin.debug:
+        msg: >-
+          {% if _mb_reuse | bool %}
+          oss://{{ oss_bucket }}/mirror-tarballs/{{ cluster_name }}-{{ openshift_version }}.tar
+          is already there and its .buildinfo says {{ openshift_version }} built by a
+          matching oc-mirror — skipping the rebuild (measured 1.5-2 h, warm cache
+          included). Force one with -e mirror_build_force=true.
+          05-verify still runs, so the signature assertion is not skipped with it.
+          {% elif mirror_build_force | default(false) | bool %}
+          mirror_build_force=true — rebuilding even though a matching object may exist.
+          {% else %}
+          Building: {{ _mb_have.stdout | default('MISS=unknown') | trim }}.
+          {% endif %}
+
     - name: Announce (the build takes ~1-2 h)
       ansible.builtin.debug:
         msg: "Building the mirror tarball — follow progress with:  tail -f {{ _mb_log }}"
+      when: not (_mb_reuse | bool)
 
     - name: Run build-mirror-tarball.sh (build + upload to OSS)
       ansible.builtin.shell: |
@@ -167,6 +246,7 @@
       environment: "{{ (cloud_env | default({})) | combine(_mb_env) }}"
       register: _mb_run
       changed_when: true
+      when: not (_mb_reuse | bool)
 
     - name: Done
       ansible.builtin.debug:
