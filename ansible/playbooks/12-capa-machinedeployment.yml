@@ -486,6 +486,25 @@
     #
     # Compared against intent, not against `oc diff`: a server-side diff reports
     # every defaulted field and would call an untouched chain "changed" forever.
+    # The guard below compares zone ids.  When md_worker_zones stopped being
+    # what this task expects, the comparison did not fail — it just never
+    # matched, and the guard silently degraded into the unconditional delete it
+    # exists to prevent.  A wrong shape must be loud, not quiet.
+    # NOTE: keep fail_msg free of map(attribute=...) — fail_msg is templated
+    # unconditionally, even when the assert passes, so an expression that only
+    # works on the good shape would crash the play on the good shape too.
+    - name: md_worker_zones must carry zone ids the guard can compare
+      ansible.builtin.assert:
+        that:
+          - md_worker_zones | length > 0
+          - md_worker_zones[0] is mapping
+          - "'zone' in md_worker_zones[0]"
+        fail_msg: >-
+          md_worker_zones is not [{key, zone, vsw}, ...]; the chain guard cannot
+          derive zone ids from it and would rebuild the pool on every run.
+          Got: {{ md_worker_zones }}
+        quiet: true
+
     - name: Does the live chain already match what we rendered?
       ansible.builtin.shell: |
         set -uo pipefail
@@ -493,7 +512,13 @@
         verdict() { echo "VERDICT=$1"; exit 0; }
 
         want_rep={{ md_replicas_per_zone | int }}
-        want_zones="{{ md_worker_zones | sort | join(' ') }}"
+        # md_worker_zones is [{key, zone, vsw}, ...] — NOT a list of zone ids.
+        # Composed that way three tasks above (Compose worker_zones) so the
+        # manifest template can reach .key and .vsw.  Joining it raw renders the
+        # dicts, never equals the zone ids oc reports, and the guard then says
+        # "rebuild" on every single run — silently restoring exactly the
+        # unconditional delete it was added to prevent.
+        want_zones="{{ md_worker_zones | map(attribute='zone') | sort | join(' ') }}"
 
         have_zones=$(oc -n {{ ns }} get machinedeployment -l cluster.x-k8s.io/cluster-name=caworkers \
           -o jsonpath='{range .items[*]}{.spec.template.spec.failureDomain}{"\n"}{end}' 2>/dev/null \
@@ -541,7 +566,7 @@
           {% else %}
           Rebuilding: {{ (_chain_state.stdout_lines | default([]) | last | default('')) }}.
           The existing ECS for these pools will be released and recreated, which
-          needs stock in {{ md_worker_zones | join(', ') }}.
+          needs stock in {{ md_worker_zones | map(attribute='zone') | join(', ') }}.
           {% endif %}
 
     - name: Pre-clean any stale multi-AZ objects
