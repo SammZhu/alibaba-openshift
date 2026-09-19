@@ -224,12 +224,16 @@
       ansible.builtin.debug:
         msg: "{{ _csr_check.stdout | trim }}"
 
+    # fail_msg 是**无条件模板化**的 —— ansible 在调用模块前会渲染所有参数,assert
+    # 也不例外。所以这里原本从 stdout 里抠 stuck 列表的那个
+    # `regex_search(..., '\\1')`,即便断言通过也照跑一次,而它会崩(见下)。
+    # 现在直接印整行:内容更全,而且没有可崩的东西。
     - name: "08 — a pending serving CSR means nobody is renewing that node"
       ansible.builtin.assert:
         that: "'stuck=none' in _csr_check.stdout"
         fail_msg: >-
           These kubelet-serving CSRs are pending for nodes this cluster already
-          has: {{ (_csr_check.stdout | regex_search('stuck=(.*) approvers', '\\1') | first) | default('?') }}.
+          has — {{ _csr_check.stdout | trim }}.
           Nobody is approving them — the CAPA fork's CSR controller should be
           (openshift-capi-alicloud #24), and machine-approver only ever covered
           machine-api nodes. Left pending, those kubelets stop serving exec and

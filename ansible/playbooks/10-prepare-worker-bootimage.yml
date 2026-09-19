@@ -154,9 +154,15 @@
         #   rhcos-9.6.20260217-1-openstack.x86_64.qcow2.gz -> 9.6.20260217-1
         - name: Resolve the RHCOS version this cluster boots
           ansible.builtin.set_fact:
+            # regex_search 的 capture-group 参数('\\1')在 ansible-core 2.14 上会崩:
+            # 解析参数的那个循环里两处 `.group()` 没有 None 保护(core.py 的
+            # regex_search)。02-import-image.yml 早就踩过并留了写法 —— 不带 group
+            # 参数搜出整段,再用 regex_replace 取组(replacement 是直接交给 re.sub
+            # 的,不经过那个循环)。认不出的文件名得到空串,而不是抛异常。
             _worker_rhcos_version: >-
               {{ ((_qcow_url.stdout | trim) | basename
-                  | regex_search('rhcos-([0-9.]+-[0-9]+)-', '\\1') | first) | default('', true) }}
+                  | regex_search('rhcos-[0-9.]+-[0-9]+-') | default('', true)
+                  | regex_replace('^rhcos-([0-9.]+-[0-9]+)-$', '\\1')) }}
           when: (rhcos_qcow | default('') | length) == 0
 
         - name: Check whether the raw qcow is already staged in OSS
