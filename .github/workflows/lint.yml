@@ -136,6 +136,18 @@ jobs:
         run: |
           python3 scripts/apsara/discover_test.py
 
+      - name: Instance-type suggestion unit test
+        # This runs on the failure path: the configured worker type has no stock
+        # and the operator needs to know what to switch to.  The trap it guards
+        # is the two-level answer — 2026-09-19 ste2 returned a zone reading
+        # Available/WithStock while the instance type under it read
+        # SoldOut/WithoutStock, so reading the outer level reports stock that
+        # does not exist.  Also checks that a smaller type is never suggested
+        # (a capacity failure traded for an unexplained performance one) and
+        # that an empty envelope neither crashes nor invents an answer.
+        run: |
+          python3 scripts/apsara/suggest_instance_types.py --self-test
+
       - name: ROS template tag lint
         # !Condition is not supported by Aliyun ROS at all — it rejects the whole
         # template — and !Not parses but always evaluates false.  Both look

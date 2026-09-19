@@ -188,6 +188,34 @@
           {% endif %}
       when: _avail_has_data | bool
 
+    # 报错自带答案:操作者此刻需要的不是"没货",是"那换什么".  同一个
+    # DescribeAvailableResource(不带 --InstanceType)就能列出该可用区全部机型的
+    # 状态 —— 2026-09-19 ste2 上 449 个里 89 个有货 —— 只是以前没人用它。
+    #
+    # 建议性,绝不阻断:脚本任何失败都只打印一行原因并 exit 0.  它出场的场合
+    # 本来就已经是一次失败了,不该在那上面再叠一个新的失败点。
+    - name: When the configured type has no stock, say which types do
+      ansible.builtin.command:
+        # deploy_repo is a var of the jump-host play below, not this one — derive
+        # the repo root the same way it does, from playbook_dir.
+        argv: ["{{ playbook_dir }}/../../scripts/apsara/suggest_instance_types.py",
+               --cloud-cli, "{{ cloud_cli }}", --region, "{{ region }}",
+               --zone, "{{ mirror_zone_id }}", --like, "{{ _worker_type }}"]
+      register: _suggest
+      changed_when: false
+      failed_when: false
+      when:
+        - _avail_has_data | bool
+        - (_stock_zones | default([])) | length == 0
+
+    - name: Show the in-stock candidates
+      ansible.builtin.debug:
+        msg: "{{ (_suggest.stdout | default('')) .split('\n') }}"
+      when:
+        - _avail_has_data | bool
+        - (_stock_zones | default([])) | length == 0
+        - (_suggest.stdout | default('')) | length > 0
+
     - name: No stock data — fall back to the mirror zone rather than claim there is none
       ansible.builtin.set_fact:
         _type_zones: "{{ [mirror_zone_id] | difference(worker_exclude_zones | default([])) }}"
