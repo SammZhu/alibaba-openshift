@@ -629,6 +629,20 @@ tar -cf "$TARBALL_PATH" -C ./openshift-mirror .
 
 # Compute checksum
 sha256sum "$TARBALL_PATH" | awk '{print $1}' > "${TARBALL_PATH}.sha256"
+
+# Record WHO built this, not just WHAT version is in it.  The 4.20 oc-mirror
+# produced a byte-complete tarball of exactly the right OpenShift version whose
+# sigstore attachments had been stripped (#97/#98) — "same version" was true and
+# useless, and cost a whole install to diagnose.  Anything that later decides to
+# REUSE this object instead of rebuilding needs the builder's version too, so
+# write it down at the only moment we actually know it.
+cat > "${TARBALL_PATH}.buildinfo" <<EOF
+openshift_patch_version=${OPENSHIFT_PATCH_VERSION}
+openshift_minor=${OPENSHIFT_VERSION}
+oc_mirror_minor=$(_ocm_minor oc-mirror)
+built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+sha256=$(cat "${TARBALL_PATH}.sha256")
+EOF
 TARBALL_SIZE=$(du -h "$TARBALL_PATH" | cut -f1)
 echo "Tarball: $TARBALL_PATH ($TARBALL_SIZE)"
 
@@ -668,6 +682,10 @@ echo "[6/6] Uploading tarball + checksum to OSS (this will take a while)..."
 $OSS_CLI cp "$TARBALL_PATH" "oss://${OSS_BUCKET}/${OSS_OBJECT}" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
     --part-size=104857600 --parallel=10 --force
+
+$OSS_CLI cp "${TARBALL_PATH}.buildinfo" "oss://${OSS_BUCKET}/${OSS_OBJECT}.buildinfo" \
+    --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
+    --force
 
 $OSS_CLI cp "${TARBALL_PATH}.sha256" "oss://${OSS_BUCKET}/${OSS_OBJECT}.sha256" \
     --endpoint="$OSS_ENDPOINT" --access-key-id="$AK" --access-key-secret="$SK" \
