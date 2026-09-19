@@ -154,6 +154,16 @@
         #   rhcos-9.6.20260217-1-openstack.x86_64.qcow2.gz -> 9.6.20260217-1
         - name: Resolve the RHCOS version this cluster boots
           ansible.builtin.set_fact:
+            # 替换串是 '\1' —— **单个**反斜杠,和 02-import-image.yml 一致。写成
+            # '\\1' 会渲染成字面量 `\1` 而不是反向引用(2026-09-19 实测:
+            # 双写得到 "\\1",单写得到 "9.8.20260715-1"),于是这个 fact 变成字符串
+            # "\1",provenance 被写成 `\1.yaml`,而 pick_baseline 拿 "\1" 解不出代次、
+            # 返回空,日志于是打出「本代尚无 provenance 条目」—— 一句假话,同代条目明明有。
+            #
+            # 同一个转义层数也是 regex_search capture-group 参数崩溃的原因:
+            # 参数拿到的是 `\\1`,`re.match(r'\\(\d+)', ...)` 匹配不上(第二个字符是
+            # 反斜杠不是数字)→ None → ansible-core 2.14 紧接着无保护地 .group(1)。
+            #
             # regex_search 的 capture-group 参数('\\1')在 ansible-core 2.14 上会崩:
             # 解析参数的那个循环里两处 `.group()` 没有 None 保护(core.py 的
             # regex_search)。02-import-image.yml 早就踩过并留了写法 —— 不带 group
@@ -162,7 +172,7 @@
             _worker_rhcos_version: >-
               {{ ((_qcow_url.stdout | trim) | basename
                   | regex_search('rhcos-[0-9.]+-[0-9]+-') | default('', true)
-                  | regex_replace('^rhcos-([0-9.]+-[0-9]+)-$', '\\1')) }}
+                  | regex_replace('^rhcos-([0-9.]+-[0-9]+)-$', '\1')) }}
           when: (rhcos_qcow | default('') | length) == 0
 
         - name: Check whether the raw qcow is already staged in OSS
