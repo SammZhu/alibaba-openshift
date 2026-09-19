@@ -116,6 +116,13 @@
     #   没有 → 我们什么都没学到,不能据此断言。退回到 mirror 所在可用区
     #          (它已被证明能开出这个规格 —— mirror ECS 就在那儿),并明确
     #          告知这次没有拿到库存信息。
+    #
+    # 为什么回退到**一个**区而不是 _all_zone_ids 全体:_all_zone_ids 来自
+    # DescribeZones(那次查询是有数据的),摊开看着更大方,但那正好会把这个检查
+    # 当初要防的问题放回来 —— 见上面注释:某个区不供应该规格时,钉在那儿的
+    # MachineDeployment 会 RunInstances 失败、worker 永远不出现(2026-06-10
+    # caworkers-c 卡在 cn-wulanchabu-d)。探测沉默时我们对「哪个区供应这个规格」
+    # 一无所知,所以只能退到**已有实证**的那个区。要改大,先拿到真实的库存数据。
     - name: Did the API actually tell us anything about zones?
       ansible.builtin.set_fact:
         _avail_has_data: >-
