@@ -648,6 +648,16 @@ echo "Tarball: $TARBALL_PATH ($TARBALL_SIZE)"
 
 # ── AK/SK: prefer env (Apsara — apsara-oss can't read ~/.aliyun/config.json),
 #    else the aliyun CLI config profile (public cloud). ─────────────────────────
+# Credentials, in order: environment, then APSARA_CREDS_FILE, then the aliyun
+# CLI profile.  The file exists because ansible puts every `environment:` value
+# on the command line of the outer `/bin/sh -c` — measured 2026-09-20 on ste2,
+# AK and SK were readable in `ps` by any user on the box for the whole ~26
+# minutes this script runs.  Same KEY=VALUE file apsara-rpc/apsara-oss read.
+if [[ -z "${AK:-}" || -z "${SK:-}" ]] \
+   && [[ -n "${APSARA_CREDS_FILE:-}" && -r "${APSARA_CREDS_FILE}" ]]; then
+  set -a; . "${APSARA_CREDS_FILE}"; set +a
+fi
+
 if [[ -z "${AK:-}" || -z "${SK:-}" ]]; then
   PROFILE="${ALIYUN_PROFILE:-openshift-test}"
   read -r AK SK < <(jq -r ".profiles[] | select(.name==\"$PROFILE\") | .access_key_id + \" \" + .access_key_secret" ~/.aliyun/config.json)
