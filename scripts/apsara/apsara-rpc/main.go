@@ -1,11 +1,13 @@
 // apsara-rpc: 通用 Apsara Stack RPC-API 调用器,在 Apsara 模式下替代 `aliyun <product> <action>`。
 // 用法: apsara-rpc <Product> <Version> <Action> [--Key val | --Key=val | --Key=@file] ...
-// 环境: AK, SK[, STS_TOKEN], REGION, ORG_ID, RG_ID, APSARA_PROXY,
+// 环境: AK, SK[, STS_TOKEN] —— 或 APSARA_CREDS_FILE 指向 KEY=VALUE 文件(见 cred());
+//       REGION, ORG_ID, RG_ID, APSARA_PROXY,
 //       端点 = ENDPOINT 或 ENDPOINT_<PRODUCT大写>(如 ENDPOINT_ROS=ros.cloud.ste3.com)
 //       SCHEME=https 走 HTTPS(RAM 必需);INSECURE=1 跳过内部 CA 证书校验。
 package main
 
 import (
+	"bufio"
 	"crypto/hmac"
 	"crypto/sha1"
 	"crypto/tls"
@@ -18,12 +20,63 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk"
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/auth/credentials"
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/requests"
 )
+
+// ── 凭据:先 env,再 APSARA_CREDS_FILE ────────────────────────────────────────
+//
+// 为什么要有文件这条路:ansible 把 `environment:` 里的每个值都拼进它用来启动模块的
+// 外层 `/bin/sh -c` 命令行。2026-09-20 在 ste2 helper 上实测:
+//
+//     /bin/sh -c LEAK_PLAY=... LEAK_SHELL=... /usr/bin/python3 .../AnsiballZ_command.py
+//
+// play 级的 `environment: cloud_env` 意味着 AK/SK 在每个任务执行期间对这台机器上
+// **任何用户**可见(`ps` 一下就够),而 build-mirror-tarball.sh 要跑 ~26 分钟。
+// 所以让环境只带路径,密钥留在 0600 的文件里。
+//
+// 文件格式是 KEY=VALUE 行,为的是 bash 的 `set -a; . "$f"; set +a` 和下面这个解析器
+// 读的是同一个文件 —— 一种格式,两边不会各自漂移。
+//
+// env 仍然优先,所以现在能跑的东西不会因此不能跑。
+var credsOnce sync.Once
+var credsFile map[string]string
+
+func loadCredsFile() {
+	credsFile = map[string]string{}
+	path := os.Getenv("APSARA_CREDS_FILE")
+	if path == "" { return }
+	f, err := os.Open(path)
+	if err != nil {
+		// 不致命:env 可能仍带着凭据,而两边都空时下面的调用点本来就会给出可操作的报错。
+		// 绝不回显文件内容。
+		fmt.Fprintln(os.Stderr, "apsara-rpc: cannot read APSARA_CREDS_FILE:", err)
+		return
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") { continue }
+		k, v, ok := strings.Cut(line, "=")
+		if !ok { continue }
+		v = strings.TrimSpace(v)
+		// 容忍 shell 风格的引号
+		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] { v = v[1 : len(v)-1] }
+		credsFile[strings.TrimSpace(k)] = v
+	}
+}
+
+// cred 取 key:先环境变量,空则回退到 APSARA_CREDS_FILE。
+func cred(key string) string {
+	if v := os.Getenv(key); v != "" { return v }
+	credsOnce.Do(loadCredsFile)
+	return credsFile[key]
+}
 
 func env(k, d string) string { if v := os.Getenv(k); v != "" { return v }; return d }
 func die(a ...interface{})   { fmt.Fprintln(os.Stderr, a...); os.Exit(1) }
@@ -43,7 +96,7 @@ func main() {
 		die("set ENDPOINT or ENDPOINT_" + strings.ToUpper(product) + " (e.g. ros.cloud.ste3.com)")
 	}
 
-	ak, sk, st := os.Getenv("AK"), os.Getenv("SK"), os.Getenv("STS_TOKEN")
+	ak, sk, st := cred("AK"), cred("SK"), cred("STS_TOKEN")
 	var cred interface{}
 	if st != "" {
 		cred = credentials.NewStsTokenCredential(ak, sk, st)
@@ -169,7 +222,7 @@ func acsEscape(s string) string {
 func nativeSend(endpoint, version, action, region string, cli map[string]string,
 	insecure bool, proxy *url.URL) {
 
-	ak, sk, st := os.Getenv("AK"), os.Getenv("SK"), os.Getenv("STS_TOKEN")
+	ak, sk, st := cred("AK"), cred("SK"), cred("STS_TOKEN")
 
 	p := map[string]string{}
 	for k, v := range cli { p[k] = v }

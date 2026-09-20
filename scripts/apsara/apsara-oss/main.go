@@ -15,11 +15,13 @@
 //   --access-key-id=     AK
 //   --access-key-secret= SK
 //   --sts-token=         OSS_STS_TOKEN
+//   (AK/SK/OSS_STS_TOKEN 也可放在 APSARA_CREDS_FILE 指向的 KEY=VALUE 文件里,见 cred())
 //   --recursive          (rm)                 -f / --force  (accepted, no-op)
 //   --region=            (accepted; endpoint carries the region)
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,6 +29,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
@@ -54,6 +57,46 @@ func parseIntDefault(s string, def int) int {
 		return n
 	}
 	return def
+}
+
+// ── 凭据:先 env,再 APSARA_CREDS_FILE ────────────────────────────────────────
+//
+// 和 apsara-rpc 里同名的 cred() 是同一套理由:ansible 把 `environment:` 的每个值拼进
+// 外层 `/bin/sh -c` 的命令行,于是 AK/SK 在任务执行期间对本机任何用户可见(2026-09-20
+// ste2 实测)。让环境只带路径,密钥留在 0600 文件里。
+//
+// 文件是 KEY=VALUE 行 —— bash `set -a; . "$f"; set +a` 和这里读的是同一个文件。
+// env 仍然优先,行为向后兼容。
+var credsOnce sync.Once
+var credsFile map[string]string
+
+func loadCredsFile() {
+	credsFile = map[string]string{}
+	path := os.Getenv("APSARA_CREDS_FILE")
+	if path == "" { return }
+	f, err := os.Open(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "apsara-oss: cannot read APSARA_CREDS_FILE:", err)
+		return
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") { continue }
+		k, v, ok := strings.Cut(line, "=")
+		if !ok { continue }
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] { v = v[1 : len(v)-1] }
+		credsFile[strings.TrimSpace(k)] = v
+	}
+}
+
+// cred 取 key:先环境变量,空则回退到 APSARA_CREDS_FILE。
+func cred(key string) string {
+	if v := os.Getenv(key); v != "" { return v }
+	credsOnce.Do(loadCredsFile)
+	return credsFile[key]
 }
 
 func firstNonEmpty(vals ...string) string {
@@ -151,9 +194,9 @@ func newClient(flags map[string]string) *oss.Client {
 		}
 		ak, sk, token = ecsRamRoleCreds(role)
 	} else {
-		ak = firstNonEmpty(flags["access-key-id"], os.Getenv("AK"))
-		sk = firstNonEmpty(flags["access-key-secret"], os.Getenv("SK"))
-		token = firstNonEmpty(flags["sts-token"], os.Getenv("OSS_STS_TOKEN"))
+		ak = firstNonEmpty(flags["access-key-id"], cred("AK"))
+		sk = firstNonEmpty(flags["access-key-secret"], cred("SK"))
+		token = firstNonEmpty(flags["sts-token"], cred("OSS_STS_TOKEN"))
 	}
 	if ak == "" || sk == "" {
 		die("apsara-oss: need AK/SK (--access-key-id/-secret, AK/SK env, or --mode=EcsRamRole --ecs-role-name)")
