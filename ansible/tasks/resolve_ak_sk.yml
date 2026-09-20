@@ -1,17 +1,22 @@
 ---
 # Resolve the operator's Alibaba AccessKey pair into facts _ak / _sk from the
 # right source per platform, so callers use {{ _ak }} / {{ _sk }} regardless:
-#   apsara -> cloud_env.AK / cloud_env.SK — the aliyun CLI credential store
+#   apsara -> _cloud_creds (set by tasks/harden_cloud_env.yml), else cloud_env.AK/SK
+#             — the aliyun CLI credential store
 #             (~/.aliyun/config.json) does not exist on the Apsara operator host;
 #             creds come from cloud_env (the same pair apsara-rpc signs with).
 #   public -> ~/.aliyun/config.json for {{ aliyun_profile }} (aliyun CLI's store).
 #
 # no_log throughout: these facts are the raw secret.
 
-- name: "resolve_ak_sk — from cloud_env (apsara)"
+# _cloud_creds is where tasks/harden_cloud_env.yml parks the pair after taking
+# it out of cloud_env (so it stops reaching command lines).  Fall back to
+# cloud_env for a playbook run on its own, which never passes through the
+# hardening step and still has the untouched dict from group_vars.
+- name: "resolve_ak_sk — from _cloud_creds, else cloud_env (apsara)"
   ansible.builtin.set_fact:
-    _ak: "{{ cloud_env.AK }}"
-    _sk: "{{ cloud_env.SK }}"
+    _ak: "{{ (_cloud_creds | default({})).AK | default(cloud_env.AK, true) }}"
+    _sk: "{{ (_cloud_creds | default({})).SK | default(cloud_env.SK, true) }}"
   no_log: true
   when: (cloud_platform | default('public')) == 'apsara'
 
