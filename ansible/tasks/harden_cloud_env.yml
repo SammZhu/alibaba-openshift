@@ -1,0 +1,81 @@
+---
+# Take the credentials out of cloud_env, so they stop reaching the process table.
+#
+# Ansible puts every `environment:` value on the command line of the outer
+# `/bin/sh -c` it uses to launch a module.  Measured on the ste2 helper
+# 2026-09-20 with marker values:
+#
+#     /bin/sh -c LEAK_PLAY=play-zzz1 LEAK_SHELL=shell-zzz2 \
+#         /usr/bin/python3 .../AnsiballZ_command.py && sleep 0
+#
+# Play-level and task-level, `shell` and `command` — all of them.  36 mounts of
+# `environment: "{{ cloud_env }}"` across 22 files means AK/SK were readable in
+# `ps` by any user on the box for the duration of every task in those plays.
+# `/proc/<pid>/environ` is 0400 and was never the problem; `/proc/<pid>/cmdline`
+# is 0444 and is.
+#
+# Why this is three tasks and not 36 edits: a `set_fact` beats group_vars for
+# the rest of the run, and a play-level `environment:` is templated when that
+# play starts — which is after this one.  So replacing cloud_env HERE reaches
+# every later mount without touching any of them.  Verified with real ansible
+# before relying on it:
+#
+#     play1 set_fact -> cloud_env keys = ['REGION', 'APSARA_CREDS_FILE']
+#     play2 environment -> AK=False  APSARA_CREDS_FILE=True
+#
+# A playbook run on its own never reaches this file, keeps the cloud_env that
+# group_vars gives it, and behaves exactly as before.  That is the intended
+# fallback, not an oversight — apsara-rpc/apsara-oss/build-mirror-tarball.sh
+# still prefer the environment and only read the file when it is empty (#108).
+
+- name: "harden — does this run have credentials in cloud_env to take out?"
+  ansible.builtin.set_fact:
+    # Path default lives here rather than in group_vars so a standalone include
+    # works: /root is 0700 on these operator hosts, which is the point.
+    apsara_creds_file: "{{ apsara_creds_file | default(lookup('env', 'HOME') ~ '/.apsara-creds') }}"
+    _harden_applies: >-
+      {{ (cloud_platform | default('public')) == 'apsara'
+         and ((cloud_env | default({})).AK | default('')) | length > 0
+         and ((cloud_env | default({})).SK | default('')) | length > 0 }}
+
+- name: "harden — remember the credentials before taking them out of cloud_env"
+  ansible.builtin.set_fact:
+    _cloud_creds:
+      AK: "{{ cloud_env.AK }}"
+      SK: "{{ cloud_env.SK }}"
+  no_log: true
+  when: _harden_applies | bool
+
+# `content:` travels inside the AnsiballZ payload, not on a command line, so
+# writing the file does not itself leak what the file is for.
+- name: "harden — write them where only the ansible user can read them"
+  ansible.builtin.copy:
+    dest: "{{ apsara_creds_file }}"
+    mode: "0600"
+    content: |
+      # Written by tasks/harden_cloud_env.yml.  KEY=VALUE so that bash
+      # (`set -a; . "$f"; set +a`) and the Go clients read the same file.
+      AK={{ cloud_env.AK }}
+      SK={{ cloud_env.SK }}
+  no_log: true
+  when: _harden_applies | bool
+
+- name: "harden — cloud_env now carries a path, not a secret"
+  ansible.builtin.set_fact:
+    cloud_env: >-
+      {{ (cloud_env | combine({'APSARA_CREDS_FILE': apsara_creds_file}))
+         | dict2items | rejectattr('key', 'in', ['AK', 'SK']) | list | items2dict }}
+  when: _harden_applies | bool
+
+- name: "harden — say what happened, without saying what was in it"
+  ansible.builtin.debug:
+    msg: >-
+      {% if _harden_applies | bool %}
+      Credentials moved to {{ apsara_creds_file }} (0600); cloud_env now carries
+      APSARA_CREDS_FILE instead of AK/SK, so they no longer reach any command
+      line. Keys now in cloud_env: {{ cloud_env.keys() | list | sort }}.
+      {% else %}
+      Not hardening cloud_env: platform={{ cloud_platform | default('public') }},
+      AK present={{ (cloud_env.AK | default('')) | length > 0 }}. The clients
+      still read AK/SK from the environment, which is the pre-#108 behaviour.
+      {% endif %}

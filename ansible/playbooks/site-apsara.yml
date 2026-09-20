@@ -141,6 +141,12 @@
 
     # ENDPOINT_SLB 只在开了 CCM 时才需要,但缺了它 CCM 会自己拼一个专有云上不
     # 存在的域名,而症状是每个 LoadBalancer Service 永远 Pending——离原因很远。
+    # 把凭据从 cloud_env 里挪走 —— 必须在上面那条必填项断言之后(它要读
+    # cloud_env.AK),也必须在任何 import_playbook 之前(后续 play 的
+    # play 级 environment 在各自 play 开始时求值,那时已经是安全版)。
+    - name: "site-apsara — 凭据从 cloud_env 挪到 0600 文件(不再进命令行)"
+      ansible.builtin.include_tasks: ../tasks/harden_cloud_env.yml
+
     - name: "site-apsara — 开了 CCM 就必须有 SLB 端点"
       ansible.builtin.assert:
         that: (cloud_env.ENDPOINT_SLB | default('')) | length > 0
