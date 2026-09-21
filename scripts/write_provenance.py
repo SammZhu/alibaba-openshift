@@ -41,11 +41,30 @@ $GITHUB_REF_NAME or main). Without it, only the file is written (for testing).
 import argparse
 import datetime
 import os
+import socket
 import re
 import subprocess
 import sys
 
 SED = r"'s/ignition\.platform\.id=[a-z0-9]*/ignition.platform.id=aliyun/g'"
+
+
+
+def baked_by():
+    """谁烤的 —— 问环境,不要写死。
+
+    这个字段以前是常量 "github-actions/rhcos-aliyun-bootimage"。2026-09-20 ste2
+    上 site-apsara.yml 的 phase 10 手工烤出一份条目,文件却照样声称自己是流水线
+    烤的。provenance 存在的全部意义是来源可信,而它对**自己的**来源说了假话。
+
+    没有任何代码读这个字段,所以它错了也不会有人被绊倒 —— 这正是它能一直错下去
+    的原因。
+    """
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        wf = os.environ.get("GITHUB_WORKFLOW") or "rhcos-aliyun-bootimage"
+        return f"github-actions/{wf}"
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or "unknown"
+    return f"manual/{user}@{socket.gethostname()}"
 
 
 def main(argv=None):
@@ -70,6 +89,11 @@ def main(argv=None):
     ap.add_argument("--provenance-dir", required=True)
     ap.add_argument("--guestfish", default="unknown")
     ap.add_argument("--qemu-img", default="unknown")
+    # libguestfs 的后端一直是 direct;真正会变的是 settings。用 KVM 烤和用 TCG
+    # (纯软件模拟)烤是两条差别很大的路径 —— 2026-09-20 ste2 上 KVM appliance
+    # 90 秒起不来,整轮落到 force_tcg。以前两者在 provenance 里长得一模一样。
+    ap.add_argument("--libguestfs-settings", default="",
+                    help="LIBGUESTFS_BACKEND_SETTINGS actually used (e.g. force_tcg)")
     ap.add_argument("--commit", action="store_true")
     args = ap.parse_args(argv)
 
@@ -115,13 +139,15 @@ def main(argv=None):
         f'  guestfish: "{args.guestfish}"',
         f'  qemu-img: "{args.qemu_img}"',
         "  libguestfsBackend: direct",
+        *([f'  libguestfsBackendSettings: "{args.libguestfs_settings}"']
+          if args.libguestfs_settings else []),
         "kargsBaseline:",
         *[f"  - {k}" for k in baseline],
         "result:",
         "  gate: passed",
         "  bootSmoke: pending",
         f'  bakedAt: "{now}"',
-        '  bakedBy: "github-actions/rhcos-aliyun-bootimage"',
+        f'  bakedBy: "{baked_by()}"',
     ]
     os.makedirs(args.provenance_dir, exist_ok=True)
     with open(out, "w") as f:
