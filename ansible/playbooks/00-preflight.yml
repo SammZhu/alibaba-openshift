@@ -250,8 +250,6 @@
           - ls
           - "oss://{{ oss_bucket }}/"
           - "--endpoint={{ _oss_endpoint }}"
-          - "--access-key-id={{ _ak }}"
-          - "--access-key-secret={{ _sk }}"
         rc_argv: "{{ oss_cli_argv + _oss_rest }}"
 
     - name: Ensure output directory exists

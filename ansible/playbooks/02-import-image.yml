@@ -44,8 +44,6 @@
           - ls
           - "oss://{{ oss_bucket }}/"
           - "--endpoint={{ _oss_endpoint }}"
-          - "--access-key-id={{ _oss_ak }}"
-          - "--access-key-secret={{ _oss_sk }}"
       register: bucket_check
       changed_when: false
       failed_when: false
@@ -59,8 +57,6 @@
           - mb
           - "oss://{{ oss_bucket }}"
           - "--endpoint={{ _oss_endpoint }}"
-          - "--access-key-id={{ _oss_ak }}"
-          - "--access-key-secret={{ _oss_sk }}"
       when: bucket_check.rc != 0
       no_log: true
 
@@ -73,8 +69,6 @@
           - stat
           - "oss://{{ oss_bucket }}/{{ oss_object }}"
           - "--endpoint={{ _oss_endpoint }}"
-          - "--access-key-id={{ _oss_ak }}"
-          - "--access-key-secret={{ _oss_sk }}"
       register: oss_stat
       changed_when: false
       failed_when: false
@@ -103,8 +97,6 @@
           - "{{ iso_path }}"
           - "oss://{{ oss_bucket }}/{{ oss_object }}"
           - "--endpoint={{ _oss_endpoint }}"
-          - "--access-key-id={{ _oss_ak }}"
-          - "--access-key-secret={{ _oss_sk }}"
           - -f
         rc_argv: "{{ oss_cli_argv + _oss_rest }}"
       when: oss_stat.rc != 0 or (_remote_size | default(0) | int) != iso_stat.stat.size
@@ -311,8 +303,6 @@
           - rm
           - "oss://{{ oss_bucket }}/{{ oss_object }}"
           - "--endpoint={{ _oss_endpoint }}"
-          - "--access-key-id={{ _oss_ak }}"
-          - "--access-key-secret={{ _oss_sk }}"
           - -f
       register: oss_rm
       changed_when: oss_rm.rc == 0
