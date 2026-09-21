@@ -56,7 +56,7 @@ free)". It asserts:
 100% proof still needs the low-frequency **boot smoke** (launch one ECS, confirm
 ignition runs as `aliyun` + kubelet joins) before a version is blessed.
 
-### Why `bootSmoke` is still `pending` everywhere
+### Why `bootSmoke` is `pending` on the CI-baked entries
 
 Not because the smoke never happens — it happens on every install.  Phase 10
 re-stamps the image, phase 12 boots CAPA workers from it, and they join Ready.
@@ -135,6 +135,17 @@ So a deployed version now ends up in `bootimage/provenance/` with
 `gate: passed`, and **once phase 12's workers reach Ready that is its boot
 smoke** — set `bootSmoke: passed` in that file and commit.  There is finally
 something to record it on.
+
+**The first entry to carry it is `9.8.20260715-1`** (2026-09-20, the first clean
+end-to-end 4.22.12 run).  What makes it a claim rather than a hope is that both
+halves name the same image in the same run:
+
+    phase 10:  worker_boot_image_id = m-x4s00xm92kstt8lukxwe
+    phase 12:  image=m-x4s00xm92kstt8lukxwe   -> B2 PASS, 2 workers Ready
+
+Flipping the field is still a person's job, and it should stay that way until
+something checks that link automatically — otherwise `passed` would only mean
+"phase 12 finished", which is not the same claim.
 
 CI keeps baking the branch head, which is what makes it an early warning for a
 new RHCOS; the deploy path covers what is actually deployed.  Neither replaces

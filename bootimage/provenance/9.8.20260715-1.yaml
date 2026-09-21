@@ -35,6 +35,11 @@ kargsBaseline:
   - rw
 result:
   gate: passed
-  bootSmoke: pending
+  # 2026-09-20 的全链跑里,这张镜像真的启动了加入集群的 worker —— 这正是 phase 10
+  # 自己给 boot smoke 下的定义(「phase 12 的 worker 到 Ready,那就是这个版本的
+  # boot smoke」)。证据是同一次运行(p=2927767)里两处 image id 直接对上:
+  #   phase 10:  worker_boot_image_id = m-x4s00xm92kstt8lukxwe
+  #   phase 12:  image=m-x4s00xm92kstt8lukxwe   → B2 PASS,2 台 worker Ready
+  bootSmoke: passed
   bakedAt: "2026-09-20T01:45:57Z"
   bakedBy: "manual/root@iZx4s00tru0z7t6om1pmt0Z"
