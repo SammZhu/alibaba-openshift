@@ -674,8 +674,6 @@
       - "{{ install_dir }}/agent.x86_64.iso"
       - "oss://{{ oss_bucket }}/{{ oss_object }}"
       - "--endpoint={{ _oss_pub_endpoint }}"
-      - "--access-key-id={{ _ak }}"
-      - "--access-key-secret={{ _sk }}"
       - -f
     rc_argv: "{{ oss_cli_argv + _oss_rest }}"
   no_log: true

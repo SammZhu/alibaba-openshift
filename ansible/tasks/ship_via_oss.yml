@@ -45,8 +45,6 @@
       - "{{ ship_local }}"
       - "oss://{{ oss_bucket }}/{{ _ship_key }}"
       - -f
-      - "--access-key-id={{ _ship_ak }}"
-      - "--access-key-secret={{ _ship_sk }}"
       - "--region={{ region }}"
       - "--endpoint={{ _ship_pub_endpoint }}"
     rc_argv: "{{ oss_cli_argv + _oss_rest }}"
@@ -84,8 +82,6 @@
       - rm
       - "oss://{{ oss_bucket }}/{{ _ship_key }}"
       - -f
-      - "--access-key-id={{ _ship_ak }}"
-      - "--access-key-secret={{ _ship_sk }}"
       - "--region={{ region }}"
       - "--endpoint={{ _ship_pub_endpoint }}"
   changed_when: true

@@ -44,8 +44,6 @@
       - stat
       - "oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-{{ _mirror_registry_version }}.tar.gz"
       - "--endpoint={{ _oss_endpoint }}"
-      - "--access-key-id={{ _oss_ak }}"
-      - "--access-key-secret={{ _oss_sk }}"
   register: _mr_oss_stat
   changed_when: false
   failed_when: false
@@ -71,8 +69,6 @@
       - "/tmp/mirror-registry-{{ _mirror_registry_version }}.tar.gz"
       - "oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-{{ _mirror_registry_version }}.tar.gz"
       - "--endpoint={{ _oss_endpoint }}"
-      - "--access-key-id={{ _oss_ak }}"
-      - "--access-key-secret={{ _oss_sk }}"
       - "--part-size=104857600"
       - "--parallel=10"
       - "--force"
@@ -94,8 +90,6 @@
       - "/tmp/mirror-registry-version.txt"
       - "oss://{{ oss_bucket }}/mirror-tarballs/mirror-registry-version.txt"
       - "--endpoint={{ _oss_endpoint }}"
-      - "--access-key-id={{ _oss_ak }}"
-      - "--access-key-secret={{ _oss_sk }}"
       - "--force"
     rc_argv: "{{ oss_cli_argv + _oss_rest }}"
 
@@ -159,8 +153,6 @@
       - "/tmp/openshift-patch-version.txt"
       - "oss://{{ oss_bucket }}/mirror-tarballs/openshift-patch-version.txt"
       - "--endpoint={{ _oss_endpoint }}"
-      - "--access-key-id={{ _oss_ak }}"
-      - "--access-key-secret={{ _oss_sk }}"
       - "--force"
     rc_argv: "{{ oss_cli_argv + _oss_rest }}"
 

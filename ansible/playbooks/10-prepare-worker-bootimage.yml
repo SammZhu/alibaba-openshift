@@ -180,9 +180,7 @@
             argv: "{{ oss_cli_argv + _a }}"
           vars:
             _a: [ls, "oss://{{ oss_bucket }}/{{ _qcow_src_object }}",
-                 "--endpoint={{ _oss_endpoint }}",
-                 "--access-key-id={{ _ak }}",
-                 "--access-key-secret={{ _sk }}"]
+                 "--endpoint={{ _oss_endpoint }}"]
           register: _qcow_oss_ls
           changed_when: false
           failed_when: false
@@ -200,8 +198,7 @@
           vars:
             _a: [cp, "oss://{{ oss_bucket }}/{{ _qcow_src_object }}", "{{ qcow_gz }}",
                  "--endpoint={{ _oss_endpoint }}",
-                 "--access-key-id={{ _ak }}",
-                 "--access-key-secret={{ _sk }}", --force]
+                 --force]
           register: _qcow_oss_dl
           retries: 3
           delay: 15
@@ -246,8 +243,7 @@
           vars:
             _a: [cp, "{{ qcow_gz }}", "oss://{{ oss_bucket }}/{{ _qcow_src_object }}",
                  "--endpoint={{ _oss_endpoint }}",
-                 "--access-key-id={{ _ak }}",
-                 "--access-key-secret={{ _sk }}", --force]
+                 --force]
           no_log: true
           changed_when: true
           when:
@@ -481,8 +477,7 @@
           vars:
             _a: [cp, "{{ qcow }}", "oss://{{ oss_bucket }}/{{ oss_object }}",
                  "--endpoint={{ _oss_endpoint }}",
-                 "--access-key-id={{ _ak }}",
-                 "--access-key-secret={{ _sk }}", --force]
+                 --force]
           no_log: true
           changed_when: true
           when: not (skip_upload_until_gate | bool)
@@ -565,8 +560,7 @@
           vars:
             _a: [rm, "oss://{{ oss_bucket }}/{{ oss_object }}",
                  "--endpoint={{ _oss_endpoint }}",
-                 "--access-key-id={{ _ak }}",
-                 "--access-key-secret={{ _sk }}", --force]
+                 --force]
           no_log: true
           changed_when: true
           when: not (skip_upload_until_gate | bool)
