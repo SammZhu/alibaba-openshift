@@ -668,6 +668,12 @@
           - "{{ work_dir }}/kargs.baseline"
           - --provenance-dir
           - "{{ playbook_dir }}/../../bootimage/provenance"
+          # 这一轮实际用的后端设置。后端本身一直是 direct;变的是要不要 force_tcg,
+          # 而那是两条差别很大的路径(KVM vs 纯软件模拟)。以前两者写出来的
+          # provenance 一模一样 —— 2026-09-20 ste2 上 KVM appliance 90 秒没起来、
+          # 整轮落到 TCG,文件里看不出任何痕迹。
+          - --libguestfs-settings
+          - "{{ (_bi_guestfs_env | default({})).LIBGUESTFS_BACKEND_SETTINGS | default('') }}"
       changed_when: true
       when:
         - not (skip_upload_until_gate | bool)

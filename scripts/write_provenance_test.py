@@ -105,6 +105,47 @@ with tempfile.TemporaryDirectory() as t:
         check("报错点名 --ocp", "--ocp" in str(e), str(e))
 
 print()
+print("bakedBy 问环境,不写死")
+with tempfile.TemporaryDirectory() as t:
+    saved = {k: os.environ.get(k) for k in ("GITHUB_ACTIONS", "GITHUB_WORKFLOW", "USER")}
+    try:
+        os.environ["GITHUB_ACTIONS"] = "true"
+        os.environ["GITHUB_WORKFLOW"] = "rhcos-aliyun-bootimage"
+        rc, out = run(t, "--ref-kind", "branch-head")
+        check("CI 里写成 github-actions/<workflow>",
+              'bakedBy: "github-actions/rhcos-aliyun-bootimage"' in out, out[-120:])
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+with tempfile.TemporaryDirectory() as t:
+    saved = os.environ.pop("GITHUB_ACTIONS", None)
+    os.environ["USER"] = "someuser"
+    try:
+        rc, out = run(t, "--ref-kind", "payload")
+        # 这是整条改动的要害:手工烤出来的条目,不许自称是流水线烤的
+        check("手工跑时不再自称 github-actions",
+              "github-actions" not in out, out[-120:])
+        check("写成 manual/<user>@<host>",
+              'bakedBy: "manual/someuser@' in out, out[-120:])
+    finally:
+        if saved is not None:
+            os.environ["GITHUB_ACTIONS"] = saved
+
+print()
+print("libguestfs 的后端设置:给了才写,没给不留空值")
+with tempfile.TemporaryDirectory() as t:
+    rc, out = run(t, "--ref-kind", "payload", "--libguestfs-settings", "force_tcg")
+    check("给了就写进去", 'libguestfsBackendSettings: "force_tcg"' in out, out[-200:])
+    check("后端本身仍是 direct(它没变,别去改它)", "libguestfsBackend: direct" in out)
+with tempfile.TemporaryDirectory() as t:
+    rc, out = run(t, "--ref-kind", "payload")
+    check("没给就一个字段都不写", "libguestfsBackendSettings" not in out)
+
+print()
 if failures:
     print(f"FAILED: {len(failures)} 项 —— {failures}")
     sys.exit(1)
