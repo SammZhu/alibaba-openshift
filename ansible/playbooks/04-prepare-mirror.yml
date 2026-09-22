@@ -482,12 +482,10 @@
     # after this task so failure is actionable.
     - name: Get expected tarball size from OSS
       ansible.builtin.shell: |
-        # env-first: apsara sets AK/SK via cloud_env; public falls back to the aliyun CLI config.
-        AK="${AK:-$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_id' ~/.aliyun/config.json)}"
-        SK="${SK:-$(jq -r '.profiles[] | select(.name=="{{ aliyun_profile }}") | .access_key_secret' ~/.aliyun/config.json)}"
+        # No credentials on the command line.  apsara-oss reads AK/SK from the
+        # environment (cloud_env); `aliyun oss` reads the CLI config.
         {{ oss_cli }} stat "oss://{{ oss_bucket }}/{{ mirror_oss_object }}" \
           --endpoint="{{ _oss_pub_endpoint }}" \
-          --access-key-id="$AK" --access-key-secret="$SK" \
           | awk -F': *' '/Content-Length/ {print $2}'
       register: oss_size
       changed_when: false

@@ -257,16 +257,17 @@
         - name: Prune stale RHCOS raw-qcow versions in OSS (keep only current)
           ansible.builtin.shell: |
             set -uo pipefail
-            AKID="{{ _ak }}"; AKSEC="{{ _sk }}"
+            # No credentials on the command line: apsara-oss reads AK/SK from
+            # the environment (cloud_env).
             B="{{ oss_bucket }}"; EP="{{ _oss_endpoint }}"; CUR="{{ _qcow_src_object }}"
             {{ oss_cli }} ls "oss://$B/mirror-tarballs/" \
-              --access-key-id="$AKID" --access-key-secret="$AKSEC" --region="{{ region }}" --endpoint="$EP" \
+              --region="{{ region }}" --endpoint="$EP" \
               | grep -oE "oss://$B/mirror-tarballs/rhcos-[^[:space:]]*openstack[^[:space:]]*\.qcow2\.gz" \
               | sort -u \
               | while read -r OBJ; do
                   KEY="${OBJ#oss://$B/}"
                   if [ "$KEY" != "$CUR" ]; then
-                    {{ oss_cli }} rm "$OBJ" --access-key-id="$AKID" --access-key-secret="$AKSEC" \
+                    {{ oss_cli }} rm "$OBJ" \
                       --region="{{ region }}" --endpoint="$EP" -f >/dev/null && echo "pruned stale qcow: $KEY"
                   fi
                 done
