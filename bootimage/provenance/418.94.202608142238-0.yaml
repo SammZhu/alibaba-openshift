@@ -2,7 +2,7 @@
 schemaVersion: 2
 ocpMinor: "4.18"
 rhcosVersion: "418.94.202608142238-0"
-latestZ: "4.18.54"
+latestZ: "4.18.55"
 latestZBuiltAt: "2026-08-21"
 source:
   kind: bootimage          # 不是 machine-os —— 见 scripts/write_provenance.py
