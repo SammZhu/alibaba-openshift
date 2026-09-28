@@ -154,9 +154,9 @@
         smoke_ram_role: "{{ mirror_node_ram_role }}"
         smoke_image: "{{ _smoke_img }}"
         smoke_cp_host: "{{ api_lb_endpoint }}"
-        smoke_ak: "{{ _ak }}"
-        smoke_sk: "{{ _sk }}"
-      no_log: true
+      # No no_log: the only secrets this task used to carry were smoke_ak /
+      # smoke_sk, and the RPC calls below now name the profile instead.  What
+      # is left is hosts, paths and ids — hiding them only hid failures.
 
 - name: CAPA behavioural smoke (executed on the jump host)
   hosts: jumphost
@@ -351,11 +351,11 @@
           ansible.builtin.shell: |
             IDS=$({{ cloud_cli }} ecs DescribeInstances --RegionId {{ smoke_region }} \
               --InstanceName 'smoke-*' --PageSize 50 \
-              --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' 2>/dev/null \
+              --profile '{{ aliyun_profile }}' 2>/dev/null \
               | jq -r '.Instances.Instance[]?.InstanceId')
             for i in $IDS; do
               {{ cloud_cli }} ecs DeleteInstance --InstanceId "$i" --Force true --RegionId {{ smoke_region }} \
-                --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' || true
+                --profile '{{ aliyun_profile }}' || true
             done
           delegate_to: local
           no_log: true
@@ -451,10 +451,8 @@
               - "true"
               - --RegionId
               - "{{ smoke_region }}"
-              - --access-key-id
-              - "{{ smoke_ak }}"
-              - --access-key-secret
-              - "{{ smoke_sk }}"
+              - --profile
+              - "{{ aliyun_profile }}"
           delegate_to: local
           register: _del27
           retries: 18
@@ -473,10 +471,8 @@
               - "{{ smoke_region }}"
               - --InstanceIds
               - '["{{ smoke_instance_id }}"]'
-              - --access-key-id
-              - "{{ smoke_ak }}"
-              - --access-key-secret
-              - "{{ smoke_sk }}"
+              - --profile
+              - "{{ aliyun_profile }}"
           delegate_to: local
           register: _ecs_gone
           retries: 24
@@ -552,10 +548,8 @@
               - "{{ smoke_region }}"
               - --InstanceIds
               - '["{{ _iid2.stdout | trim }}"]'
-              - --access-key-id
-              - "{{ smoke_ak }}"
-              - --access-key-secret
-              - "{{ smoke_sk }}"
+              - --profile
+              - "{{ aliyun_profile }}"
           delegate_to: local
           register: _run2
           retries: 30
@@ -602,11 +596,11 @@
           ansible.builtin.shell: |
             IDS=$({{ cloud_cli }} ecs DescribeInstances --RegionId {{ smoke_region }} \
               --InstanceName 'smoke-*' --PageSize 50 \
-              --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' 2>/dev/null \
+              --profile '{{ aliyun_profile }}' 2>/dev/null \
               | jq -r '.Instances.Instance[]?.InstanceId')
             for i in $IDS; do
               {{ cloud_cli }} ecs DeleteInstance --InstanceId "$i" --Force true --RegionId {{ smoke_region }} \
-                --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' || true
+                --profile '{{ aliyun_profile }}' || true
             done
           delegate_to: local
           no_log: true
@@ -623,11 +617,11 @@
           ansible.builtin.shell: |
             IDS=$({{ cloud_cli }} ecs DescribeInstances --RegionId {{ smoke_region }} \
               --InstanceName 'smoke-*' --PageSize 50 \
-              --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' 2>/dev/null \
+              --profile '{{ aliyun_profile }}' 2>/dev/null \
               | jq -r '.Instances.Instance[]?.InstanceId')
             for i in $IDS; do
               {{ cloud_cli }} ecs DeleteInstance --InstanceId "$i" --Force true --RegionId {{ smoke_region }} \
-                --access-key-id '{{ smoke_ak }}' --access-key-secret '{{ smoke_sk }}' || true
+                --profile '{{ aliyun_profile }}' || true
             done
           delegate_to: local
           no_log: true
