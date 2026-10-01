@@ -178,6 +178,9 @@ jobs:
       - name: Run ansible-lint
         run: ansible-lint -q ansible/
 
+      - name: Credential Secret stdin regression (offline, fake oc)
+        run: python3 scripts/credential_secrets_test.py
+
       - name: ROS template parameter contract
         run: python3 scripts/lint-ros-params.py
 
