@@ -322,7 +322,7 @@
         - name: Cleanup — sweep the Route B ECS (operator)
           ansible.builtin.shell: |
             {{ cloud_cli }} ecs DeleteInstance --InstanceId '{{ rb_instance_id | default("") }}' --Force true \
-              --RegionId {{ rb_region }} --access-key-id '{{ rb_ak }}' --access-key-secret '{{ rb_sk }}' || true
+              --RegionId {{ rb_region }} --profile '{{ aliyun_profile }}' || true
           delegate_to: local
           when: rb_instance_id is defined and rb_instance_id | length > 0
           no_log: true
