@@ -2,7 +2,7 @@
 schemaVersion: 2
 ocpMinor: "4.22"
 rhcosVersion: "10.2.20261026-0"
-latestZ: "4.22.20"
+latestZ: "4.22.22"
 latestZBuiltAt: "2026-10-25"
 source:
   kind: bootimage          # 不是 machine-os —— 见本文件生成脚本的模块注释
