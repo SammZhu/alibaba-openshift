@@ -118,13 +118,20 @@
       changed_when: true
 
     - name: Ensure alibaba-creds secret exists
-      ansible.builtin.shell: |
-        set -euo pipefail
-        export KUBECONFIG=/root/kubeconfig
-        oc -n capa-system create secret generic alibaba-creds \
-          --from-literal=ALIBABA_CLOUD_ACCESS_KEY_ID='{{ rb_ak }}' \
-          --from-literal=ALIBABA_CLOUD_ACCESS_KEY_SECRET='{{ rb_sk }}' \
-          --dry-run=client -o yaml | oc apply -f -
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, /root/kubeconfig, apply, -f, "-"]
+        stdin: >-
+          {{ {'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque',
+              'metadata': {'name': 'alibaba-creds', 'namespace': 'capa-system'},
+              'data': {'ALIBABA_CLOUD_ACCESS_KEY_ID': rb_ak | b64encode,
+                       'ALIBABA_CLOUD_ACCESS_KEY_SECRET': rb_sk | b64encode}
+             } | to_json }}
+      # Task environments merge with the play environment: {} does not clear it.
+      # This oc task needs no cloud credentials; blank every inherited cloud key
+      # so Ansible does not put those values in the remote shell invocation.
+      environment: >-
+        {{ dict((cloud_env | default({})).keys() |
+                zip([''] * (cloud_env | default({}) | length))) }}
       no_log: true
       changed_when: true
 

@@ -426,13 +426,19 @@
              if (cloud_platform | default('public')) == 'apsara' else {} }}
 
     - name: Create/update alibaba-creds secret for the CAPA controller (envFrom)
-      ansible.builtin.shell: |
-        oc --kubeconfig {{ kubeconfig_file }} create secret generic alibaba-creds \
-          -n capa-system \
-          --from-literal=ALIBABA_CLOUD_ACCESS_KEY_ID='{{ capa_ak }}' \
-          --from-literal=ALIBABA_CLOUD_ACCESS_KEY_SECRET='{{ capa_sk }}' \
-          {% for k, v in (_capa_apsara_env | dictsort) %}--from-literal={{ k }}='{{ v }}' \
-          {% endfor %}--dry-run=client -o yaml | oc --kubeconfig {{ kubeconfig_file }} apply -f -
+      # stdin is module data, not part of the remote shell or oc argv.
+      # Use data (as create secret did) so a repeat apply reports unchanged.
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+        stdin: >-
+          {{ {'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque',
+              'metadata': {'name': 'alibaba-creds', 'namespace': 'capa-system'},
+              'data': {
+                'ALIBABA_CLOUD_ACCESS_KEY_ID': capa_ak | b64encode,
+                'ALIBABA_CLOUD_ACCESS_KEY_SECRET': capa_sk | b64encode
+              } | combine(dict(_capa_apsara_env.keys() |
+                               zip(_capa_apsara_env.values() | map('b64encode'))))
+             } | to_json }}
       register: _capa_secret
       changed_when: "'configured' in _capa_secret.stdout or 'created' in _capa_secret.stdout"
       no_log: true
@@ -934,14 +940,14 @@
     # In a Secret rather than the CR: extraEnv accepts secretKeyRef precisely so
     # credentials do not sit in plain text in a cluster-scoped object.
     - name: "08 — credentials Secret for the CSI driver (apsara)"
-      ansible.builtin.shell: |
-        oc --kubeconfig {{ kubeconfig_file }} create secret generic alibaba-csi-creds \
-          -n kube-system \
-          --from-literal=access_key_id='{{ capa_ak }}' \
-          --from-literal=access_key_secret='{{ capa_sk }}' \
-          --dry-run=client -o yaml | oc --kubeconfig {{ kubeconfig_file }} apply -f -
-      args:
-        executable: /bin/bash
+      ansible.builtin.command:
+        argv: [oc, --kubeconfig, "{{ kubeconfig_file }}", apply, -f, "-"]
+        stdin: >-
+          {{ {'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque',
+              'metadata': {'name': 'alibaba-csi-creds', 'namespace': 'kube-system'},
+              'data': {'access_key_id': capa_ak | b64encode,
+                       'access_key_secret': capa_sk | b64encode}
+             } | to_json }}
       register: _csi_creds
       changed_when: "'configured' in _csi_creds.stdout or 'created' in _csi_creds.stdout"
       no_log: true
